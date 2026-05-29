@@ -304,6 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class StatusTitleView: NSView {
     private var topItems = ["5H", "Week", "MEM"]
     private var bottomItems = ["-", "-", "-"]
+    private let lowUsageColor = NSColor(calibratedRed: 1.0, green: 0.27, blue: 0.34, alpha: 1.0)
 
     override var isFlipped: Bool { true }
 
@@ -322,12 +323,14 @@ final class StatusTitleView: NSView {
 
         let columns = max(topItems.count, bottomItems.count, 1)
         let columnWidth = bounds.width / CGFloat(columns)
+        let topFont = NSFont.systemFont(ofSize: 10, weight: .regular)
+        let bottomFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
         let topAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+            .font: topFont,
             .foregroundColor: NSColor.labelColor
         ]
         let bottomAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+            .font: bottomFont,
             .foregroundColor: NSColor.labelColor
         ]
         let topY = max(0, floor((bounds.height - 24) / 2) - 1)
@@ -335,21 +338,33 @@ final class StatusTitleView: NSView {
 
         for index in 0..<columns {
             let x = CGFloat(index) * columnWidth
+            let itemColor = colorForColumn(at: index)
             drawCentered(
                 topItems.indices.contains(index) ? topItems[index] : "",
                 x: x,
                 y: topY,
                 width: columnWidth,
-                attributes: topAttributes
+                attributes: topAttributes.merging([.foregroundColor: itemColor]) { _, new in new }
             )
             drawCentered(
                 bottomItems.indices.contains(index) ? bottomItems[index] : "",
                 x: x,
                 y: bottomY,
                 width: columnWidth,
-                attributes: bottomAttributes
+                attributes: bottomAttributes.merging([.foregroundColor: itemColor]) { _, new in new }
             )
         }
+    }
+
+    private func colorForColumn(at index: Int) -> NSColor {
+        guard index < 2,
+              bottomItems.indices.contains(index),
+              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")),
+              percent < 15 else {
+            return .labelColor
+        }
+
+        return lowUsageColor
     }
 
     private func drawCentered(
