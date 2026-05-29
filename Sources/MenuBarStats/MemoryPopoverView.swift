@@ -55,11 +55,11 @@ struct MemoryPopoverView: View {
 }
 
 enum StatsPanel: String, CaseIterable, Identifiable {
+    case llmUsage = "LLM"
     case memory = "Memory"
     case sensors = "Sensors"
     case cpuGPU = "CPU/GPU"
     case network = "Network"
-    case llmUsage = "LLM"
 
     var id: String { rawValue }
 }
@@ -362,10 +362,17 @@ struct LLMLocalUsageCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("LOCAL DRAWDOWN")
-                .sectionTitle()
+            HStack(alignment: .firstTextBaseline) {
+                Text("LOCAL DRAWDOWN")
+                    .sectionTitle()
+                Spacer()
+                Text("(\(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt)))")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.52))
+                    .monospacedDigit()
+            }
 
-            LLMQuotaHistoryGraph(samples: quotaHistory)
+            LLMQuotaHistoryGraph(samples: effectiveQuotaHistory)
 
             if !snapshot.localWindows.isEmpty {
                 DisclosureGroup(isExpanded: $localWindowsExpanded) {
@@ -395,6 +402,24 @@ struct LLMLocalUsageCard: View {
 
     private var maxTokens: UInt64 {
         max(snapshot.localWindows.map(\.tokens).max() ?? 0, 1)
+    }
+
+    private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
+        if !quotaHistory.isEmpty {
+            return quotaHistory
+        }
+
+        guard let limit = snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first else {
+            return []
+        }
+
+        return [
+            LLMQuotaHistorySample(
+                sampledAt: snapshot.lastUpdated ?? Date(),
+                primaryRemainingPercent: limit.primary?.remainingPercent,
+                weeklyRemainingPercent: limit.secondary?.remainingPercent
+            )
+        ]
     }
 }
 
@@ -437,6 +462,9 @@ struct LLMQuotaHistoryGraph: View {
 
                     latestBadge(for: \.primaryRemainingPercent, color: .accentBlue, in: chartRect)
                     latestBadge(for: \.weeklyRemainingPercent, color: .compressedYellow, in: chartRect)
+
+                    sampleDots(for: \.primaryRemainingPercent, color: .accentBlue, in: chartRect)
+                    sampleDots(for: \.weeklyRemainingPercent, color: .compressedYellow, in: chartRect)
                 }
             }
             .frame(height: 88)
@@ -466,6 +494,20 @@ struct LLMQuotaHistoryGraph: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                     .position(x: rect.maxX + 19, y: yPosition(for: remaining, in: rect))
             }
+        }
+    }
+
+    private func sampleDots(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, in rect: CGRect) -> some View {
+        ForEach(samples.compactMap { sample -> LLMQuotaPlotPoint? in
+            guard let remaining = sample[keyPath: keyPath] else { return nil }
+            return LLMQuotaPlotPoint(sampledAt: sample.sampledAt, remainingPercent: remaining)
+        }) { point in
+            Circle()
+                .fill(color)
+                .overlay(Circle().stroke(Color.background, lineWidth: 1))
+                .frame(width: 6, height: 6)
+                .position(pointPosition(for: point, in: rect))
+                .help("\(point.remainingPercent)% left at \(absoluteTime(point.sampledAt))")
         }
     }
 
@@ -504,6 +546,24 @@ struct LLMQuotaHistoryGraph: View {
     private func yPosition(for percent: Int, in rect: CGRect) -> CGFloat {
         rect.minY + rect.height * CGFloat(1 - Double(min(max(percent, 0), 100)) / 100)
     }
+
+    private func pointPosition(for point: LLMQuotaPlotPoint, in rect: CGRect) -> CGPoint {
+        let datedSamples = samples.map(\.sampledAt)
+        let start = datedSamples.first ?? point.sampledAt
+        let end = datedSamples.last ?? start
+        let duration = max(end.timeIntervalSince(start), 1)
+        let x = samples.count == 1
+            ? rect.maxX
+            : rect.minX + CGFloat(point.sampledAt.timeIntervalSince(start) / duration) * rect.width
+        let y = yPosition(for: point.remainingPercent, in: rect)
+        return CGPoint(x: x, y: y)
+    }
+}
+
+struct LLMQuotaPlotPoint: Identifiable {
+    var id: String { "\(sampledAt.timeIntervalSince1970)-\(remainingPercent)" }
+    let sampledAt: Date
+    let remainingPercent: Int
 }
 
 struct LLMLocalUsageWindowRow: View {
@@ -545,12 +605,11 @@ struct LLMAdvancedUsageCard: View {
     let snapshot: LLMUsageSnapshot
     @Binding var isExpanded: Bool
     @State private var sessionMode = LLMTokenUserMode.recent
+    @State private var detailExpanded = false
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 8) {
-                LLMAvailableDetailView(snapshot: snapshot)
-
                 HStack {
                     Text("TOP TOKEN USERS")
                         .sectionTitle()
@@ -568,6 +627,23 @@ struct LLMAdvancedUsageCard: View {
                         LLMSessionRow(session: session)
                     }
                 }
+
+                DisclosureGroup(isExpanded: $detailExpanded) {
+                    LLMAvailableDetailView(snapshot: snapshot)
+                        .padding(.top, 4)
+                } label: {
+                    HStack {
+                        Text("AVAILABLE DETAIL")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.62))
+                        Spacer()
+                        Text("\(snapshot.limits.count) limit groups")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.62))
+                            .monospacedDigit()
+                    }
+                }
+                .accentColor(.accentBlue)
             }
             .padding(.top, 6)
         } label: {
@@ -633,8 +709,6 @@ struct LLMAvailableDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("AVAILABLE DETAIL")
-                .sectionTitle()
             availableRow("Live limits", "\(snapshot.limits.count) limit groups")
             availableRow("Local windows", snapshot.localWindows.map(\.label).joined(separator: ", "))
             availableRow("Session totals", "Title, model, project, tokens")
@@ -669,7 +743,7 @@ struct LLMSessionRow: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
                 Spacer()
-                Text(tokenCount(session.tokens))
+                Text(tokenCount(displayTokens))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .monospacedDigit()
@@ -679,6 +753,11 @@ struct LLMSessionRow: View {
                 Text(session.detail)
                     .lineLimit(1)
                 Spacer()
+                if let cacheLabel {
+                    Text(cacheLabel)
+                        .foregroundStyle(Color.compressedYellow.opacity(0.78))
+                        .monospacedDigit()
+                }
                 Text(relativeTime(session.updatedAt))
                     .monospacedDigit()
             }
@@ -690,6 +769,9 @@ struct LLMSessionRow: View {
                     LLMSessionDetailRow(label: "Project", value: session.projectName)
                     LLMSessionDetailRow(label: "Model", value: session.modelName)
                     LLMSessionDetailRow(label: "Tokens", value: tokenCount(session.tokens))
+                    if let tokenUsage = session.tokenUsage {
+                        LLMSessionTokenUsageView(usage: tokenUsage)
+                    }
                     LLMSessionDetailRow(label: "Updated", value: session.updatedAt.map { absoluteTime($0) } ?? "-")
                     LLMSessionDetailRow(label: "Session", value: session.id)
                     HStack(spacing: 12) {
@@ -736,6 +818,18 @@ struct LLMSessionRow: View {
         }
     }
 
+    private var displayTokens: UInt64 {
+        guard let totalTokens = session.tokenUsage?.totalTokens, totalTokens > 0 else {
+            return session.tokens
+        }
+        return totalTokens
+    }
+
+    private var cacheLabel: String? {
+        guard let usage = session.tokenUsage, usage.inputTokens > 0 else { return nil }
+        return "\(usage.cacheHitPercent)% cached"
+    }
+
     private func openSessionContext() {
         let path = session.rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else { return }
@@ -750,6 +844,48 @@ struct LLMSessionRow: View {
 
         let fileURL = URL(fileURLWithPath: path)
         NSWorkspace.shared.open(fileURL.deletingLastPathComponent())
+    }
+}
+
+struct LLMSessionTokenUsageView: View {
+    let usage: LLMTokenUsageSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            LLMSessionMetricRow(label: "Cache hit", value: "\(usage.cacheHitPercent)% of input")
+            LLMSessionMetricRow(label: "Cached input", value: tokenCount(usage.cachedInputTokens))
+            LLMSessionMetricRow(label: "Fresh input", value: tokenCount(usage.nonCachedInputTokens))
+            LLMSessionMetricRow(label: "Output", value: tokenCount(usage.outputTokens))
+            if usage.reasoningOutputTokens > 0 {
+                LLMSessionMetricRow(label: "Reasoning", value: tokenCount(usage.reasoningOutputTokens))
+            }
+            LLMSessionMetricRow(label: "Total", value: tokenCount(usage.totalTokens))
+            if usage.turnCount > 0 {
+                LLMSessionMetricRow(label: "Turns", value: "\(usage.turnCount)")
+            }
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(Color.background.opacity(0.32))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+}
+
+struct LLMSessionMetricRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.system(size: 10.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.5))
+            Spacer()
+            Text(value)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.74))
+                .monospacedDigit()
+        }
     }
 }
 
@@ -1838,6 +1974,16 @@ private func absoluteTime(_ value: Date) -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "MMM d, h:mm a"
     return formatter.string(from: value)
+}
+
+private func localDrawdownUpdatedAt(_ value: Date?) -> String {
+    guard let value else { return "not sampled" }
+    if abs(value.timeIntervalSinceNow) < 60 {
+        return "just now"
+    }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return formatter.localizedString(for: value, relativeTo: Date())
 }
 
 extension View {

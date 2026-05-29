@@ -163,6 +163,7 @@ struct LLMUsageSession: Identifiable, Equatable {
     var preview: String
     var rolloutPath: String
     var tokens: UInt64
+    var tokenUsage: LLMTokenUsageSummary?
     var updatedAt: Date?
 
     var detail: String {
@@ -170,7 +171,25 @@ struct LLMUsageSession: Identifiable, Equatable {
     }
 }
 
-struct LLMQuotaHistorySample: Identifiable, Equatable {
+struct LLMTokenUsageSummary: Equatable {
+    var inputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var outputTokens: UInt64
+    var reasoningOutputTokens: UInt64
+    var totalTokens: UInt64
+    var turnCount: Int
+
+    var nonCachedInputTokens: UInt64 {
+        inputTokens >= cachedInputTokens ? inputTokens - cachedInputTokens : 0
+    }
+
+    var cacheHitPercent: Int {
+        guard inputTokens > 0 else { return 0 }
+        return Int((Double(cachedInputTokens) / Double(inputTokens) * 100).rounded())
+    }
+}
+
+struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var id = UUID()
     var sampledAt: Date
     var primaryRemainingPercent: Int?
@@ -222,7 +241,10 @@ final class MemoryModel: ObservableObject {
     private var previousLLMQuotaSample: Date?
     private var isRefreshing = false
 
-    init() {}
+    init() {
+        llmQuotaHistory = Self.loadLLMQuotaHistory()
+        previousLLMQuotaSample = llmQuotaHistory.last?.sampledAt
+    }
 
     init(
         snapshot: MemorySnapshot,
@@ -385,6 +407,8 @@ final class MemoryModel: ObservableObject {
         if llmQuotaHistory.count > 144 {
             llmQuotaHistory.removeFirst(llmQuotaHistory.count - 144)
         }
+
+        saveLLMQuotaHistory()
     }
 
     private var llmQuotaSampleInterval: TimeInterval {
@@ -395,6 +419,42 @@ final class MemoryModel: ObservableObject {
             return 300
         }
         return 600
+    }
+
+    private static var llmQuotaHistoryURL: URL? {
+        guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return directory
+            .appendingPathComponent("MenuBarStats", isDirectory: true)
+            .appendingPathComponent("llm-quota-history.json")
+    }
+
+    private static func loadLLMQuotaHistory() -> [LLMQuotaHistorySample] {
+        guard let url = llmQuotaHistoryURL,
+              let data = try? Data(contentsOf: url),
+              let samples = try? JSONDecoder().decode([LLMQuotaHistorySample].self, from: data) else {
+            return []
+        }
+
+        return Array(samples.sorted { $0.sampledAt < $1.sampledAt }.suffix(144))
+    }
+
+    private func saveLLMQuotaHistory() {
+        guard let url = Self.llmQuotaHistoryURL,
+              let data = try? JSONEncoder().encode(llmQuotaHistory) else {
+            return
+        }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Persistence is best-effort; the live graph should keep working if this write fails.
+        }
     }
 }
 
@@ -498,6 +558,7 @@ extension LLMUsageSnapshot {
                 preview: "Added usage windows and advanced local session detail.",
                 rolloutPath: "",
                 tokens: 84_200_000,
+                tokenUsage: LLMTokenUsageSummary(inputTokens: 70_000_000, cachedInputTokens: 48_000_000, outputTokens: 10_000_000, reasoningOutputTokens: 4_200_000, totalTokens: 84_200_000, turnCount: 28),
                 updatedAt: Date().addingTimeInterval(-420)
             ),
             LLMUsageSession(
@@ -508,6 +569,7 @@ extension LLMUsageSnapshot {
                 preview: "Built native helper for thermal and fan data.",
                 rolloutPath: "",
                 tokens: 31_500_000,
+                tokenUsage: LLMTokenUsageSummary(inputTokens: 25_000_000, cachedInputTokens: 16_000_000, outputTokens: 4_500_000, reasoningOutputTokens: 2_000_000, totalTokens: 31_500_000, turnCount: 12),
                 updatedAt: Date().addingTimeInterval(-7_200)
             )
         ],
@@ -520,6 +582,7 @@ extension LLMUsageSnapshot {
                 preview: "Added usage windows and advanced local session detail.",
                 rolloutPath: "",
                 tokens: 84_200_000,
+                tokenUsage: LLMTokenUsageSummary(inputTokens: 70_000_000, cachedInputTokens: 48_000_000, outputTokens: 10_000_000, reasoningOutputTokens: 4_200_000, totalTokens: 84_200_000, turnCount: 28),
                 updatedAt: Date().addingTimeInterval(-420)
             ),
             LLMUsageSession(
@@ -530,6 +593,7 @@ extension LLMUsageSnapshot {
                 preview: "Compared CPU and GPU data with iStat style panels.",
                 rolloutPath: "",
                 tokens: 58_700_000,
+                tokenUsage: LLMTokenUsageSummary(inputTokens: 47_000_000, cachedInputTokens: 30_000_000, outputTokens: 7_400_000, reasoningOutputTokens: 4_300_000, totalTokens: 58_700_000, turnCount: 19),
                 updatedAt: Date().addingTimeInterval(-86_400)
             )
         ],
@@ -1633,9 +1697,80 @@ enum LLMUsageReader {
                 preview: preview,
                 rolloutPath: rolloutPath,
                 tokens: tokens,
+                tokenUsage: tokenUsageSummary(from: rolloutPath),
                 updatedAt: updatedAt
             )
         }
+    }
+
+    private static func tokenUsageSummary(from rolloutPath: String) -> LLMTokenUsageSummary? {
+        let path = rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty,
+              FileManager.default.fileExists(atPath: path),
+              let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return nil
+        }
+
+        var latestInputTokens: UInt64 = 0
+        var latestCachedInputTokens: UInt64 = 0
+        var latestOutputTokens: UInt64 = 0
+        var latestReasoningOutputTokens: UInt64 = 0
+        var latestTotalTokens: UInt64 = 0
+        var turnCount = 0
+        var foundUsage = false
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) where line.contains("\"token_count\"") {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let payload = object["payload"] as? [String: Any],
+                  payload["type"] as? String == "token_count",
+                  let info = payload["info"] as? [String: Any] else {
+                continue
+            }
+
+            if info["last_token_usage"] is [String: Any] {
+                turnCount += 1
+            }
+
+            let totalUsage = (info["total_token_usage"] as? [String: Any]) ?? info
+            latestInputTokens = tokenValue(totalUsage, "input_tokens")
+            latestCachedInputTokens = tokenValue(totalUsage, "cached_input_tokens")
+            latestOutputTokens = tokenValue(totalUsage, "output_tokens")
+            latestReasoningOutputTokens = tokenValue(totalUsage, "reasoning_output_tokens")
+            latestTotalTokens = tokenValue(totalUsage, "total_tokens")
+            foundUsage = true
+        }
+
+        guard foundUsage else { return nil }
+
+        if latestTotalTokens == 0 {
+            latestTotalTokens = latestInputTokens + latestOutputTokens + latestReasoningOutputTokens
+        }
+
+        return LLMTokenUsageSummary(
+            inputTokens: latestInputTokens,
+            cachedInputTokens: latestCachedInputTokens,
+            outputTokens: latestOutputTokens,
+            reasoningOutputTokens: latestReasoningOutputTokens,
+            totalTokens: latestTotalTokens,
+            turnCount: turnCount
+        )
+    }
+
+    private static func tokenValue(_ dictionary: [String: Any], _ key: String) -> UInt64 {
+        if let value = dictionary[key] as? UInt64 {
+            return value
+        }
+        if let value = dictionary[key] as? Int {
+            return UInt64(max(value, 0))
+        }
+        if let value = dictionary[key] as? Double {
+            return UInt64(max(value, 0))
+        }
+        if let value = dictionary[key] as? String {
+            return UInt64(value) ?? 0
+        }
+        return 0
     }
 
     private static func sqliteUInt64(databasePath: String, query: String) -> UInt64 {
