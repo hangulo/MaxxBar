@@ -158,10 +158,22 @@ struct LLMLocalUsageWindow: Identifiable, Equatable {
 struct LLMUsageSession: Identifiable, Equatable {
     var id: String
     var title: String
-    var detail: String
+    var projectName: String
+    var modelName: String
     var preview: String
     var tokens: UInt64
     var updatedAt: Date?
+
+    var detail: String {
+        "\(projectName) • \(modelName)"
+    }
+}
+
+struct LLMQuotaHistorySample: Identifiable, Equatable {
+    var id = UUID()
+    var sampledAt: Date
+    var primaryRemainingPercent: Int?
+    var weeklyRemainingPercent: Int?
 }
 
 struct LLMUsageSnapshot: Equatable {
@@ -175,6 +187,7 @@ struct LLMUsageSnapshot: Equatable {
     var localWeeklyThreads: Int
     var localWindows: [LLMLocalUsageWindow]
     var recentSessions: [LLMUsageSession]
+    var topWeeklySessions: [LLMUsageSession]
     var error: String?
 }
 
@@ -198,12 +211,14 @@ final class MemoryModel: ObservableObject {
     @Published private(set) var cpuGPU = CPUGPUSnapshot.empty
     @Published private(set) var network = NetworkSnapshot.empty
     @Published private(set) var llmUsage = LLMUsageSnapshot.empty
+    @Published private(set) var llmQuotaHistory: [LLMQuotaHistorySample] = []
     private var previousCumulativePageIns: UInt64?
     private var previousCumulativePageOuts: UInt64?
     private var previousCPUInfo: CPUReader.CPULoadInfo?
     private var previousNetworkCounters: NetworkReader.NetworkCounters?
     private var networkHistory: [NetworkSample] = []
     private var previousLLMUsageRefresh: Date?
+    private var previousLLMQuotaSample: Date?
     private var isRefreshing = false
 
     init() {}
@@ -212,12 +227,14 @@ final class MemoryModel: ObservableObject {
         snapshot: MemorySnapshot,
         history: [MemoryBreakdown],
         network: NetworkSnapshot = .demo,
-        llmUsage: LLMUsageSnapshot = .demo
+        llmUsage: LLMUsageSnapshot = .demo,
+        llmQuotaHistory: [LLMQuotaHistorySample] = .demo
     ) {
         self.snapshot = snapshot
         self.history = history
         self.network = network
         self.llmUsage = llmUsage
+        self.llmQuotaHistory = llmQuotaHistory
     }
 
     func refresh() {
@@ -238,6 +255,7 @@ final class MemoryModel: ObservableObject {
         network = networkResult.snapshot
         llmUsage = LLMUsageReader.read()
         previousLLMUsageRefresh = Date()
+        sampleLLMQuotaIfNeeded(force: true)
         history.append(stats.breakdown)
         if history.count > 60 {
             history.removeFirst(history.count - 60)
@@ -328,6 +346,7 @@ final class MemoryModel: ObservableObject {
         network = result.networkResult.snapshot
         llmUsage = result.llmUsage
         previousLLMUsageRefresh = result.llmUsageRefresh
+        sampleLLMQuotaIfNeeded()
         history.append(result.stats.breakdown)
         if history.count > 60 {
             history.removeFirst(history.count - 60)
@@ -342,6 +361,29 @@ final class MemoryModel: ObservableObject {
     nonisolated private static func deltaValue(from previous: UInt64?, to current: UInt64) -> UInt64 {
         guard let previous, current >= previous else { return 0 }
         return current - previous
+    }
+
+    private func sampleLLMQuotaIfNeeded(force: Bool = false) {
+        guard let limit = llmUsage.limits.first(where: { $0.name == "Codex" }) ?? llmUsage.limits.first else { return }
+        let now = Date()
+        if !force,
+           let previousLLMQuotaSample,
+           now.timeIntervalSince(previousLLMQuotaSample) < 600 {
+            return
+        }
+
+        llmQuotaHistory.append(
+            LLMQuotaHistorySample(
+                sampledAt: now,
+                primaryRemainingPercent: limit.primary?.remainingPercent,
+                weeklyRemainingPercent: limit.secondary?.remainingPercent
+            )
+        )
+        previousLLMQuotaSample = now
+
+        if llmQuotaHistory.count > 144 {
+            llmQuotaHistory.removeFirst(llmQuotaHistory.count - 144)
+        }
     }
 }
 
@@ -389,6 +431,16 @@ extension NetworkSnapshot {
     }
 }
 
+extension Array where Element == LLMQuotaHistorySample {
+    static let demo: [LLMQuotaHistorySample] = [
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_400), primaryRemainingPercent: 48, weeklyRemainingPercent: 84),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-1_800), primaryRemainingPercent: 46, weeklyRemainingPercent: 83),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-1_200), primaryRemainingPercent: 44, weeklyRemainingPercent: 82),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-600), primaryRemainingPercent: 42, weeklyRemainingPercent: 81),
+        LLMQuotaHistorySample(sampledAt: Date(), primaryRemainingPercent: 42, weeklyRemainingPercent: 81)
+    ]
+}
+
 extension LLMUsageSnapshot {
     static let empty = LLMUsageSnapshot(
         email: nil,
@@ -401,6 +453,7 @@ extension LLMUsageSnapshot {
         localWeeklyThreads: 0,
         localWindows: [],
         recentSessions: [],
+        topWeeklySessions: [],
         error: nil
     )
 
@@ -429,7 +482,8 @@ extension LLMUsageSnapshot {
             LLMUsageSession(
                 id: "demo-1",
                 title: "MenuBarStats LLM usage tab",
-                detail: "Menu bar stats • GPT-5 Codex",
+                projectName: "Menu bar stats",
+                modelName: "GPT-5 Codex",
                 preview: "Added usage windows and advanced local session detail.",
                 tokens: 84_200_000,
                 updatedAt: Date().addingTimeInterval(-420)
@@ -437,10 +491,31 @@ extension LLMUsageSnapshot {
             LLMUsageSession(
                 id: "demo-2",
                 title: "Sensor helper",
-                detail: "Menu bar stats • GPT-5 Codex",
+                projectName: "Menu bar stats",
+                modelName: "GPT-5 Codex",
                 preview: "Built native helper for thermal and fan data.",
                 tokens: 31_500_000,
                 updatedAt: Date().addingTimeInterval(-7_200)
+            )
+        ],
+        topWeeklySessions: [
+            LLMUsageSession(
+                id: "demo-1",
+                title: "MenuBarStats LLM usage tab",
+                projectName: "Menu bar stats",
+                modelName: "GPT-5 Codex",
+                preview: "Added usage windows and advanced local session detail.",
+                tokens: 84_200_000,
+                updatedAt: Date().addingTimeInterval(-420)
+            ),
+            LLMUsageSession(
+                id: "demo-3",
+                title: "CPU/GPU panel",
+                projectName: "Menu bar stats",
+                modelName: "GPT-5 Codex",
+                preview: "Compared CPU and GPU data with iStat style panels.",
+                tokens: 58_700_000,
+                updatedAt: Date().addingTimeInterval(-86_400)
             )
         ],
         error: nil
@@ -1275,6 +1350,7 @@ enum LLMUsageReader {
         let weeklyThreads: Int
         let windows: [LLMLocalUsageWindow]
         let recentSessions: [LLMUsageSession]
+        let topWeeklySessions: [LLMUsageSession]
     }
 
     private final class HTTPResultBox: @unchecked Sendable {
@@ -1349,6 +1425,7 @@ enum LLMUsageReader {
                 localWeeklyThreads: local.weeklyThreads,
                 localWindows: local.windows,
                 recentSessions: local.recentSessions,
+                topWeeklySessions: local.topWeeklySessions,
                 error: "Codex auth not found"
             )
         }
@@ -1394,6 +1471,7 @@ enum LLMUsageReader {
                 localWeeklyThreads: local.weeklyThreads,
                 localWindows: local.windows,
                 recentSessions: local.recentSessions,
+                topWeeklySessions: local.topWeeklySessions,
                 error: nil
             )
         } catch {
@@ -1459,7 +1537,7 @@ enum LLMUsageReader {
     private static func readLocalCodexUsage() -> LocalCodexUsage {
         let databasePath = "\(NSHomeDirectory())/.codex/state_5.sqlite"
         guard FileManager.default.fileExists(atPath: databasePath) else {
-            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], recentSessions: [])
+            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], recentSessions: [], topWeeklySessions: [])
         }
 
         let windows = [
@@ -1476,7 +1554,8 @@ enum LLMUsageReader {
             weeklyTokens: weekly.tokens,
             weeklyThreads: weekly.threads,
             windows: windows,
-            recentSessions: recentSessions(databasePath: databasePath)
+            recentSessions: sessions(databasePath: databasePath, mode: .recent),
+            topWeeklySessions: sessions(databasePath: databasePath, mode: .highestWeekly)
         )
     }
 
@@ -1494,7 +1573,18 @@ enum LLMUsageReader {
         )
     }
 
-    private static func recentSessions(databasePath: String) -> [LLMUsageSession] {
+    private enum SessionQueryMode {
+        case recent
+        case highestWeekly
+    }
+
+    private static func sessions(databasePath: String, mode: SessionQueryMode) -> [LLMUsageSession] {
+        let whereClause = mode == .highestWeekly
+            ? "where tokens_used > 0 and coalesce(updated_at_ms, updated_at * 1000) >= (strftime('%s','now')-7*24*3600)*1000"
+            : "where tokens_used > 0"
+        let orderClause = mode == .highestWeekly
+            ? "order by tokens_used desc, coalesce(updated_at_ms, updated_at * 1000) desc"
+            : "order by coalesce(updated_at_ms, updated_at * 1000) desc"
         let query = """
         select
             id,
@@ -1505,8 +1595,8 @@ enum LLMUsageReader {
             replace(replace(coalesce(nullif(cwd,''), ''), char(10), ' '), char(9), ' '),
             replace(replace(coalesce(nullif(preview,''), nullif(first_user_message,''), ''), char(10), ' '), char(9), ' ')
         from threads
-        where tokens_used > 0
-        order by coalesce(updated_at_ms, updated_at * 1000) desc
+        \(whereClause)
+        \(orderClause)
         limit 5;
         """
 
@@ -1520,9 +1610,10 @@ enum LLMUsageReader {
             let preview = compactText(row[6], fallback: "No prompt preview stored")
             return LLMUsageSession(
                 id: row[0],
-                title: trimmed(title, maxLength: 34),
-                detail: "\(project) • \(trimmed(model, maxLength: 24))",
-                preview: trimmed(preview, maxLength: 72),
+                title: title,
+                projectName: project,
+                modelName: model,
+                preview: preview,
                 tokens: tokens,
                 updatedAt: updatedAt
             )
@@ -1575,6 +1666,7 @@ enum LLMUsageReader {
             localWeeklyThreads: local.weeklyThreads,
             localWindows: local.windows,
             recentSessions: local.recentSessions,
+            topWeeklySessions: local.topWeeklySessions,
             error: error
         )
     }

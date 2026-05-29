@@ -5,17 +5,20 @@ struct MemoryPopoverView: View {
     @ObservedObject var model: MemoryModel
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
+    var fixedSize: Bool
     @State private var selectedPanel = StatsPanel.memory
 
     init(
         model: MemoryModel,
         onPopOut: (() -> Void)? = nil,
         onQuit: (() -> Void)? = nil,
-        selectedPanel: StatsPanel = .memory
+        selectedPanel: StatsPanel = .memory,
+        fixedSize: Bool = true
     ) {
         self.model = model
         self.onPopOut = onPopOut
         self.onQuit = onQuit
+        self.fixedSize = fixedSize
         _selectedPanel = State(initialValue: selectedPanel)
     }
 
@@ -33,11 +36,19 @@ struct MemoryPopoverView: View {
             case .network:
                 NetworkPanelView(snapshot: model.network, onPopOut: onPopOut, onQuit: onQuit)
             case .llmUsage:
-                LLMUsagePanelView(snapshot: model.llmUsage, onPopOut: onPopOut, onQuit: onQuit)
+                LLMUsagePanelView(snapshot: model.llmUsage, quotaHistory: model.llmQuotaHistory, onPopOut: onPopOut, onQuit: onQuit)
             }
         }
         .padding(8)
-        .frame(width: 306, height: 662, alignment: .top)
+        .frame(
+            minWidth: fixedSize ? 306 : 306,
+            idealWidth: 306,
+            maxWidth: fixedSize ? 306 : .infinity,
+            minHeight: fixedSize ? 662 : 662,
+            idealHeight: 662,
+            maxHeight: fixedSize ? 662 : .infinity,
+            alignment: .top
+        )
         .background(Color.background)
         .foregroundStyle(.white)
     }
@@ -207,9 +218,10 @@ struct NetworkPanelView: View {
 
 struct LLMUsagePanelView: View {
     let snapshot: LLMUsageSnapshot
+    let quotaHistory: [LLMQuotaHistorySample]
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
-    @State private var limitsExpanded = true
+    @State private var limitsExpanded = false
     @State private var advancedExpanded = true
 
     var body: some View {
@@ -229,7 +241,7 @@ struct LLMUsagePanelView: View {
                         LLMUsageLimitsDisclosureCard(limits: additionalLimits, isExpanded: $limitsExpanded)
                     }
 
-                    LLMLocalUsageCard(snapshot: snapshot)
+                    LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory)
                     LLMAdvancedUsageCard(snapshot: snapshot, isExpanded: $advancedExpanded)
                 }
             }
@@ -269,7 +281,7 @@ struct LLMUsageLimitsDisclosureCard: View {
             .padding(.top, 5)
         } label: {
             HStack {
-                Text("LIMITS")
+                Text("CHATGPT LIMITS")
                     .sectionTitle()
                 Spacer()
                 Text("\(limits.count)")
@@ -345,11 +357,14 @@ struct LLMUsageUnavailableCard: View {
 
 struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
+    let quotaHistory: [LLMQuotaHistorySample]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("LOCAL DRAWDOWN")
                 .sectionTitle()
+
+            LLMQuotaHistoryGraph(samples: quotaHistory)
 
             ForEach(snapshot.localWindows) { window in
                 LLMLocalUsageWindowRow(window: window, maxTokens: maxTokens)
@@ -366,6 +381,71 @@ struct LLMLocalUsageCard: View {
 
     private var maxTokens: UInt64 {
         max(snapshot.localWindows.map(\.tokens).max() ?? 0, 1)
+    }
+}
+
+struct LLMQuotaHistoryGraph: View {
+    let samples: [LLMQuotaHistorySample]
+
+    var body: some View {
+        VStack(spacing: 5) {
+            GeometryReader { proxy in
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.background.opacity(0.46))
+
+                    ForEach([25, 50, 75], id: \.self) { marker in
+                        Path { path in
+                            let y = proxy.size.height * CGFloat(1 - Double(marker) / 100)
+                            path.move(to: CGPoint(x: 0, y: y))
+                            path.addLine(to: CGPoint(x: proxy.size.width, y: y))
+                        }
+                        .stroke(Color.freeGray.opacity(0.18), lineWidth: 1)
+                    }
+
+                    linePath(for: \.primaryRemainingPercent, in: proxy.size)
+                        .stroke(Color.accentBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    linePath(for: \.weeklyRemainingPercent, in: proxy.size)
+                        .stroke(Color.compressedYellow, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                }
+            }
+            .frame(height: 64)
+
+            HStack(spacing: 10) {
+                LegendInline(color: .accentBlue, label: "5H", value: latestValue(\.primaryRemainingPercent))
+                LegendInline(color: .compressedYellow, label: "Week", value: latestValue(\.weeklyRemainingPercent))
+            }
+        }
+    }
+
+    private func latestValue(_ keyPath: KeyPath<LLMQuotaHistorySample, Int?>) -> String {
+        guard let value = samples.last?[keyPath: keyPath] else { return "-" }
+        return "\(value)%"
+    }
+
+    private func linePath(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, in size: CGSize) -> Path {
+        let values = samples.compactMap { sample -> (Date, Int)? in
+            guard let value = sample[keyPath: keyPath] else { return nil }
+            return (sample.sampledAt, value)
+        }
+        guard !values.isEmpty else { return Path() }
+
+        let start = values.first?.0 ?? Date()
+        let end = values.last?.0 ?? start
+        let duration = max(end.timeIntervalSince(start), 1)
+
+        return Path { path in
+            for (index, value) in values.enumerated() {
+                let x = CGFloat(value.0.timeIntervalSince(start) / duration) * size.width
+                let y = size.height * CGFloat(1 - Double(value.1) / 100)
+                let point = CGPoint(x: x, y: y)
+                if index == 0 {
+                    path.move(to: point)
+                } else {
+                    path.addLine(to: point)
+                }
+            }
+        }
     }
 }
 
@@ -407,22 +487,27 @@ struct LLMLocalUsageWindowRow: View {
 struct LLMAdvancedUsageCard: View {
     let snapshot: LLMUsageSnapshot
     @Binding var isExpanded: Bool
+    @State private var sessionMode = LLMTokenUserMode.recent
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 8) {
                 LLMAvailableDetailView(snapshot: snapshot)
 
-                Text("RECENT SESSIONS")
-                    .sectionTitle()
-                    .padding(.top, 2)
+                HStack {
+                    Text("TOP TOKEN USERS")
+                        .sectionTitle()
+                    Spacer()
+                    LLMSessionModeToggle(selection: $sessionMode)
+                }
+                .padding(.top, 2)
 
-                if snapshot.recentSessions.isEmpty {
+                if selectedSessions.isEmpty {
                     Text("No local session token detail found")
                         .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(.white.opacity(0.62))
                 } else {
-                    ForEach(snapshot.recentSessions) { session in
+                    ForEach(selectedSessions) { session in
                         LLMSessionRow(session: session)
                     }
                 }
@@ -441,6 +526,48 @@ struct LLMAdvancedUsageCard: View {
         }
         .accentColor(.accentBlue)
         .sectionStyle()
+    }
+
+    private var selectedSessions: [LLMUsageSession] {
+        switch sessionMode {
+        case .recent:
+            return snapshot.recentSessions
+        case .highest:
+            return snapshot.topWeeklySessions
+        }
+    }
+}
+
+enum LLMTokenUserMode: String, CaseIterable, Identifiable {
+    case recent = "Recent"
+    case highest = "Highest"
+
+    var id: String { rawValue }
+}
+
+struct LLMSessionModeToggle: View {
+    @Binding var selection: LLMTokenUserMode
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(LLMTokenUserMode.allCases) { mode in
+                Button {
+                    selection = mode
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(selection == mode ? .white : .white.opacity(0.55))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(selection == mode ? Color.panelLift : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(Color.background.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
@@ -475,6 +602,7 @@ struct LLMAvailableDetailView: View {
 
 struct LLMSessionRow: View {
     let session: LLMUsageSession
+    @State private var isExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -503,9 +631,45 @@ struct LLMSessionRow: View {
             Text(session.preview)
                 .font(.system(size: 11.5, weight: .regular))
                 .foregroundStyle(.white.opacity(0.66))
-                .lineLimit(2)
+                .lineLimit(isExpanded ? nil : 2)
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    LLMSessionDetailRow(label: "Project", value: session.projectName)
+                    LLMSessionDetailRow(label: "Model", value: session.modelName)
+                    LLMSessionDetailRow(label: "Tokens", value: tokenCount(session.tokens))
+                    LLMSessionDetailRow(label: "Updated", value: session.updatedAt.map { absoluteTime($0) } ?? "-")
+                    LLMSessionDetailRow(label: "Session", value: session.id)
+                }
+                .padding(.top, 4)
+            }
         }
         .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.14)) {
+                isExpanded.toggle()
+            }
+        }
+    }
+}
+
+struct LLMSessionDetailRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .top) {
+            Text(label)
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.white.opacity(0.48))
+                .frame(width: 48, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.white.opacity(0.72))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -1569,6 +1733,12 @@ private func relativeTime(_ value: Date?) -> String {
     let formatter = RelativeDateTimeFormatter()
     formatter.unitsStyle = .short
     return formatter.localizedString(for: value, relativeTo: Date())
+}
+
+private func absoluteTime(_ value: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM d, h:mm a"
+    return formatter.string(from: value)
 }
 
 extension View {

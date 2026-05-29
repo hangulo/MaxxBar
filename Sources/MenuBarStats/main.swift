@@ -276,7 +276,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: MemoryPopoverView(
                 model: model,
                 onQuit: { NSApp.terminate(nil) },
-                selectedPanel: .llmUsage
+                selectedPanel: .llmUsage,
+                fixedSize: false
             )
         )
         window.center()
