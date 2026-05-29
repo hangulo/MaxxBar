@@ -49,6 +49,13 @@ enum MenuBarStatsLauncher {
             print("networkUpload=\(ByteFormat.rate(network.uploadBytesPerSecond))")
             print("networkDownload=\(ByteFormat.rate(network.downloadBytesPerSecond))")
             print("networkIPs=\(network.ipAddresses.joined(separator: ","))")
+            let llmUsage = LLMUsageReader.read()
+            print("llmPlan=\(llmUsage.planType ?? "-")")
+            print("llmEmail=\(llmUsage.email ?? "-")")
+            print("llmLimits=\(llmUsage.limits.map { limit in "\(limit.name):\(limit.primary?.remainingPercent ?? -1)%/\(limit.secondary?.remainingPercent ?? -1)%" }.joined(separator: ","))")
+            print("llmLocalFiveHourTokens=\(llmUsage.localFiveHourTokens)")
+            print("llmLocalWeeklyTokens=\(llmUsage.localWeeklyTokens)")
+            print("llmError=\(llmUsage.error ?? "-")")
             let sensors = SensorReader.read()
             print("sensorCPUTemp=\(sensors.cpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
             print("sensorGPUTemp=\(sensors.gpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
@@ -89,6 +96,8 @@ extension StatsPanel {
             self = .cpuGPU
         case "network", "net":
             self = .network
+        case "llm", "usage", "llmusage", "llm-usage":
+            self = .llmUsage
         default:
             self = .memory
         }

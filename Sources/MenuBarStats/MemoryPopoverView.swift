@@ -32,6 +32,8 @@ struct MemoryPopoverView: View {
                 CPUGPUPanelView(snapshot: model.cpuGPU, onPopOut: onPopOut, onQuit: onQuit)
             case .network:
                 NetworkPanelView(snapshot: model.network, onPopOut: onPopOut, onQuit: onQuit)
+            case .llmUsage:
+                LLMUsagePanelView(snapshot: model.llmUsage, onPopOut: onPopOut, onQuit: onQuit)
             }
         }
         .padding(8)
@@ -46,6 +48,7 @@ enum StatsPanel: String, CaseIterable, Identifiable {
     case sensors = "Sensors"
     case cpuGPU = "CPU/GPU"
     case network = "Network"
+    case llmUsage = "LLM"
 
     var id: String { rawValue }
 }
@@ -199,6 +202,152 @@ struct NetworkPanelView: View {
             NetworkTotalsView(snapshot: snapshot)
             ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
+    }
+}
+
+struct LLMUsagePanelView: View {
+    let snapshot: LLMUsageSnapshot
+    var onPopOut: (() -> Void)?
+    var onQuit: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 7) {
+            LLMUsageSummaryCard(snapshot: snapshot)
+
+            ForEach(snapshot.limits.prefix(2)) { limit in
+                LLMUsageLimitCard(limit: limit)
+            }
+
+            MetricCard(
+                title: "LOCAL CODEX",
+                rows: [
+                    MetricRow(label: "5h tokens", value: tokenCount(snapshot.localFiveHourTokens)),
+                    MetricRow(label: "Weekly tokens", value: tokenCount(snapshot.localWeeklyTokens)),
+                    MetricRow(label: "Weekly threads", value: "\(snapshot.localWeeklyThreads)")
+                ]
+            )
+
+            MetricCard(title: "ACCOUNT", rows: accountRows)
+
+            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
+        }
+    }
+
+    private var accountRows: [MetricRow] {
+        var rows = [
+            MetricRow(label: "Plan", value: planName(snapshot.planType)),
+            MetricRow(label: "Credit", value: snapshot.creditsBalance ?? "-"),
+            MetricRow(label: "Updated", value: relativeTime(snapshot.lastUpdated))
+        ]
+        if let error = snapshot.error {
+            rows.append(MetricRow(label: "Status", value: error))
+        }
+        return rows
+    }
+}
+
+struct LLMUsageSummaryCard: View {
+    let snapshot: LLMUsageSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "gauge.with.dots.needle.33percent")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.accentBlue)
+                Text("USAGE REMAINING")
+                    .sectionTitle()
+                Spacer()
+                Text(planName(snapshot.planType))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+
+            if let limit = snapshot.limits.first {
+                LLMUsageWindowRow(window: limit.primary)
+                LLMUsageWindowRow(window: limit.secondary)
+            } else {
+                Text(snapshot.error ?? "Codex usage unavailable")
+                    .font(.system(size: 13.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+        }
+        .sectionStyle()
+    }
+}
+
+struct LLMUsageLimitCard: View {
+    let limit: LLMUsageLimit
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(limit.name.uppercased())
+                .sectionTitle()
+            LLMUsageProgress(window: limit.primary)
+            LLMUsageProgress(window: limit.secondary)
+        }
+        .sectionStyle()
+    }
+}
+
+struct LLMUsageWindowRow: View {
+    let window: LLMUsageWindow?
+
+    var body: some View {
+        HStack {
+            Text(window?.label ?? "-")
+                .font(.system(size: 15, weight: .regular))
+            Spacer()
+            Text(window.map { "\($0.remainingPercent)%" } ?? "-")
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.56))
+                .monospacedDigit()
+            Text(resetTime(window?.resetAt))
+                .font(.system(size: 13.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.56))
+                .monospacedDigit()
+                .frame(width: 58, alignment: .trailing)
+        }
+    }
+}
+
+struct LLMUsageProgress: View {
+    let window: LLMUsageWindow?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(window?.label ?? "-")
+                    .font(.system(size: 13.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.82))
+                Spacer()
+                Text(window.map { "\($0.remainingPercent)% left" } ?? "-")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .monospacedDigit()
+            }
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.freeGray.opacity(0.28))
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.accentBlue)
+                        .frame(width: proxy.size.width * usedRatio)
+                }
+            }
+            .frame(height: 8)
+            HStack {
+                Text(window.map { "Used \($0.usedPercent)%" } ?? "-")
+                Spacer()
+                Text(resetLabel(window?.resetAt))
+            }
+            .font(.system(size: 11, weight: .regular))
+            .foregroundStyle(.white.opacity(0.54))
+            .monospacedDigit()
+        }
+    }
+
+    private var usedRatio: CGFloat {
+        CGFloat(Double(window?.usedPercent ?? 0) / 100)
     }
 }
 
@@ -1154,6 +1303,50 @@ private func ghz(_ value: Double?) -> String {
 private func lux(_ value: Int?) -> String {
     guard let value else { return "-" }
     return "\(value.formatted()) Lux"
+}
+
+private func tokenCount(_ value: UInt64) -> String {
+    if value >= 1_000_000 {
+        return String(format: "%.1fM", Double(value) / 1_000_000)
+    }
+    if value >= 1_000 {
+        return String(format: "%.1fK", Double(value) / 1_000)
+    }
+    return "\(value)"
+}
+
+private func planName(_ value: String?) -> String {
+    guard let value, !value.isEmpty else { return "-" }
+    return value
+        .split(separator: "_")
+        .map { part in
+            part.prefix(1).uppercased() + part.dropFirst()
+        }
+        .joined(separator: " ")
+}
+
+private func resetTime(_ value: Date?) -> String {
+    guard let value else { return "-" }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "h:mm a"
+    return formatter.string(from: value)
+}
+
+private func resetLabel(_ value: Date?) -> String {
+    guard let value else { return "Reset unavailable" }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return "Resets \(formatter.localizedString(for: value, relativeTo: Date()))"
+}
+
+private func relativeTime(_ value: Date?) -> String {
+    guard let value else { return "-" }
+    if abs(value.timeIntervalSinceNow) < 60 {
+        return "Now"
+    }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return formatter.localizedString(for: value, relativeTo: Date())
 }
 
 extension View {

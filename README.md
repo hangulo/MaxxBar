@@ -10,6 +10,7 @@ A macOS menu bar stats app inspired by iStat Menus. The current focus is a fast,
 - CPU/GPU panel with user/system history, per-core efficiency/performance load rings, grouped CPU processes, load averages, and uptime.
 - Sensors panel with public battery/system input telemetry, temporary iStat history fallback, and a native helper cache path.
 - Network panel with interface throughput, IP address, and traffic history.
+- LLM usage panel with Codex account usage remaining and local Codex token totals.
 - Pop-out window mode and quit control.
 
 ## Known Limits

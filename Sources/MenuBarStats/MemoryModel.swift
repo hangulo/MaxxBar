@@ -133,6 +133,33 @@ struct NetworkSnapshot: Equatable {
     var processes: [NetworkProcess]
 }
 
+struct LLMUsageWindow: Equatable {
+    var label: String
+    var usedPercent: Int
+    var remainingPercent: Int
+    var resetAt: Date?
+    var windowSeconds: Int
+}
+
+struct LLMUsageLimit: Identifiable, Equatable {
+    var id: String { name }
+    var name: String
+    var primary: LLMUsageWindow?
+    var secondary: LLMUsageWindow?
+}
+
+struct LLMUsageSnapshot: Equatable {
+    var email: String?
+    var planType: String?
+    var limits: [LLMUsageLimit]
+    var creditsBalance: String?
+    var lastUpdated: Date?
+    var localFiveHourTokens: UInt64
+    var localWeeklyTokens: UInt64
+    var localWeeklyThreads: Int
+    var error: String?
+}
+
 @MainActor
 final class MemoryModel: ObservableObject {
     @Published private(set) var snapshot = MemorySnapshot(
@@ -152,19 +179,27 @@ final class MemoryModel: ObservableObject {
     @Published private(set) var sensors = SensorSnapshot.empty
     @Published private(set) var cpuGPU = CPUGPUSnapshot.empty
     @Published private(set) var network = NetworkSnapshot.empty
+    @Published private(set) var llmUsage = LLMUsageSnapshot.empty
     private var previousCumulativePageIns: UInt64?
     private var previousCumulativePageOuts: UInt64?
     private var previousCPUInfo: CPUReader.CPULoadInfo?
     private var previousNetworkCounters: NetworkReader.NetworkCounters?
     private var networkHistory: [NetworkSample] = []
+    private var previousLLMUsageRefresh: Date?
     private var isRefreshing = false
 
     init() {}
 
-    init(snapshot: MemorySnapshot, history: [MemoryBreakdown], network: NetworkSnapshot = .demo) {
+    init(
+        snapshot: MemorySnapshot,
+        history: [MemoryBreakdown],
+        network: NetworkSnapshot = .demo,
+        llmUsage: LLMUsageSnapshot = .demo
+    ) {
         self.snapshot = snapshot
         self.history = history
         self.network = network
+        self.llmUsage = llmUsage
     }
 
     func refresh() {
@@ -183,6 +218,8 @@ final class MemoryModel: ObservableObject {
         previousNetworkCounters = networkResult.counters
         networkHistory = networkResult.snapshot.history
         network = networkResult.snapshot
+        llmUsage = LLMUsageReader.read()
+        previousLLMUsageRefresh = Date()
         history.append(stats.breakdown)
         if history.count > 60 {
             history.removeFirst(history.count - 60)
@@ -198,6 +235,8 @@ final class MemoryModel: ObservableObject {
         let previousCPUInfo = previousCPUInfo
         let previousNetworkCounters = previousNetworkCounters
         let networkHistory = networkHistory
+        let previousLLMUsage = llmUsage
+        let previousLLMUsageRefresh = previousLLMUsageRefresh
 
         DispatchQueue.global(qos: .utility).async {
             let result = Self.collectRefresh(
@@ -205,7 +244,9 @@ final class MemoryModel: ObservableObject {
                 previousPageOuts: previousPageOuts,
                 previousCPUInfo: previousCPUInfo,
                 previousNetworkCounters: previousNetworkCounters,
-                networkHistory: networkHistory
+                networkHistory: networkHistory,
+                previousLLMUsage: previousLLMUsage,
+                previousLLMUsageRefresh: previousLLMUsageRefresh
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -223,6 +264,8 @@ final class MemoryModel: ObservableObject {
         let sensors: SensorSnapshot
         let cpuResult: (snapshot: CPUGPUSnapshot, current: CPUReader.CPULoadInfo?)
         let networkResult: (snapshot: NetworkSnapshot, counters: NetworkReader.NetworkCounters?)
+        let llmUsage: LLMUsageSnapshot
+        let llmUsageRefresh: Date?
     }
 
     nonisolated private static func collectRefresh(
@@ -230,7 +273,9 @@ final class MemoryModel: ObservableObject {
         previousPageOuts: UInt64?,
         previousCPUInfo: CPUReader.CPULoadInfo?,
         previousNetworkCounters: NetworkReader.NetworkCounters?,
-        networkHistory: [NetworkSample]
+        networkHistory: [NetworkSample],
+        previousLLMUsage: LLMUsageSnapshot,
+        previousLLMUsageRefresh: Date?
     ) -> RefreshResult {
         let stats = MemoryReader.read()
         var displayStats = stats
@@ -239,13 +284,17 @@ final class MemoryModel: ObservableObject {
         let sensors = SensorReader.read()
         let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
         let networkResult = NetworkReader.read(previous: previousNetworkCounters, history: networkHistory)
+        let shouldRefreshLLMUsage = previousLLMUsageRefresh.map { Date().timeIntervalSince($0) > 60 } ?? true
+        let llmUsage = shouldRefreshLLMUsage ? LLMUsageReader.read() : previousLLMUsage
 
         return RefreshResult(
             stats: stats,
             displayStats: displayStats,
             sensors: sensors,
             cpuResult: cpuResult,
-            networkResult: networkResult
+            networkResult: networkResult,
+            llmUsage: llmUsage,
+            llmUsageRefresh: shouldRefreshLLMUsage ? Date() : previousLLMUsageRefresh
         )
     }
 
@@ -259,6 +308,8 @@ final class MemoryModel: ObservableObject {
         previousNetworkCounters = result.networkResult.counters
         networkHistory = result.networkResult.snapshot.history
         network = result.networkResult.snapshot
+        llmUsage = result.llmUsage
+        previousLLMUsageRefresh = result.llmUsageRefresh
         history.append(result.stats.breakdown)
         if history.count > 60 {
             history.removeFirst(history.count - 60)
@@ -318,6 +369,38 @@ extension NetworkSnapshot {
             ]
         )
     }
+}
+
+extension LLMUsageSnapshot {
+    static let empty = LLMUsageSnapshot(
+        email: nil,
+        planType: nil,
+        limits: [],
+        creditsBalance: nil,
+        lastUpdated: nil,
+        localFiveHourTokens: 0,
+        localWeeklyTokens: 0,
+        localWeeklyThreads: 0,
+        error: nil
+    )
+
+    static let demo = LLMUsageSnapshot(
+        email: "you@example.com",
+        planType: "prolite",
+        limits: [
+            LLMUsageLimit(
+                name: "Codex",
+                primary: LLMUsageWindow(label: "5h", usedPercent: 58, remainingPercent: 42, resetAt: Date().addingTimeInterval(4_860), windowSeconds: 18_000),
+                secondary: LLMUsageWindow(label: "Weekly", usedPercent: 19, remainingPercent: 81, resetAt: Date().addingTimeInterval(255_000), windowSeconds: 604_800)
+            )
+        ],
+        creditsBalance: "0",
+        lastUpdated: Date(),
+        localFiveHourTokens: 200_670_848,
+        localWeeklyTokens: 216_176_212,
+        localWeeklyThreads: 17,
+        error: nil
+    )
 }
 
 extension SensorSnapshot {
@@ -1138,6 +1221,236 @@ enum NetworkReader {
         }
 
         return nil
+    }
+}
+
+enum LLMUsageReader {
+    private final class HTTPResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data: Data?
+        private var statusCode: Int?
+        private var errorDescription: String?
+
+        func set(data: Data?, response: URLResponse?, error: Error?) {
+            lock.lock()
+            self.data = data
+            self.statusCode = (response as? HTTPURLResponse)?.statusCode
+            self.errorDescription = error?.localizedDescription
+            lock.unlock()
+        }
+
+        func snapshot() -> (data: Data?, statusCode: Int?, errorDescription: String?) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (data, statusCode, errorDescription)
+        }
+    }
+
+    private struct AuthFile: Decodable {
+        struct Tokens: Decodable {
+            let access_token: String?
+        }
+
+        let tokens: Tokens?
+    }
+
+    private struct WhamUsageResponse: Decodable {
+        let email: String?
+        let plan_type: String?
+        let rate_limit: RateLimitPayload?
+        let additional_rate_limits: [AdditionalRateLimit]?
+        let credits: Credits?
+    }
+
+    private struct AdditionalRateLimit: Decodable {
+        let limit_name: String?
+        let rate_limit: RateLimitPayload?
+    }
+
+    private struct RateLimitPayload: Decodable {
+        let primary_window: WindowPayload?
+        let secondary_window: WindowPayload?
+    }
+
+    private struct WindowPayload: Decodable {
+        let used_percent: Int?
+        let limit_window_seconds: Int?
+        let reset_at: TimeInterval?
+    }
+
+    private struct Credits: Decodable {
+        let balance: String?
+        let unlimited: Bool?
+    }
+
+    static func read() -> LLMUsageSnapshot {
+        let local = readLocalCodexUsage()
+        guard let token = readAccessToken() else {
+            return LLMUsageSnapshot(
+                email: nil,
+                planType: nil,
+                limits: [],
+                creditsBalance: nil,
+                lastUpdated: Date(),
+                localFiveHourTokens: local.fiveHourTokens,
+                localWeeklyTokens: local.weeklyTokens,
+                localWeeklyThreads: local.weeklyThreads,
+                error: "Codex auth not found"
+            )
+        }
+
+        var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultBox = HTTPResultBox()
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            resultBox.set(data: data, response: response, error: error)
+            semaphore.signal()
+        }.resume()
+
+        let timeout = semaphore.wait(timeout: .now() + 4)
+        if timeout == .timedOut {
+            return snapshotWithLocalUsage(local, error: "Codex usage request timed out")
+        }
+
+        let httpResult = resultBox.snapshot()
+        if let errorDescription = httpResult.errorDescription {
+            return snapshotWithLocalUsage(local, error: errorDescription)
+        }
+
+        guard httpResult.statusCode == 200,
+              let resultData = httpResult.data else {
+            let status = httpResult.statusCode
+            return snapshotWithLocalUsage(local, error: status.map { "Codex usage returned HTTP \($0)" } ?? "Codex usage unavailable")
+        }
+
+        do {
+            let response = try JSONDecoder().decode(WhamUsageResponse.self, from: resultData)
+            return LLMUsageSnapshot(
+                email: response.email,
+                planType: response.plan_type,
+                limits: limits(from: response),
+                creditsBalance: response.credits?.unlimited == true ? "Unlimited" : response.credits?.balance,
+                lastUpdated: Date(),
+                localFiveHourTokens: local.fiveHourTokens,
+                localWeeklyTokens: local.weeklyTokens,
+                localWeeklyThreads: local.weeklyThreads,
+                error: nil
+            )
+        } catch {
+            return snapshotWithLocalUsage(local, error: "Could not parse Codex usage")
+        }
+    }
+
+    private static func limits(from response: WhamUsageResponse) -> [LLMUsageLimit] {
+        var limits: [LLMUsageLimit] = []
+        if let rateLimit = response.rate_limit {
+            limits.append(LLMUsageLimit(name: "Codex", primary: window(from: rateLimit.primary_window), secondary: window(from: rateLimit.secondary_window)))
+        }
+
+        for additional in response.additional_rate_limits ?? [] {
+            guard let rateLimit = additional.rate_limit else { continue }
+            limits.append(LLMUsageLimit(name: additional.limit_name ?? "Model", primary: window(from: rateLimit.primary_window), secondary: window(from: rateLimit.secondary_window)))
+        }
+
+        return limits
+    }
+
+    private static func window(from payload: WindowPayload?) -> LLMUsageWindow? {
+        guard let payload,
+              let usedPercent = payload.used_percent,
+              let windowSeconds = payload.limit_window_seconds else {
+            return nil
+        }
+
+        return LLMUsageWindow(
+            label: label(forWindowSeconds: windowSeconds),
+            usedPercent: min(max(usedPercent, 0), 100),
+            remainingPercent: min(max(100 - usedPercent, 0), 100),
+            resetAt: payload.reset_at.map { Date(timeIntervalSince1970: $0) },
+            windowSeconds: windowSeconds
+        )
+    }
+
+    private static func label(forWindowSeconds seconds: Int) -> String {
+        if seconds >= 604_800 {
+            let weeks = max(Int((Double(seconds) / 604_800).rounded()), 1)
+            return weeks == 1 ? "Weekly" : "\(weeks) Weeks"
+        }
+        if seconds >= 86_400 {
+            return "\(Int(ceil(Double(seconds) / 86_400)))d"
+        }
+        if seconds >= 3_600 {
+            return "\(Int(ceil(Double(seconds) / 3_600)))h"
+        }
+        return "\(Int(ceil(Double(seconds) / 60)))m"
+    }
+
+    private static func readAccessToken() -> String? {
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/auth.json")
+        guard let data = try? Data(contentsOf: url),
+              let auth = try? JSONDecoder().decode(AuthFile.self, from: data),
+              let token = auth.tokens?.access_token,
+              !token.isEmpty else {
+            return nil
+        }
+        return token
+    }
+
+    private static func readLocalCodexUsage() -> (fiveHourTokens: UInt64, weeklyTokens: UInt64, weeklyThreads: Int) {
+        let databasePath = "\(NSHomeDirectory())/.codex/state_5.sqlite"
+        guard FileManager.default.fileExists(atPath: databasePath) else {
+            return (0, 0, 0)
+        }
+
+        let fiveHourTokens = sqliteUInt64(databasePath: databasePath, query: "select coalesce(sum(tokens_used),0) from threads where updated_at_ms >= (strftime('%s','now')-5*3600)*1000;")
+        let weeklyTokens = sqliteUInt64(databasePath: databasePath, query: "select coalesce(sum(tokens_used),0) from threads where updated_at_ms >= (strftime('%s','now')-7*24*3600)*1000;")
+        let weeklyThreads = Int(sqliteUInt64(databasePath: databasePath, query: "select count(*) from threads where updated_at_ms >= (strftime('%s','now')-7*24*3600)*1000;"))
+        return (fiveHourTokens, weeklyTokens, weeklyThreads)
+    }
+
+    private static func sqliteUInt64(databasePath: String, query: String) -> UInt64 {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        task.arguments = [databasePath, query]
+        let output = Pipe()
+        task.standardOutput = output
+        task.standardError = Pipe()
+
+        do {
+            try task.run()
+        } catch {
+            return 0
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0,
+              let text = String(data: data, encoding: .utf8),
+              let value = UInt64(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return 0
+        }
+        return value
+    }
+
+    private static func snapshotWithLocalUsage(
+        _ local: (fiveHourTokens: UInt64, weeklyTokens: UInt64, weeklyThreads: Int),
+        error: String
+    ) -> LLMUsageSnapshot {
+        LLMUsageSnapshot(
+            email: nil,
+            planType: nil,
+            limits: [],
+            creditsBalance: nil,
+            lastUpdated: Date(),
+            localFiveHourTokens: local.fiveHourTokens,
+            localWeeklyTokens: local.weeklyTokens,
+            localWeeklyThreads: local.weeklyThreads,
+            error: error
+        )
     }
 }
 
