@@ -125,8 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.button?.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-        item.button?.title = "MEM"
+        item.button?.font = .monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        item.button?.alignment = .center
+        item.button?.lineBreakMode = .byWordWrapping
+        item.button?.attributedTitle = statusAttributedTitle()
         statusItem = item
 
         let popover = NSPopover()
@@ -158,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshInBackground() {
         model.refreshInBackground { [weak self] in
             guard let self else { return }
-            self.statusItem?.button?.title = self.statusTitle()
+            self.statusItem?.button?.attributedTitle = self.statusAttributedTitle()
         }
     }
 
@@ -185,20 +187,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func statusTitle() -> String {
+    private func statusTextLines() -> (top: String, bottom: String) {
         guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first,
               let fiveHourRemaining = codexLimit.primary?.remainingPercent,
               let weeklyRemaining = codexLimit.secondary?.remainingPercent else {
-            return "\(model.snapshot.pressurePercent)% MEM"
+            return ("MEM", "\(model.snapshot.pressurePercent)%")
         }
 
-        return "5h \(fiveHourRemaining)% W \(weeklyRemaining)% \(model.snapshot.pressurePercent)% MEM"
+        return (
+            "5H       WK       MEM",
+            "\(fiveHourRemaining)% left   \(weeklyRemaining)% left   \(model.snapshot.pressurePercent)%"
+        )
+    }
+
+    private func statusAttributedTitle() -> NSAttributedString {
+        let lines = statusTextLines()
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        paragraphStyle.lineBreakMode = .byClipping
+        paragraphStyle.lineSpacing = -1
+
+        let text = "\(lines.top)\n\(lines.bottom)"
+        return NSAttributedString(
+            string: text,
+            attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraphStyle,
+                .baselineOffset: -0.5
+            ]
+        )
+    }
+
+    private func statusTitleForDebug() -> String {
+        let lines = statusTextLines()
+        return "\(lines.top) / \(lines.bottom)"
     }
 
     private func verifyPopoverAction() {
         togglePopover()
         let shown = popover?.isShown == true
-        let title = statusItem?.button?.title ?? ""
+        let title = statusTitleForDebug()
         print("statusTitle=\(title)")
         print("popoverShown=\(shown)")
 
