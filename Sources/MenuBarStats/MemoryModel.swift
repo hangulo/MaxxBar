@@ -161,6 +161,7 @@ struct LLMUsageSession: Identifiable, Equatable {
     var projectName: String
     var modelName: String
     var preview: String
+    var rolloutPath: String
     var tokens: UInt64
     var updatedAt: Date?
 
@@ -368,7 +369,7 @@ final class MemoryModel: ObservableObject {
         let now = Date()
         if !force,
            let previousLLMQuotaSample,
-           now.timeIntervalSince(previousLLMQuotaSample) < 600 {
+           now.timeIntervalSince(previousLLMQuotaSample) < llmQuotaSampleInterval {
             return
         }
 
@@ -384,6 +385,16 @@ final class MemoryModel: ObservableObject {
         if llmQuotaHistory.count > 144 {
             llmQuotaHistory.removeFirst(llmQuotaHistory.count - 144)
         }
+    }
+
+    private var llmQuotaSampleInterval: TimeInterval {
+        if llmQuotaHistory.count < 5 {
+            return 60
+        }
+        if llmQuotaHistory.count < 12 {
+            return 300
+        }
+        return 600
     }
 }
 
@@ -485,6 +496,7 @@ extension LLMUsageSnapshot {
                 projectName: "Menu bar stats",
                 modelName: "GPT-5 Codex",
                 preview: "Added usage windows and advanced local session detail.",
+                rolloutPath: "",
                 tokens: 84_200_000,
                 updatedAt: Date().addingTimeInterval(-420)
             ),
@@ -494,6 +506,7 @@ extension LLMUsageSnapshot {
                 projectName: "Menu bar stats",
                 modelName: "GPT-5 Codex",
                 preview: "Built native helper for thermal and fan data.",
+                rolloutPath: "",
                 tokens: 31_500_000,
                 updatedAt: Date().addingTimeInterval(-7_200)
             )
@@ -505,6 +518,7 @@ extension LLMUsageSnapshot {
                 projectName: "Menu bar stats",
                 modelName: "GPT-5 Codex",
                 preview: "Added usage windows and advanced local session detail.",
+                rolloutPath: "",
                 tokens: 84_200_000,
                 updatedAt: Date().addingTimeInterval(-420)
             ),
@@ -514,6 +528,7 @@ extension LLMUsageSnapshot {
                 projectName: "Menu bar stats",
                 modelName: "GPT-5 Codex",
                 preview: "Compared CPU and GPU data with iStat style panels.",
+                rolloutPath: "",
                 tokens: 58_700_000,
                 updatedAt: Date().addingTimeInterval(-86_400)
             )
@@ -1593,7 +1608,8 @@ enum LLMUsageReader {
             coalesce(updated_at_ms, updated_at * 1000),
             replace(replace(coalesce(nullif(model,''), nullif(model_provider,''), ''), char(10), ' '), char(9), ' '),
             replace(replace(coalesce(nullif(cwd,''), ''), char(10), ' '), char(9), ' '),
-            replace(replace(coalesce(nullif(preview,''), nullif(first_user_message,''), ''), char(10), ' '), char(9), ' ')
+            replace(replace(coalesce(nullif(preview,''), nullif(first_user_message,''), ''), char(10), ' '), char(9), ' '),
+            rollout_path
         from threads
         \(whereClause)
         \(orderClause)
@@ -1601,19 +1617,21 @@ enum LLMUsageReader {
         """
 
         return sqliteRows(databasePath: databasePath, query: query).compactMap { row in
-            guard row.count >= 7 else { return nil }
+            guard row.count >= 8 else { return nil }
             let title = compactText(row[1], fallback: "Untitled")
             let tokens = UInt64(row[2]) ?? 0
             let updatedAt = TimeInterval(row[3]).map { Date(timeIntervalSince1970: $0 / 1000) }
             let model = compactText(row[4], fallback: "Model unavailable")
             let project = projectName(from: row[5])
             let preview = compactText(row[6], fallback: "No prompt preview stored")
+            let rolloutPath = compactText(row[7], fallback: "")
             return LLMUsageSession(
                 id: row[0],
                 title: title,
                 projectName: project,
                 modelName: model,
                 preview: preview,
+                rolloutPath: rolloutPath,
                 tokens: tokens,
                 updatedAt: updatedAt
             )

@@ -640,6 +640,15 @@ struct LLMSessionRow: View {
                     LLMSessionDetailRow(label: "Tokens", value: tokenCount(session.tokens))
                     LLMSessionDetailRow(label: "Updated", value: session.updatedAt.map { absoluteTime($0) } ?? "-")
                     LLMSessionDetailRow(label: "Session", value: session.id)
+                    Button {
+                        openSessionContext()
+                    } label: {
+                        Label("Open Context", systemImage: "folder")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.accentBlue)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
                 }
                 .padding(.top, 4)
             }
@@ -651,6 +660,26 @@ struct LLMSessionRow: View {
                 isExpanded.toggle()
             }
         }
+    }
+
+    private func openSessionContext() {
+        let path = session.rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return }
+
+        let fileURL = URL(fileURLWithPath: path)
+        if fileHasContent(fileURL) {
+            NSWorkspace.shared.open(fileURL)
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+        }
+    }
+
+    private func fileHasContent(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true else {
+            return false
+        }
+        return (values.fileSize ?? 0) > 0
     }
 }
 
