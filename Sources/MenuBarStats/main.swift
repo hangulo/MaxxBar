@@ -304,6 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class StatusTitleView: NSView {
     private var topItems = ["5H", "Week", "MEM"]
     private var bottomItems = ["-", "-", "-"]
+    private let amberUsageColor = NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.18, alpha: 1.0)
     private let lowUsageColor = NSColor(calibratedRed: 1.0, green: 0.27, blue: 0.34, alpha: 1.0)
 
     override var isFlipped: Bool { true }
@@ -325,15 +326,16 @@ final class StatusTitleView: NSView {
         let columnWidth = bounds.width / CGFloat(columns)
         let regularTopFont = NSFont.systemFont(ofSize: 10, weight: .regular)
         let regularBottomFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
-        let warningTopFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
-        let warningBottomFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
+        let warningTopFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let warningBottomFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
         let topY = max(0, floor((bounds.height - 24) / 2) - 1)
         let bottomY = topY + 11
 
         for index in 0..<columns {
             let x = CGFloat(index) * columnWidth
-            let isWarning = isLowUsageColumn(at: index)
-            let itemColor = isWarning ? lowUsageColor : NSColor.labelColor
+            let warningColor = warningColorForColumn(at: index)
+            let isWarning = warningColor != nil
+            let itemColor = warningColor ?? NSColor.labelColor
             drawCentered(
                 topItems.indices.contains(index) ? topItems[index] : "",
                 x: x,
@@ -357,15 +359,20 @@ final class StatusTitleView: NSView {
         }
     }
 
-    private func isLowUsageColumn(at index: Int) -> Bool {
+    private func warningColorForColumn(at index: Int) -> NSColor? {
         guard index < 2,
               bottomItems.indices.contains(index),
-              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")),
-              percent < 15 else {
-            return false
+              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")) else {
+            return nil
         }
 
-        return true
+        if percent < 15 {
+            return lowUsageColor
+        } else if percent < 25 {
+            return amberUsageColor
+        }
+
+        return nil
     }
 
     private func drawCentered(

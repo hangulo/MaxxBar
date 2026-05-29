@@ -148,6 +148,22 @@ struct LLMUsageLimit: Identifiable, Equatable {
     var secondary: LLMUsageWindow?
 }
 
+struct LLMLocalUsageWindow: Identifiable, Equatable {
+    var id: String { label }
+    var label: String
+    var tokens: UInt64
+    var threads: Int
+}
+
+struct LLMUsageSession: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var detail: String
+    var preview: String
+    var tokens: UInt64
+    var updatedAt: Date?
+}
+
 struct LLMUsageSnapshot: Equatable {
     var email: String?
     var planType: String?
@@ -157,6 +173,8 @@ struct LLMUsageSnapshot: Equatable {
     var localFiveHourTokens: UInt64
     var localWeeklyTokens: UInt64
     var localWeeklyThreads: Int
+    var localWindows: [LLMLocalUsageWindow]
+    var recentSessions: [LLMUsageSession]
     var error: String?
 }
 
@@ -381,6 +399,8 @@ extension LLMUsageSnapshot {
         localFiveHourTokens: 0,
         localWeeklyTokens: 0,
         localWeeklyThreads: 0,
+        localWindows: [],
+        recentSessions: [],
         error: nil
     )
 
@@ -399,6 +419,30 @@ extension LLMUsageSnapshot {
         localFiveHourTokens: 200_670_848,
         localWeeklyTokens: 216_176_212,
         localWeeklyThreads: 17,
+        localWindows: [
+            LLMLocalUsageWindow(label: "1h", tokens: 24_100_000, threads: 2),
+            LLMLocalUsageWindow(label: "5h", tokens: 200_670_848, threads: 6),
+            LLMLocalUsageWindow(label: "24h", tokens: 208_400_000, threads: 9),
+            LLMLocalUsageWindow(label: "7d", tokens: 216_176_212, threads: 17)
+        ],
+        recentSessions: [
+            LLMUsageSession(
+                id: "demo-1",
+                title: "MenuBarStats LLM usage tab",
+                detail: "Menu bar stats • GPT-5 Codex",
+                preview: "Added usage windows and advanced local session detail.",
+                tokens: 84_200_000,
+                updatedAt: Date().addingTimeInterval(-420)
+            ),
+            LLMUsageSession(
+                id: "demo-2",
+                title: "Sensor helper",
+                detail: "Menu bar stats • GPT-5 Codex",
+                preview: "Built native helper for thermal and fan data.",
+                tokens: 31_500_000,
+                updatedAt: Date().addingTimeInterval(-7_200)
+            )
+        ],
         error: nil
     )
 }
@@ -1225,6 +1269,14 @@ enum NetworkReader {
 }
 
 enum LLMUsageReader {
+    private struct LocalCodexUsage {
+        let fiveHourTokens: UInt64
+        let weeklyTokens: UInt64
+        let weeklyThreads: Int
+        let windows: [LLMLocalUsageWindow]
+        let recentSessions: [LLMUsageSession]
+    }
+
     private final class HTTPResultBox: @unchecked Sendable {
         private let lock = NSLock()
         private var data: Data?
@@ -1295,6 +1347,8 @@ enum LLMUsageReader {
                 localFiveHourTokens: local.fiveHourTokens,
                 localWeeklyTokens: local.weeklyTokens,
                 localWeeklyThreads: local.weeklyThreads,
+                localWindows: local.windows,
+                recentSessions: local.recentSessions,
                 error: "Codex auth not found"
             )
         }
@@ -1338,6 +1392,8 @@ enum LLMUsageReader {
                 localFiveHourTokens: local.fiveHourTokens,
                 localWeeklyTokens: local.weeklyTokens,
                 localWeeklyThreads: local.weeklyThreads,
+                localWindows: local.windows,
+                recentSessions: local.recentSessions,
                 error: nil
             )
         } catch {
@@ -1400,22 +1456,88 @@ enum LLMUsageReader {
         return token
     }
 
-    private static func readLocalCodexUsage() -> (fiveHourTokens: UInt64, weeklyTokens: UInt64, weeklyThreads: Int) {
+    private static func readLocalCodexUsage() -> LocalCodexUsage {
         let databasePath = "\(NSHomeDirectory())/.codex/state_5.sqlite"
         guard FileManager.default.fileExists(atPath: databasePath) else {
-            return (0, 0, 0)
+            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], recentSessions: [])
         }
 
-        let fiveHourTokens = sqliteUInt64(databasePath: databasePath, query: "select coalesce(sum(tokens_used),0) from threads where updated_at_ms >= (strftime('%s','now')-5*3600)*1000;")
-        let weeklyTokens = sqliteUInt64(databasePath: databasePath, query: "select coalesce(sum(tokens_used),0) from threads where updated_at_ms >= (strftime('%s','now')-7*24*3600)*1000;")
-        let weeklyThreads = Int(sqliteUInt64(databasePath: databasePath, query: "select count(*) from threads where updated_at_ms >= (strftime('%s','now')-7*24*3600)*1000;"))
-        return (fiveHourTokens, weeklyTokens, weeklyThreads)
+        let windows = [
+            localWindow(databasePath: databasePath, label: "1h", seconds: 3_600),
+            localWindow(databasePath: databasePath, label: "5h", seconds: 18_000),
+            localWindow(databasePath: databasePath, label: "24h", seconds: 86_400),
+            localWindow(databasePath: databasePath, label: "7d", seconds: 604_800)
+        ]
+        let fiveHour = windows.first(where: { $0.label == "5h" }) ?? LLMLocalUsageWindow(label: "5h", tokens: 0, threads: 0)
+        let weekly = windows.first(where: { $0.label == "7d" }) ?? LLMLocalUsageWindow(label: "7d", tokens: 0, threads: 0)
+
+        return LocalCodexUsage(
+            fiveHourTokens: fiveHour.tokens,
+            weeklyTokens: weekly.tokens,
+            weeklyThreads: weekly.threads,
+            windows: windows,
+            recentSessions: recentSessions(databasePath: databasePath)
+        )
+    }
+
+    private static func localWindow(databasePath: String, label: String, seconds: Int) -> LLMLocalUsageWindow {
+        let query = """
+        select coalesce(sum(tokens_used),0), count(*)
+        from threads
+        where coalesce(updated_at_ms, updated_at * 1000) >= (strftime('%s','now')-\(seconds))*1000;
+        """
+        let row = sqliteRows(databasePath: databasePath, query: query).first ?? []
+        return LLMLocalUsageWindow(
+            label: label,
+            tokens: row.indices.contains(0) ? UInt64(row[0]) ?? 0 : 0,
+            threads: row.indices.contains(1) ? Int(row[1]) ?? 0 : 0
+        )
+    }
+
+    private static func recentSessions(databasePath: String) -> [LLMUsageSession] {
+        let query = """
+        select
+            id,
+            replace(replace(coalesce(nullif(title,''),'Untitled'), char(10), ' '), char(9), ' '),
+            coalesce(tokens_used,0),
+            coalesce(updated_at_ms, updated_at * 1000),
+            replace(replace(coalesce(nullif(model,''), nullif(model_provider,''), ''), char(10), ' '), char(9), ' '),
+            replace(replace(coalesce(nullif(cwd,''), ''), char(10), ' '), char(9), ' '),
+            replace(replace(coalesce(nullif(preview,''), nullif(first_user_message,''), ''), char(10), ' '), char(9), ' ')
+        from threads
+        where tokens_used > 0
+        order by coalesce(updated_at_ms, updated_at * 1000) desc
+        limit 5;
+        """
+
+        return sqliteRows(databasePath: databasePath, query: query).compactMap { row in
+            guard row.count >= 7 else { return nil }
+            let title = compactText(row[1], fallback: "Untitled")
+            let tokens = UInt64(row[2]) ?? 0
+            let updatedAt = TimeInterval(row[3]).map { Date(timeIntervalSince1970: $0 / 1000) }
+            let model = compactText(row[4], fallback: "Model unavailable")
+            let project = projectName(from: row[5])
+            let preview = compactText(row[6], fallback: "No prompt preview stored")
+            return LLMUsageSession(
+                id: row[0],
+                title: trimmed(title, maxLength: 34),
+                detail: "\(project) • \(trimmed(model, maxLength: 24))",
+                preview: trimmed(preview, maxLength: 72),
+                tokens: tokens,
+                updatedAt: updatedAt
+            )
+        }
     }
 
     private static func sqliteUInt64(databasePath: String, query: String) -> UInt64 {
+        let value = sqliteRows(databasePath: databasePath, query: query).first?.first
+        return value.flatMap(UInt64.init) ?? 0
+    }
+
+    private static func sqliteRows(databasePath: String, query: String) -> [[String]] {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        task.arguments = [databasePath, query]
+        task.arguments = ["-batch", "-separator", "\t", databasePath, query]
         let output = Pipe()
         task.standardOutput = output
         task.standardError = Pipe()
@@ -1423,21 +1545,23 @@ enum LLMUsageReader {
         do {
             try task.run()
         } catch {
-            return 0
+            return []
         }
 
         let data = output.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
         guard task.terminationStatus == 0,
-              let text = String(data: data, encoding: .utf8),
-              let value = UInt64(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return 0
+              let text = String(data: data, encoding: .utf8) else {
+            return []
         }
-        return value
+
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init) }
     }
 
     private static func snapshotWithLocalUsage(
-        _ local: (fiveHourTokens: UInt64, weeklyTokens: UInt64, weeklyThreads: Int),
+        _ local: LocalCodexUsage,
         error: String
     ) -> LLMUsageSnapshot {
         LLMUsageSnapshot(
@@ -1449,8 +1573,27 @@ enum LLMUsageReader {
             localFiveHourTokens: local.fiveHourTokens,
             localWeeklyTokens: local.weeklyTokens,
             localWeeklyThreads: local.weeklyThreads,
+            localWindows: local.windows,
+            recentSessions: local.recentSessions,
             error: error
         )
+    }
+
+    private static func compactText(_ text: String, fallback: String) -> String {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedText.isEmpty ? fallback : trimmedText
+    }
+
+    private static func trimmed(_ text: String, maxLength: Int) -> String {
+        guard text.count > maxLength else { return text }
+        let end = text.index(text.startIndex, offsetBy: maxLength - 1)
+        return String(text[..<end]) + "..."
+    }
+
+    private static func projectName(from path: String) -> String {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return "Project unavailable" }
+        return URL(fileURLWithPath: trimmedPath).lastPathComponent
     }
 }
 

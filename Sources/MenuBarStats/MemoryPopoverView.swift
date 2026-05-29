@@ -209,40 +209,77 @@ struct LLMUsagePanelView: View {
     let snapshot: LLMUsageSnapshot
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
+    @State private var limitsExpanded = true
+    @State private var advancedExpanded = true
 
     var body: some View {
         VStack(spacing: 7) {
-            LLMUsageSummaryCard(snapshot: snapshot)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 7) {
+                    if let codexLimit {
+                        LLMUsageLimitCard(
+                            limit: codexLimit,
+                            title: "CODEX USAGE (\(planName(snapshot.planType)))"
+                        )
+                    } else {
+                        LLMUsageUnavailableCard(message: snapshot.error ?? "Codex usage unavailable")
+                    }
 
-            ForEach(snapshot.limits.prefix(2)) { limit in
-                LLMUsageLimitCard(limit: limit)
+                    if !additionalLimits.isEmpty {
+                        LLMUsageLimitsDisclosureCard(limits: additionalLimits, isExpanded: $limitsExpanded)
+                    }
+
+                    LLMLocalUsageCard(snapshot: snapshot)
+                    LLMAdvancedUsageCard(snapshot: snapshot, isExpanded: $advancedExpanded)
+                }
             }
-
-            MetricCard(
-                title: "LOCAL CODEX",
-                rows: [
-                    MetricRow(label: "5h tokens", value: tokenCount(snapshot.localFiveHourTokens)),
-                    MetricRow(label: "Weekly tokens", value: tokenCount(snapshot.localWeeklyTokens)),
-                    MetricRow(label: "Weekly threads", value: "\(snapshot.localWeeklyThreads)")
-                ]
-            )
-
-            MetricCard(title: "ACCOUNT", rows: accountRows)
 
             ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 
-    private var accountRows: [MetricRow] {
-        var rows = [
-            MetricRow(label: "Plan", value: planName(snapshot.planType)),
-            MetricRow(label: "Credit", value: snapshot.creditsBalance ?? "-"),
-            MetricRow(label: "Updated", value: relativeTime(snapshot.lastUpdated))
-        ]
-        if let error = snapshot.error {
-            rows.append(MetricRow(label: "Status", value: error))
+    private var codexLimit: LLMUsageLimit? {
+        snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first
+    }
+
+    private var additionalLimits: [LLMUsageLimit] {
+        guard let codexLimit else { return snapshot.limits }
+        return snapshot.limits.filter { $0.id != codexLimit.id }
+    }
+}
+
+struct LLMUsageLimitsDisclosureCard: View {
+    let limits: [LLMUsageLimit]
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(spacing: 7) {
+                if limits.isEmpty {
+                    Text("No live limit detail available")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ForEach(limits) { limit in
+                        LLMUsageLimitCard(limit: limit)
+                    }
+                }
+            }
+            .padding(.top, 5)
+        } label: {
+            HStack {
+                Text("LIMITS")
+                    .sectionTitle()
+                Spacer()
+                Text("\(limits.count)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .monospacedDigit()
+            }
         }
-        return rows
+        .accentColor(.accentBlue)
+        .sectionStyle()
     }
 }
 
@@ -278,15 +315,197 @@ struct LLMUsageSummaryCard: View {
 
 struct LLMUsageLimitCard: View {
     let limit: LLMUsageLimit
+    var title: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(limit.name.uppercased())
+            Text(title ?? limit.name.uppercased())
                 .sectionTitle()
             LLMUsageProgress(window: limit.primary)
             LLMUsageProgress(window: limit.secondary)
         }
         .sectionStyle()
+    }
+}
+
+struct LLMUsageUnavailableCard: View {
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("CODEX USAGE")
+                .sectionTitle()
+            Text(message)
+                .font(.system(size: 13.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .sectionStyle()
+    }
+}
+
+struct LLMLocalUsageCard: View {
+    let snapshot: LLMUsageSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("LOCAL DRAWDOWN")
+                .sectionTitle()
+
+            ForEach(snapshot.localWindows) { window in
+                LLMLocalUsageWindowRow(window: window, maxTokens: maxTokens)
+            }
+
+            if snapshot.localWindows.isEmpty {
+                Text("No local Codex usage windows found")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+        }
+        .sectionStyle()
+    }
+
+    private var maxTokens: UInt64 {
+        max(snapshot.localWindows.map(\.tokens).max() ?? 0, 1)
+    }
+}
+
+struct LLMLocalUsageWindowRow: View {
+    let window: LLMLocalUsageWindow
+    let maxTokens: UInt64
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(window.label)
+                    .font(.system(size: 13.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.82))
+                Spacer()
+                Text("\(tokenCount(window.tokens)) • \(window.threads) sessions")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2.5)
+                        .fill(Color.freeGray.opacity(0.24))
+                    RoundedRectangle(cornerRadius: 2.5)
+                        .fill(Color.accentBlue.opacity(0.88))
+                        .frame(width: proxy.size.width * ratio)
+                }
+            }
+            .frame(height: 5)
+        }
+    }
+
+    private var ratio: CGFloat {
+        CGFloat(Double(window.tokens) / Double(maxTokens))
+    }
+}
+
+struct LLMAdvancedUsageCard: View {
+    let snapshot: LLMUsageSnapshot
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                LLMAvailableDetailView(snapshot: snapshot)
+
+                Text("RECENT SESSIONS")
+                    .sectionTitle()
+                    .padding(.top, 2)
+
+                if snapshot.recentSessions.isEmpty {
+                    Text("No local session token detail found")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.62))
+                } else {
+                    ForEach(snapshot.recentSessions) { session in
+                        LLMSessionRow(session: session)
+                    }
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            HStack {
+                Text("ADVANCED")
+                    .sectionTitle()
+                Spacer()
+                Text("\(snapshot.recentSessions.count) sessions")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .monospacedDigit()
+            }
+        }
+        .accentColor(.accentBlue)
+        .sectionStyle()
+    }
+}
+
+struct LLMAvailableDetailView: View {
+    let snapshot: LLMUsageSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("AVAILABLE DETAIL")
+                .sectionTitle()
+            availableRow("Live limits", "\(snapshot.limits.count) limit groups")
+            availableRow("Local windows", snapshot.localWindows.map(\.label).joined(separator: ", "))
+            availableRow("Session totals", "Title, model, project, tokens")
+            availableRow("Prompt detail", "Stored preview only")
+            availableRow("Per-prompt tokens", "Not stored locally")
+        }
+    }
+
+    private func availableRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.system(size: 12.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.68))
+            Spacer()
+            Text(value.isEmpty ? "-" : value)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.82))
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+struct LLMSessionRow: View {
+    let session: LLMUsageSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(session.title)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer()
+                Text(tokenCount(session.tokens))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+            }
+
+            HStack {
+                Text(session.detail)
+                    .lineLimit(1)
+                Spacer()
+                Text(relativeTime(session.updatedAt))
+                    .monospacedDigit()
+            }
+            .font(.system(size: 11.5, weight: .regular))
+            .foregroundStyle(.white.opacity(0.56))
+
+            Text(session.preview)
+                .font(.system(size: 11.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.66))
+                .lineLimit(2)
+        }
+        .padding(.vertical, 3)
     }
 }
 
@@ -1317,6 +1536,9 @@ private func tokenCount(_ value: UInt64) -> String {
 
 private func planName(_ value: String?) -> String {
     guard let value, !value.isEmpty else { return "-" }
+    if value.lowercased() == "prolite" {
+        return "Pro Lite"
+    }
     return value
         .split(separator: "_")
         .map { part in
