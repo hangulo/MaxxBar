@@ -132,13 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 306, height: 662)
-        popover.contentViewController = NSHostingController(
-            rootView: MemoryPopoverView(
-                model: model,
-                onPopOut: { [weak self] in self?.showDetachedWindow() },
-                onQuit: { NSApp.terminate(nil) }
-            )
-        )
+        popover.contentViewController = makePopoverContent(selectedPanel: .llmUsage)
         self.popover = popover
 
         refreshInBackground()
@@ -163,7 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshInBackground() {
         model.refreshInBackground { [weak self] in
-            self?.statusItem?.button?.title = "\(self?.model.snapshot.pressurePercent ?? 0)% MEM"
+            guard let self else { return }
+            self.statusItem?.button?.title = self.statusTitle()
         }
     }
 
@@ -173,9 +168,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            popover.contentViewController = makePopoverContent(selectedPanel: .llmUsage)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             refreshInBackground()
         }
+    }
+
+    private func makePopoverContent(selectedPanel: StatsPanel) -> NSHostingController<MemoryPopoverView> {
+        NSHostingController(
+            rootView: MemoryPopoverView(
+                model: model,
+                onPopOut: { [weak self] in self?.showDetachedWindow() },
+                onQuit: { NSApp.terminate(nil) },
+                selectedPanel: selectedPanel
+            )
+        )
+    }
+
+    private func statusTitle() -> String {
+        guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first,
+              let fiveHourRemaining = codexLimit.primary?.remainingPercent,
+              let weeklyRemaining = codexLimit.secondary?.remainingPercent else {
+            return "\(model.snapshot.pressurePercent)% MEM"
+        }
+
+        return "5h \(fiveHourRemaining)% W \(weeklyRemaining)% \(model.snapshot.pressurePercent)% MEM"
     }
 
     private func verifyPopoverAction() {
@@ -216,7 +233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentViewController = NSHostingController(
             rootView: MemoryPopoverView(
                 model: model,
-                onQuit: { NSApp.terminate(nil) }
+                onQuit: { NSApp.terminate(nil) },
+                selectedPanel: .llmUsage
             )
         )
         window.center()
