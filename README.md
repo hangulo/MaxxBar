@@ -8,7 +8,7 @@ A macOS menu bar stats app inspired by iStat Menus. The current focus is a fast,
 - Memory popover with pressure, memory breakdown, top processes, paging, swap, and history.
 - Grouped and raw process memory views with app icons.
 - CPU/GPU panel with user/system history, per-core efficiency/performance load rings, grouped CPU processes, load averages, and uptime.
-- Sensors panel with public battery/system input telemetry where available.
+- Sensors panel with public battery/system input telemetry, temporary iStat history fallback, and a native helper cache path.
 - Network panel with interface throughput, IP address, and traffic history.
 - Pop-out window mode and quit control.
 
@@ -22,7 +22,7 @@ Some iStat-style data requires privileged or private telemetry that this app doe
 - SSD, Wi-Fi, palm-rest, airflow, and other detailed thermal sensors.
 - Per-process network attribution.
 
-The app marks those values as unavailable rather than inventing data.
+The app marks those values as unavailable rather than inventing data. A first native helper target is included, but the detailed Apple Silicon temperature/fan collector is still being hardened because those sensors sit behind private Apple telemetry interfaces.
 
 ## Build
 
@@ -37,6 +37,26 @@ Scripts/build-app.sh
 ```
 
 The app bundle is written to `Dist/MenuBarStats.app`.
+
+## Sensor Helper
+
+Build and install the privileged helper:
+
+```sh
+Scripts/install-sensor-helper.sh
+```
+
+The helper runs as `com.hector.MenuBarStatsSensorHelper` and writes a local snapshot to:
+
+```text
+/Library/Application Support/MenuBarStats/sensors.json
+```
+
+Remove it with:
+
+```sh
+Scripts/uninstall-sensor-helper.sh
+```
 
 ## Useful Verification Commands
 

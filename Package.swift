@@ -8,7 +8,8 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "MenuBarStats", targets: ["MenuBarStats"])
+        .executable(name: "MenuBarStats", targets: ["MenuBarStats"]),
+        .executable(name: "MenuBarStatsSensorHelper", targets: ["MenuBarStatsSensorHelper"])
     ],
     targets: [
         .executableTarget(
@@ -17,6 +18,10 @@ let package = Package(
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"])
             ]
+        ),
+        .executableTarget(
+            name: "MenuBarStatsSensorHelper",
+            path: "Sources/MenuBarStatsSensorHelper"
         )
     ]
 )

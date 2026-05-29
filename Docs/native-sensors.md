@@ -29,12 +29,29 @@ Secondary values:
 - Detailed thermal/fan sensors appear behind private Apple services such as `AppleSMCKeysEndpoint`, `AppleSMCClient`, `AppleARMPMUTempSensor`, and related telemetry services.
 - iStat Menus stores recent numeric sensor history locally, but its sensor labels are stored as hashes and resolved inside iStat's own helper/app logic.
 
+## Current Helper Architecture
+
+The repo now includes a standalone `MenuBarStatsSensorHelper` executable target. It can print a single JSON snapshot, write one snapshot, or run continuously as a LaunchDaemon:
+
+```sh
+.build/release/MenuBarStatsSensorHelper
+.build/release/MenuBarStatsSensorHelper --write /tmp/menubarstats-sensors.json
+.build/release/MenuBarStatsSensorHelper --daemon --output "/Library/Application Support/MenuBarStats/sensors.json" --interval 3
+```
+
+Install scripts:
+
+- `Scripts/install-sensor-helper.sh` builds the helper, copies it to `/Library/PrivilegedHelperTools/com.hector.MenuBarStatsSensorHelper`, installs a LaunchDaemon, and starts it.
+- `Scripts/uninstall-sensor-helper.sh` unloads and removes the helper.
+
+The menu bar app reads `/Library/Application Support/MenuBarStats/sensors.json` first. If the cache is missing or stale, it falls back to the temporary iStat history bridge and public battery telemetry.
+
 ## Proposed Architecture
 
 1. Keep the menu bar app unprivileged.
 2. Add a small helper process for sensor collection.
 3. Install the helper with explicit user approval.
-4. Communicate from the app to the helper over a narrow local IPC API.
+4. Communicate from the app to the helper through a narrow read-only JSON cache, then move to local IPC only if needed.
 5. Return structured sensor snapshots:
 
 ```swift
@@ -55,6 +72,10 @@ struct NativeSensorSnapshot: Codable {
 - Direct Apple SMC/PMU access through IOKit user clients.
 - A privileged collector that samples `powermetrics` and parses plist/text output.
 - A hybrid collector: direct IOKit for fans/temps, `powermetrics` for frequency/power.
+
+## Open Collector Work
+
+The helper shell is in place, but the native collector still needs the private Apple Silicon sensor source. The current HID probe did not expose readable temperatures on this machine, and `powermetrics` requires root privileges. Next candidates to prototype are the local `libSMC` symbols in the macOS SDK and the `AppleSMCKeysEndpoint` / `AppleARMPMUTempSensor` IOKit user clients.
 
 ## Acceptance Criteria
 

@@ -21,6 +21,9 @@ fi
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/$APP_NAME" "$MACOS_DIR/$APP_NAME"
+if [ -x "$BUILD_DIR/MenuBarStatsSensorHelper" ]; then
+    cp "$BUILD_DIR/MenuBarStatsSensorHelper" "$RESOURCES_DIR/MenuBarStatsSensorHelper"
+fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

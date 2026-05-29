@@ -176,7 +176,7 @@ final class MemoryModel: ObservableObject {
         previousCumulativePageOuts = stats.cumulativePageOuts
         snapshot = displayStats
         sensors = SensorReader.read()
-        let cpuResult = CPUReader.read(previous: previousCPUInfo)
+        let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
         previousCPUInfo = cpuResult.current
         cpuGPU = cpuResult.snapshot
         let networkResult = NetworkReader.read(previous: previousNetworkCounters, history: networkHistory)
@@ -237,7 +237,7 @@ final class MemoryModel: ObservableObject {
         displayStats.pageIns = deltaValue(from: previousPageIns, to: stats.cumulativePageIns)
         displayStats.pageOuts = deltaValue(from: previousPageOuts, to: stats.cumulativePageOuts)
         let sensors = SensorReader.read()
-        let cpuResult = CPUReader.read(previous: previousCPUInfo)
+        let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
         let networkResult = NetworkReader.read(previous: previousNetworkCounters, history: networkHistory)
 
         return RefreshResult(
@@ -667,22 +667,27 @@ enum MemoryReader {
 enum SensorReader {
     static func read() -> SensorSnapshot {
         let battery = readBatteryTelemetry()
+        let native = NativeSensorCache.read()
         let iStat = IStatSensorHistory.read()
-        let batteryTemperature = battery.temperatureCelsius ?? iStat.temperature(label: "Battery")
-        let fanReadings = iStat.fanReadings
+        let batteryTemperature = battery.temperatureCelsius ?? native?.temperature(label: "Battery") ?? iStat.temperature(label: "Battery")
+        let nativeFans = native?.fanReadings ?? []
+        let fanReadings = nativeFans.isEmpty ? iStat.fanReadings : nativeFans
         let maxFanRPM = fanReadings.map(\.rpm).max()
         let fanPercent = maxFanRPM.map { $0 > 0 ? 100 : 0 }
-        let temperatureReadings = iStat.temperatureReadings.isEmpty
+        let preferredTemperatures = native?.temperatureReadings.isEmpty == false
+            ? native?.temperatureReadings ?? []
+            : iStat.temperatureReadings
+        let temperatureReadings = preferredTemperatures.isEmpty
             ? batteryTemperature.map { [TemperatureReading(label: "Battery", celsius: $0)] } ?? []
-            : iStat.temperatureReadings.map { reading in
+            : preferredTemperatures.map { reading in
                 reading.label == "Battery" && batteryTemperature != nil
                     ? TemperatureReading(label: reading.label, celsius: batteryTemperature!)
                     : reading
             }
 
         return SensorSnapshot(
-            cpuTemperature: iStat.temperature(label: "CPU Performance Cores") ?? iStat.temperature(label: "CPU Efficiency Cores"),
-            gpuTemperature: iStat.temperature(label: "Graphics"),
+            cpuTemperature: native?.cpuTemperatureCelsius ?? iStat.temperature(label: "CPU Performance Cores") ?? iStat.temperature(label: "CPU Efficiency Cores"),
+            gpuTemperature: native?.gpuTemperatureCelsius ?? iStat.temperature(label: "Graphics"),
             batteryTemperature: batteryTemperature,
             fanPercent: fanPercent,
             fanRPM: maxFanRPM,
@@ -691,7 +696,7 @@ enum SensorReader {
             amperage: battery.systemCurrentAmps,
             power: battery.systemPowerWatts ?? battery.adapterPowerWatts,
             voltage: battery.systemVoltageVolts ?? battery.batteryVoltageVolts,
-            frequencyGHz: CPUReader.currentFrequencyGHz(),
+            frequencyGHz: native?.cpuFrequencyGHz ?? CPUReader.currentFrequencyGHz(),
             lightLux: nil
         )
     }
@@ -759,6 +764,62 @@ enum SensorReader {
         }
 
         return integerValue(for: "Watts", in: String(remainder[wattsRange.lowerBound...]))
+    }
+}
+
+private struct NativeSensorCache: Codable {
+    struct Temperature: Codable {
+        let label: String
+        let celsius: Double
+        let rawName: String?
+    }
+
+    struct Fan: Codable {
+        let label: String
+        let rpm: Int
+        let rawName: String?
+    }
+
+    let source: String
+    let generatedAt: Date?
+    let requiresPrivileges: Bool
+    let temperatures: [Temperature]
+    let fans: [Fan]
+    let cpuTemperatureCelsius: Double?
+    let gpuTemperatureCelsius: Double?
+    let cpuFrequencyGHz: Double?
+    let gpuFrequencyGHz: Double?
+    let cpuPowerWatts: Double?
+    let gpuPowerWatts: Double?
+    let errors: [String]
+
+    var temperatureReadings: [TemperatureReading] {
+        temperatures
+            .filter { $0.celsius > -40 && $0.celsius < 130 }
+            .map { TemperatureReading(label: $0.label, celsius: $0.celsius) }
+    }
+
+    var fanReadings: [FanReading] {
+        fans
+            .filter { $0.rpm >= 0 && $0.rpm < 10_000 }
+            .map { FanReading(label: $0.label, rpm: $0.rpm) }
+    }
+
+    func temperature(label: String) -> Double? {
+        temperatureReadings.first { $0.label == label }?.celsius
+    }
+
+    static func read() -> NativeSensorCache? {
+        let path = "/Library/Application Support/MenuBarStats/sensors.json"
+        let url = URL(fileURLWithPath: path)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let modified = attributes[.modificationDate] as? Date,
+              Date().timeIntervalSince(modified) < 30,
+              let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(NativeSensorCache.self, from: data)
     }
 }
 
@@ -1096,7 +1157,7 @@ enum CPUReader {
         let coreTicks: [CoreTicks]
     }
 
-    static func read(previous: CPULoadInfo?) -> (snapshot: CPUGPUSnapshot, current: CPULoadInfo?) {
+    static func read(previous: CPULoadInfo?, sensors: SensorSnapshot = .empty) -> (snapshot: CPUGPUSnapshot, current: CPULoadInfo?) {
         let current = currentCPULoad()
         let percentages = cpuPercentages(previous: previous, current: current)
         let active = percentages.user + percentages.system
@@ -1104,8 +1165,8 @@ enum CPUReader {
         let clusterPercentages = clusterPercentages(from: coreLoads)
 
         let snapshot = CPUGPUSnapshot(
-            cpuGHz: currentFrequencyGHz(),
-            cpuTemperature: nil,
+            cpuGHz: sensors.frequencyGHz ?? currentFrequencyGHz(),
+            cpuTemperature: sensors.cpuTemperature,
             cpuUserPercent: percentages.user,
             cpuSystemPercent: percentages.system,
             cpuIdlePercent: percentages.idle,
@@ -1115,7 +1176,7 @@ enum CPUReader {
             processes: readTopCPUProcesses(),
             gpuPercent: nil,
             gpuMemoryPercent: nil,
-            gpuTemperature: nil,
+            gpuTemperature: sensors.gpuTemperature,
             gpuGHz: nil,
             fps: nil,
             loadAverages: loadAverages(),
