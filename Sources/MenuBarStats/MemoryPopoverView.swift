@@ -692,14 +692,25 @@ struct LLMSessionRow: View {
                     LLMSessionDetailRow(label: "Tokens", value: tokenCount(session.tokens))
                     LLMSessionDetailRow(label: "Updated", value: session.updatedAt.map { absoluteTime($0) } ?? "-")
                     LLMSessionDetailRow(label: "Session", value: session.id)
-                    Button {
-                        openSessionContext()
-                    } label: {
-                        Label("Open Context", systemImage: "folder")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.accentBlue)
+                    HStack(spacing: 12) {
+                        Button {
+                            openSessionContext()
+                        } label: {
+                            Label("Open Context", systemImage: "doc.text")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.accentBlue)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            openSessionFolder()
+                        } label: {
+                            Label("Open Folder", systemImage: "folder")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.accentBlue)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                     .padding(.top, 2)
 
                     Text(session.preview)
@@ -730,8 +741,15 @@ struct LLMSessionRow: View {
         guard !path.isEmpty else { return }
 
         let fileURL = URL(fileURLWithPath: path)
-        let directoryURL = fileURL.deletingLastPathComponent()
-        NSWorkspace.shared.open(directoryURL)
+        NSWorkspace.shared.open(fileURL)
+    }
+
+    private func openSessionFolder() {
+        let path = session.rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return }
+
+        let fileURL = URL(fileURLWithPath: path)
+        NSWorkspace.shared.open(fileURL.deletingLastPathComponent())
     }
 }
 
