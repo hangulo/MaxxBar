@@ -442,23 +442,21 @@ struct LLMQuotaHistoryGraph: View {
             .frame(height: 88)
 
             HStack(spacing: 10) {
-                LegendInline(color: .accentBlue, label: "5H used", value: latestValue(\.primaryRemainingPercent))
-                LegendInline(color: .compressedYellow, label: "Week used", value: latestValue(\.weeklyRemainingPercent))
+                LegendInline(color: .accentBlue, label: "5H left", value: latestValue(\.primaryRemainingPercent))
+                LegendInline(color: .compressedYellow, label: "Week left", value: latestValue(\.weeklyRemainingPercent))
             }
         }
     }
 
     private func latestValue(_ keyPath: KeyPath<LLMQuotaHistorySample, Int?>) -> String {
         guard let remaining = samples.last?[keyPath: keyPath] else { return "-" }
-        let value = 100 - remaining
-        return "\(value)%"
+        return "\(remaining)%"
     }
 
     private func latestBadge(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, in rect: CGRect) -> some View {
         Group {
             if let remaining = samples.last?[keyPath: keyPath] {
-                let value = 100 - remaining
-                Text("\(value)%")
+                Text("\(remaining)%")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.white)
                     .monospacedDigit()
@@ -466,7 +464,7 @@ struct LLMQuotaHistoryGraph: View {
                     .padding(.vertical, 1)
                     .background(color.opacity(0.88))
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    .position(x: rect.maxX + 19, y: yPosition(for: value, in: rect))
+                    .position(x: rect.maxX + 19, y: yPosition(for: remaining, in: rect))
             }
         }
     }
@@ -474,8 +472,7 @@ struct LLMQuotaHistoryGraph: View {
     private func linePath(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, in rect: CGRect) -> Path {
         let values = samples.compactMap { sample -> (Date, Int)? in
             guard let remaining = sample[keyPath: keyPath] else { return nil }
-            let value = 100 - remaining
-            return (sample.sampledAt, value)
+            return (sample.sampledAt, remaining)
         }
         guard !values.isEmpty else { return Path() }
 
@@ -733,19 +730,8 @@ struct LLMSessionRow: View {
         guard !path.isEmpty else { return }
 
         let fileURL = URL(fileURLWithPath: path)
-        if fileHasContent(fileURL) {
-            NSWorkspace.shared.open(fileURL)
-        } else {
-            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
-        }
-    }
-
-    private func fileHasContent(_ url: URL) -> Bool {
-        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-              values.isRegularFile == true else {
-            return false
-        }
-        return (values.fileSize ?? 0) > 0
+        let directoryURL = fileURL.deletingLastPathComponent()
+        NSWorkspace.shared.open(directoryURL)
     }
 }
 
