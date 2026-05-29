@@ -358,6 +358,7 @@ struct LLMUsageUnavailableCard: View {
 struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
+    @State private var localWindowsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -366,14 +367,27 @@ struct LLMLocalUsageCard: View {
 
             LLMQuotaHistoryGraph(samples: quotaHistory)
 
-            ForEach(snapshot.localWindows) { window in
-                LLMLocalUsageWindowRow(window: window, maxTokens: maxTokens)
-            }
-
-            if snapshot.localWindows.isEmpty {
-                Text("No local Codex usage windows found")
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.62))
+            if !snapshot.localWindows.isEmpty {
+                DisclosureGroup(isExpanded: $localWindowsExpanded) {
+                    VStack(spacing: 7) {
+                        ForEach(snapshot.localWindows) { window in
+                            LLMLocalUsageWindowRow(window: window, maxTokens: maxTokens)
+                        }
+                    }
+                    .padding(.top, 4)
+                } label: {
+                    HStack {
+                        Text("LOCAL TOKENS")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.62))
+                        Spacer()
+                        Text("\(tokenCount(snapshot.localWeeklyTokens)) • \(snapshot.localWeeklyThreads) sessions")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.62))
+                            .monospacedDigit()
+                    }
+                }
+                .accentColor(.accentBlue)
             }
         }
         .sectionStyle()
@@ -390,42 +404,77 @@ struct LLMQuotaHistoryGraph: View {
     var body: some View {
         VStack(spacing: 5) {
             GeometryReader { proxy in
-                ZStack {
+                let chartRect = CGRect(
+                    x: 27,
+                    y: 6,
+                    width: max(proxy.size.width - 67, 1),
+                    height: max(proxy.size.height - 14, 1)
+                )
+
+                ZStack(alignment: .topLeading) {
                     RoundedRectangle(cornerRadius: 5)
                         .fill(Color.background.opacity(0.46))
 
-                    ForEach([25, 50, 75], id: \.self) { marker in
+                    ForEach([0, 50, 100], id: \.self) { marker in
+                        let y = yPosition(for: marker, in: chartRect)
                         Path { path in
-                            let y = proxy.size.height * CGFloat(1 - Double(marker) / 100)
-                            path.move(to: CGPoint(x: 0, y: y))
-                            path.addLine(to: CGPoint(x: proxy.size.width, y: y))
+                            path.move(to: CGPoint(x: chartRect.minX, y: y))
+                            path.addLine(to: CGPoint(x: chartRect.maxX, y: y))
                         }
-                        .stroke(Color.freeGray.opacity(0.18), lineWidth: 1)
+                        .stroke(marker == 50 ? Color.freeGray.opacity(0.34) : Color.freeGray.opacity(0.18), lineWidth: marker == 50 ? 1.2 : 1)
+
+                        Text("\(marker)")
+                            .font(.system(size: 9, weight: marker == 50 ? .semibold : .regular))
+                            .foregroundStyle(.white.opacity(marker == 50 ? 0.58 : 0.4))
+                            .monospacedDigit()
+                            .position(x: 12, y: y)
                     }
 
-                    linePath(for: \.primaryRemainingPercent, in: proxy.size)
+                    linePath(for: \.primaryRemainingPercent, in: chartRect)
                         .stroke(Color.accentBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    linePath(for: \.weeklyRemainingPercent, in: proxy.size)
+                    linePath(for: \.weeklyRemainingPercent, in: chartRect)
                         .stroke(Color.compressedYellow, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+
+                    latestBadge(for: \.primaryRemainingPercent, color: .accentBlue, in: chartRect)
+                    latestBadge(for: \.weeklyRemainingPercent, color: .compressedYellow, in: chartRect)
                 }
             }
-            .frame(height: 64)
+            .frame(height: 88)
 
             HStack(spacing: 10) {
-                LegendInline(color: .accentBlue, label: "5H", value: latestValue(\.primaryRemainingPercent))
-                LegendInline(color: .compressedYellow, label: "Week", value: latestValue(\.weeklyRemainingPercent))
+                LegendInline(color: .accentBlue, label: "5H used", value: latestValue(\.primaryRemainingPercent))
+                LegendInline(color: .compressedYellow, label: "Week used", value: latestValue(\.weeklyRemainingPercent))
             }
         }
     }
 
     private func latestValue(_ keyPath: KeyPath<LLMQuotaHistorySample, Int?>) -> String {
-        guard let value = samples.last?[keyPath: keyPath] else { return "-" }
+        guard let remaining = samples.last?[keyPath: keyPath] else { return "-" }
+        let value = 100 - remaining
         return "\(value)%"
     }
 
-    private func linePath(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, in size: CGSize) -> Path {
+    private func latestBadge(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, in rect: CGRect) -> some View {
+        Group {
+            if let remaining = samples.last?[keyPath: keyPath] {
+                let value = 100 - remaining
+                Text("\(value)%")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(color.opacity(0.88))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .position(x: rect.maxX + 19, y: yPosition(for: value, in: rect))
+            }
+        }
+    }
+
+    private func linePath(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, in rect: CGRect) -> Path {
         let values = samples.compactMap { sample -> (Date, Int)? in
-            guard let value = sample[keyPath: keyPath] else { return nil }
+            guard let remaining = sample[keyPath: keyPath] else { return nil }
+            let value = 100 - remaining
             return (sample.sampledAt, value)
         }
         guard !values.isEmpty else { return Path() }
@@ -435,9 +484,16 @@ struct LLMQuotaHistoryGraph: View {
         let duration = max(end.timeIntervalSince(start), 1)
 
         return Path { path in
+            if values.count == 1, let value = values.first?.1 {
+                let y = yPosition(for: value, in: rect)
+                path.move(to: CGPoint(x: rect.minX, y: y))
+                path.addLine(to: CGPoint(x: rect.maxX, y: y))
+                return
+            }
+
             for (index, value) in values.enumerated() {
-                let x = CGFloat(value.0.timeIntervalSince(start) / duration) * size.width
-                let y = size.height * CGFloat(1 - Double(value.1) / 100)
+                let x = rect.minX + CGFloat(value.0.timeIntervalSince(start) / duration) * rect.width
+                let y = yPosition(for: value.1, in: rect)
                 let point = CGPoint(x: x, y: y)
                 if index == 0 {
                     path.move(to: point)
@@ -446,6 +502,10 @@ struct LLMQuotaHistoryGraph: View {
                 }
             }
         }
+    }
+
+    private func yPosition(for percent: Int, in rect: CGRect) -> CGFloat {
+        rect.minY + rect.height * CGFloat(1 - Double(min(max(percent, 0), 100)) / 100)
     }
 }
 
@@ -628,11 +688,6 @@ struct LLMSessionRow: View {
             .font(.system(size: 11.5, weight: .regular))
             .foregroundStyle(.white.opacity(0.56))
 
-            Text(session.preview)
-                .font(.system(size: 11.5, weight: .regular))
-                .foregroundStyle(.white.opacity(0.66))
-                .lineLimit(isExpanded ? nil : 2)
-
             if isExpanded {
                 VStack(alignment: .leading, spacing: 4) {
                     LLMSessionDetailRow(label: "Project", value: session.projectName)
@@ -649,8 +704,19 @@ struct LLMSessionRow: View {
                     }
                     .buttonStyle(.plain)
                     .padding(.top, 2)
+
+                    Text(session.preview)
+                        .font(.system(size: 11.5, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.66))
+                        .lineLimit(3)
+                        .padding(.top, 2)
                 }
                 .padding(.top, 4)
+            } else {
+                Text(session.preview)
+                    .font(.system(size: 11.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.66))
+                    .lineLimit(2)
             }
         }
         .padding(.vertical, 3)
