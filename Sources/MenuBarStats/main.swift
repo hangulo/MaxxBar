@@ -323,48 +323,49 @@ final class StatusTitleView: NSView {
 
         let columns = max(topItems.count, bottomItems.count, 1)
         let columnWidth = bounds.width / CGFloat(columns)
-        let topFont = NSFont.systemFont(ofSize: 10, weight: .regular)
-        let bottomFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
-        let topAttributes: [NSAttributedString.Key: Any] = [
-            .font: topFont,
-            .foregroundColor: NSColor.labelColor
-        ]
-        let bottomAttributes: [NSAttributedString.Key: Any] = [
-            .font: bottomFont,
-            .foregroundColor: NSColor.labelColor
-        ]
+        let regularTopFont = NSFont.systemFont(ofSize: 10, weight: .regular)
+        let regularBottomFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        let warningTopFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let warningBottomFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
         let topY = max(0, floor((bounds.height - 24) / 2) - 1)
         let bottomY = topY + 11
 
         for index in 0..<columns {
             let x = CGFloat(index) * columnWidth
-            let itemColor = colorForColumn(at: index)
+            let isWarning = isLowUsageColumn(at: index)
+            let itemColor = isWarning ? lowUsageColor : NSColor.labelColor
             drawCentered(
                 topItems.indices.contains(index) ? topItems[index] : "",
                 x: x,
                 y: topY,
                 width: columnWidth,
-                attributes: topAttributes.merging([.foregroundColor: itemColor]) { _, new in new }
+                attributes: [
+                    .font: isWarning ? warningTopFont : regularTopFont,
+                    .foregroundColor: itemColor
+                ]
             )
             drawCentered(
                 bottomItems.indices.contains(index) ? bottomItems[index] : "",
                 x: x,
                 y: bottomY,
                 width: columnWidth,
-                attributes: bottomAttributes.merging([.foregroundColor: itemColor]) { _, new in new }
+                attributes: [
+                    .font: isWarning ? warningBottomFont : regularBottomFont,
+                    .foregroundColor: itemColor
+                ]
             )
         }
     }
 
-    private func colorForColumn(at index: Int) -> NSColor {
+    private func isLowUsageColumn(at index: Int) -> Bool {
         guard index < 2,
               bottomItems.indices.contains(index),
               let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")),
               percent < 15 else {
-            return .labelColor
+            return false
         }
 
-        return lowUsageColor
+        return true
     }
 
     private func drawCentered(
