@@ -136,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLayoutConstraint.activate([
                 titleView.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
                 titleView.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -4),
-                titleView.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 0.5),
+                titleView.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: -0.5),
                 titleView.heightAnchor.constraint(equalToConstant: NSStatusBar.system.thickness)
             ])
             titleView.setLines(statusTextLines())
@@ -327,11 +327,11 @@ final class StatusTitleView: NSView {
             .foregroundColor: NSColor.labelColor
         ]
         let bottomAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
             .foregroundColor: NSColor.labelColor
         ]
-        let topY = max(1, floor((bounds.height - 24) / 2))
-        let bottomY = topY + 12
+        let topY = max(0, floor((bounds.height - 24) / 2) - 1)
+        let bottomY = topY + 11
 
         for index in 0..<columns {
             let x = CGFloat(index) * columnWidth
