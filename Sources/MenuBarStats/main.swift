@@ -110,9 +110,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let shouldVerifyPopoverAction: Bool
     private let shouldVerifyPopOutAction: Bool
     private var statusItem: NSStatusItem?
+    private var statusTitleView: StatusTitleView?
     private var popover: NSPopover?
     private var detachedWindow: NSWindow?
     private var timer: Timer?
+    private var currentPopoverPanel: StatsPanel = .llmUsage
 
     init(shouldVerifyPopoverAction: Bool = false, shouldVerifyPopOutAction: Bool = false) {
         self.shouldVerifyPopoverAction = shouldVerifyPopoverAction
@@ -125,10 +127,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.button?.font = .systemFont(ofSize: 11, weight: .regular)
-        item.button?.alignment = .center
-        item.button?.lineBreakMode = .byWordWrapping
-        item.button?.attributedTitle = statusAttributedTitle()
+        item.length = 95
+        if let button = item.button {
+            button.title = ""
+            let titleView = StatusTitleView()
+            titleView.translatesAutoresizingMaskIntoConstraints = false
+            button.addSubview(titleView)
+            NSLayoutConstraint.activate([
+                titleView.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
+                titleView.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -4),
+                titleView.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 0.5),
+                titleView.heightAnchor.constraint(equalToConstant: NSStatusBar.system.thickness)
+            ])
+            titleView.setLines(statusTextLines())
+            statusTitleView = titleView
+        }
         statusItem = item
 
         let popover = NSPopover()
@@ -160,20 +173,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshInBackground() {
         model.refreshInBackground { [weak self] in
             guard let self else { return }
-            self.statusItem?.button?.attributedTitle = self.statusAttributedTitle()
+            self.statusTitleView?.setLines(self.statusTextLines())
         }
     }
 
     @objc private func togglePopover() {
+        let selectedPanel = selectedPanelForCurrentClick()
         guard let button = statusItem?.button, let popover else { return }
 
         if popover.isShown {
-            popover.performClose(nil)
+            if selectedPanel == currentPopoverPanel {
+                popover.performClose(nil)
+            } else {
+                currentPopoverPanel = selectedPanel
+                popover.contentViewController = makePopoverContent(selectedPanel: selectedPanel)
+            }
         } else {
-            popover.contentViewController = makePopoverContent(selectedPanel: .llmUsage)
+            currentPopoverPanel = selectedPanel
+            popover.contentViewController = makePopoverContent(selectedPanel: selectedPanel)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             refreshInBackground()
         }
+    }
+
+    private func selectedPanelForCurrentClick() -> StatsPanel {
+        guard let button = statusItem?.button,
+              let event = NSApp.currentEvent,
+              event.window === button.window else {
+            return .llmUsage
+        }
+
+        let point = button.convert(event.locationInWindow, from: nil)
+        let third = button.bounds.width / 3
+        return point.x >= third * 2 ? .memory : .llmUsage
     }
 
     private func makePopoverContent(selectedPanel: StatsPanel) -> NSHostingController<MemoryPopoverView> {
@@ -195,43 +227,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return (
-            "5H     Week     MEM",
-            "\(fiveHourRemaining)%     \(weeklyRemaining)%     \(model.snapshot.pressurePercent)%"
+            "5H Week MEM",
+            "\(fiveHourRemaining)% \(weeklyRemaining)% \(model.snapshot.pressurePercent)%"
         )
-    }
-
-    private func statusAttributedTitle() -> NSAttributedString {
-        let lines = statusTextLines()
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = .center
-        paragraphStyle.lineBreakMode = .byClipping
-        paragraphStyle.lineSpacing = -2
-
-        let text = "\(lines.top)\n\(lines.bottom)"
-        let attributedText = NSMutableAttributedString(
-            string: text,
-            attributes: [
-                .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraphStyle
-            ]
-        )
-
-        attributedText.addAttributes(
-            [
-                .font: NSFont.systemFont(ofSize: 9.5, weight: .regular),
-                .baselineOffset: -0.5
-            ],
-            range: NSRange(location: 0, length: lines.top.count)
-        )
-        attributedText.addAttributes(
-            [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
-                .baselineOffset: -1.0
-            ],
-            range: NSRange(location: lines.top.count + 1, length: lines.bottom.count)
-        )
-
-        return attributedText
     }
 
     private func statusTitleForDebug() -> String {
@@ -300,5 +298,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fputs("pop-out verification failed\n", stderr)
             exit(1)
         }
+    }
+}
+
+final class StatusTitleView: NSView {
+    private var topItems = ["5H", "Week", "MEM"]
+    private var bottomItems = ["-", "-", "-"]
+
+    override var isFlipped: Bool { true }
+
+    func setLines(_ lines: (top: String, bottom: String)) {
+        topItems = lines.top.split(separator: " ").map(String.init)
+        bottomItems = lines.bottom.split(separator: " ").map(String.init)
+        needsDisplay = true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let columns = max(topItems.count, bottomItems.count, 1)
+        let columnWidth = bounds.width / CGFloat(columns)
+        let topAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let bottomAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let topY = max(1, floor((bounds.height - 24) / 2))
+        let bottomY = topY + 12
+
+        for index in 0..<columns {
+            let x = CGFloat(index) * columnWidth
+            drawCentered(
+                topItems.indices.contains(index) ? topItems[index] : "",
+                x: x,
+                y: topY,
+                width: columnWidth,
+                attributes: topAttributes
+            )
+            drawCentered(
+                bottomItems.indices.contains(index) ? bottomItems[index] : "",
+                x: x,
+                y: bottomY,
+                width: columnWidth,
+                attributes: bottomAttributes
+            )
+        }
+    }
+
+    private func drawCentered(
+        _ text: String,
+        x: CGFloat,
+        y: CGFloat,
+        width: CGFloat,
+        attributes: [NSAttributedString.Key: Any]
+    ) {
+        let size = text.size(withAttributes: attributes)
+        let rect = NSRect(x: x + (width - size.width) / 2, y: y, width: size.width, height: size.height)
+        text.draw(in: rect, withAttributes: attributes)
     }
 }
