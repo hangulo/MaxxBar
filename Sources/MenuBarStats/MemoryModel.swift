@@ -40,13 +40,28 @@ struct MemorySnapshot: Equatable {
 struct SensorSnapshot: Equatable {
     var cpuTemperature: Double?
     var gpuTemperature: Double?
+    var batteryTemperature: Double?
     var fanPercent: Int?
     var fanRPM: Int?
+    var fanReadings: [FanReading]
+    var temperatureReadings: [TemperatureReading]
     var amperage: Double?
     var power: Double?
     var voltage: Double?
     var frequencyGHz: Double?
     var lightLux: Int?
+}
+
+struct TemperatureReading: Identifiable, Equatable {
+    var id: String { label }
+    let label: String
+    let celsius: Double
+}
+
+struct FanReading: Identifiable, Equatable {
+    var id: String { label }
+    let label: String
+    let rpm: Int
 }
 
 struct CPUProcess: Identifiable, Equatable {
@@ -309,8 +324,11 @@ extension SensorSnapshot {
     static let empty = SensorSnapshot(
         cpuTemperature: nil,
         gpuTemperature: nil,
+        batteryTemperature: nil,
         fanPercent: nil,
         fanRPM: nil,
+        fanReadings: [],
+        temperatureReadings: [],
         amperage: nil,
         power: nil,
         voltage: nil,
@@ -649,11 +667,27 @@ enum MemoryReader {
 enum SensorReader {
     static func read() -> SensorSnapshot {
         let battery = readBatteryTelemetry()
+        let iStat = IStatSensorHistory.read()
+        let batteryTemperature = battery.temperatureCelsius ?? iStat.temperature(label: "Battery")
+        let fanReadings = iStat.fanReadings
+        let maxFanRPM = fanReadings.map(\.rpm).max()
+        let fanPercent = maxFanRPM.map { $0 > 0 ? 100 : 0 }
+        let temperatureReadings = iStat.temperatureReadings.isEmpty
+            ? batteryTemperature.map { [TemperatureReading(label: "Battery", celsius: $0)] } ?? []
+            : iStat.temperatureReadings.map { reading in
+                reading.label == "Battery" && batteryTemperature != nil
+                    ? TemperatureReading(label: reading.label, celsius: batteryTemperature!)
+                    : reading
+            }
+
         return SensorSnapshot(
-            cpuTemperature: battery.temperatureCelsius,
-            gpuTemperature: nil,
-            fanPercent: nil,
-            fanRPM: nil,
+            cpuTemperature: iStat.temperature(label: "CPU Performance Cores") ?? iStat.temperature(label: "CPU Efficiency Cores"),
+            gpuTemperature: iStat.temperature(label: "Graphics"),
+            batteryTemperature: batteryTemperature,
+            fanPercent: fanPercent,
+            fanRPM: maxFanRPM,
+            fanReadings: fanReadings,
+            temperatureReadings: temperatureReadings,
             amperage: battery.systemCurrentAmps,
             power: battery.systemPowerWatts ?? battery.adapterPowerWatts,
             voltage: battery.systemVoltageVolts ?? battery.batteryVoltageVolts,
@@ -725,6 +759,90 @@ enum SensorReader {
         }
 
         return integerValue(for: "Watts", in: String(remainder[wattsRange.lowerBound...]))
+    }
+}
+
+private struct IStatSensorHistory {
+    let temperatureReadings: [TemperatureReading]
+    let fanReadings: [FanReading]
+
+    func temperature(label: String) -> Double? {
+        temperatureReadings.first { $0.label == label }?.celsius
+    }
+
+    static func read() -> IStatSensorHistory {
+        let path = NSString(string: "~/Library/Application Support/iStat Menus 7/history/history.db").expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: path) else {
+            return IStatSensorHistory(temperatureReadings: [], fanReadings: [])
+        }
+
+        let query = """
+        with latest as (select max(time) t from sensors where interval=5)
+        select key, value from sensors, latest where time=t and interval=5 order by key;
+        """
+        let values = sqliteValues(databasePath: path, query: query)
+
+        let temperatureMap: [(Int, String)] = [
+            (24, "Airflow"),
+            (7, "Battery"),
+            (18, "CPU Efficiency Cores"),
+            (19, "CPU Performance Cores"),
+            (30, "Graphics"),
+            (8, "Palm Rest"),
+            (50, "SSD"),
+            (9, "Wi-Fi")
+        ]
+        let temperatures = temperatureMap.compactMap { key, label -> TemperatureReading? in
+            guard let value = values[key], value > 0, value < 130 else { return nil }
+            return TemperatureReading(label: label, celsius: value)
+        }
+
+        let fanMap: [(Int, String)] = [
+            (48, "Left Fan"),
+            (49, "Right Fan")
+        ]
+        let fans = fanMap.compactMap { key, label -> FanReading? in
+            guard let value = values[key], value >= 0, value < 10_000 else { return nil }
+            return FanReading(label: label, rpm: Int(value.rounded()))
+        }
+
+        return IStatSensorHistory(temperatureReadings: temperatures, fanReadings: fans)
+    }
+
+    private static func sqliteValues(databasePath: String, query: String) -> [Int: Double] {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        task.arguments = [databasePath, query]
+
+        let output = Pipe()
+        task.standardOutput = output
+        task.standardError = Pipe()
+
+        do {
+            try task.run()
+        } catch {
+            return [:]
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0,
+              let text = String(data: data, encoding: .utf8) else {
+            return [:]
+        }
+
+        var values: [Int: Double] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: "|")
+            guard parts.count == 2,
+                  let key = Int(parts[0]),
+                  let value = Double(parts[1]) else {
+                continue
+            }
+            values[key] = value
+        }
+
+        return values
     }
 }
 

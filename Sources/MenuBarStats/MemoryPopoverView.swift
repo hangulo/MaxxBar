@@ -135,29 +135,28 @@ struct SensorsPanelView: View {
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 16) {
-                ValueRingView(title: "BATT", value: temperature(snapshot.cpuTemperature), percent: temperaturePercent(snapshot.cpuTemperature))
-                ValueRingView(title: "PWR", value: wattsCompact(snapshot.power), percent: powerPercent(snapshot.power))
-                ValueRingView(title: "FANS", value: percent(snapshot.fanPercent), percent: Double(snapshot.fanPercent ?? 0))
+                ValueRingView(title: "CPU", value: temperature(snapshot.cpuTemperature), percent: temperaturePercent(snapshot.cpuTemperature))
+                ValueRingView(title: "GPU", value: temperature(snapshot.gpuTemperature), percent: temperaturePercent(snapshot.gpuTemperature))
+                ValueRingView(title: "FANS", value: fanStatus(snapshot), percent: fanPercent(snapshot))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .background(Color.panel)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            MetricCard(title: "TEMPERATURE", rows: [
-                MetricRow(label: "Battery", value: temperature(snapshot.cpuTemperature)),
-                MetricRow(label: "CPU/GPU", value: "Requires helper"),
-                MetricRow(label: "Airflow / Palm Rest / SSD / Wi-Fi", value: "Requires helper")
-            ])
-            MetricCard(title: "FANS", rows: [MetricRow(label: "Fan", value: rpm(snapshot.fanRPM))])
-            MetricCard(title: "AMPERAGE", rows: [MetricRow(label: "System In", value: amps(snapshot.amperage))])
-            MetricCard(title: "POWER", rows: [MetricRow(label: "System In", value: watts(snapshot.power))])
-            MetricCard(title: "VOLTAGE", rows: [MetricRow(label: "System In", value: volts(snapshot.voltage))])
-            MetricCard(title: "FREQUENCY", rows: [MetricRow(label: "CPU", value: ghz(snapshot.frequencyGHz))])
-            MetricCard(title: "LIGHT", rows: [MetricRow(label: "Light", value: lux(snapshot.lightLux))])
+            MetricCard(title: "TEMPERATURE", rows: temperatureRows)
 
             ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
+    }
+
+    private var temperatureRows: [MetricRow] {
+        let readings = snapshot.temperatureReadings
+        guard !readings.isEmpty else {
+            return [MetricRow(label: "CPU / GPU / Fans", value: "Requires helper")]
+        }
+
+        return readings.map { MetricRow(label: $0.label, value: temperature($0.celsius)) }
     }
 }
 
@@ -1100,6 +1099,16 @@ private func temperature(_ value: Double?) -> String {
 private func temperaturePercent(_ value: Double?) -> Double {
     guard let value else { return 0 }
     return min(max(value / 120 * 100, 0), 100)
+}
+
+private func fanStatus(_ snapshot: SensorSnapshot) -> String {
+    guard let rpm = snapshot.fanRPM else { return "-" }
+    return rpm > 0 ? "ON" : "OFF"
+}
+
+private func fanPercent(_ snapshot: SensorSnapshot) -> Double {
+    guard let rpm = snapshot.fanRPM else { return 0 }
+    return rpm > 0 ? 100 : 0
 }
 
 private func percent(_ value: Int?) -> String {
