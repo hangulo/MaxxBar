@@ -125,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.button?.font = .monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        item.button?.font = .systemFont(ofSize: 11, weight: .regular)
         item.button?.alignment = .center
         item.button?.lineBreakMode = .byWordWrapping
         item.button?.attributedTitle = statusAttributedTitle()
@@ -195,8 +195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return (
-            "5H       WK       MEM",
-            "\(fiveHourRemaining)% left   \(weeklyRemaining)% left   \(model.snapshot.pressurePercent)%"
+            "5H     Week     MEM",
+            "\(fiveHourRemaining)%     \(weeklyRemaining)%     \(model.snapshot.pressurePercent)%"
         )
     }
 
@@ -205,18 +205,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
         paragraphStyle.lineBreakMode = .byClipping
-        paragraphStyle.lineSpacing = -1
+        paragraphStyle.lineSpacing = -2
 
         let text = "\(lines.top)\n\(lines.bottom)"
-        return NSAttributedString(
+        let attributedText = NSMutableAttributedString(
             string: text,
             attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .regular),
                 .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraphStyle,
-                .baselineOffset: -0.5
+                .paragraphStyle: paragraphStyle
             ]
         )
+
+        attributedText.addAttributes(
+            [
+                .font: NSFont.systemFont(ofSize: 9.5, weight: .regular),
+                .baselineOffset: -0.5
+            ],
+            range: NSRange(location: 0, length: lines.top.count)
+        )
+        attributedText.addAttributes(
+            [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+                .baselineOffset: -1.0
+            ],
+            range: NSRange(location: lines.top.count + 1, length: lines.bottom.count)
+        )
+
+        return attributedText
     }
 
     private func statusTitleForDebug() -> String {
