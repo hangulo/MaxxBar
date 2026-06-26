@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MenuBarStats"
 CONFIGURATION="${CONFIGURATION:-debug}"
-APP_DIR="$ROOT_DIR/Dist/$APP_NAME.app"
+APP_DIR="${APP_DIR:-$ROOT_DIR/Dist/$APP_NAME.app}"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"

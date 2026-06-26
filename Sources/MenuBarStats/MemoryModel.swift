@@ -189,11 +189,83 @@ struct LLMTokenUsageSummary: Equatable {
     }
 }
 
+struct LLMTokenCostEstimate: Identifiable, Equatable {
+    static let freshInputDollarsPerMillion = 1.75
+    static let cachedInputDollarsPerMillion = 0.175
+    static let outputDollarsPerMillion = 14.0
+
+    var id: String { label }
+    var label: String
+    var sessionCount: Int
+    var inputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var outputTokens: UInt64
+    var totalTokens: UInt64
+    var windowStartedAt: Date
+    var windowEndedAt: Date
+
+    var freshInputTokens: UInt64 {
+        inputTokens >= cachedInputTokens ? inputTokens - cachedInputTokens : 0
+    }
+
+    var cacheHitPercent: Int {
+        guard inputTokens > 0 else { return 0 }
+        return Int((Double(cachedInputTokens) / Double(inputTokens) * 100).rounded())
+    }
+
+    var estimatedCost: Double {
+        dollars(for: freshInputTokens, rate: Self.freshInputDollarsPerMillion)
+            + dollars(for: cachedInputTokens, rate: Self.cachedInputDollarsPerMillion)
+            + dollars(for: outputTokens, rate: Self.outputDollarsPerMillion)
+    }
+
+    private func dollars(for tokens: UInt64, rate: Double) -> Double {
+        Double(tokens) / 1_000_000 * rate
+    }
+}
+
+struct LLMUsageWindowLogEntry: Codable, Equatable {
+    var recordedAt: Date
+    var windowLabel: String
+    var windowStartedAt: Date
+    var windowEndedAt: Date
+    var sessionCount: Int
+    var totalInputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var freshInputTokens: UInt64
+    var outputTokens: UInt64
+    var totalTokens: UInt64
+    var cacheHitPercent: Int
+    var estimatedCostUSD: Double
+    var freshInputDollarsPerMillion: Double
+    var cachedInputDollarsPerMillion: Double
+    var outputDollarsPerMillion: Double
+
+    init(recordedAt: Date = Date(), estimate: LLMTokenCostEstimate) {
+        self.recordedAt = recordedAt
+        self.windowLabel = estimate.label
+        self.windowStartedAt = estimate.windowStartedAt
+        self.windowEndedAt = estimate.windowEndedAt
+        self.sessionCount = estimate.sessionCount
+        self.totalInputTokens = estimate.inputTokens
+        self.cachedInputTokens = estimate.cachedInputTokens
+        self.freshInputTokens = estimate.freshInputTokens
+        self.outputTokens = estimate.outputTokens
+        self.totalTokens = estimate.totalTokens
+        self.cacheHitPercent = estimate.cacheHitPercent
+        self.estimatedCostUSD = estimate.estimatedCost
+        self.freshInputDollarsPerMillion = LLMTokenCostEstimate.freshInputDollarsPerMillion
+        self.cachedInputDollarsPerMillion = LLMTokenCostEstimate.cachedInputDollarsPerMillion
+        self.outputDollarsPerMillion = LLMTokenCostEstimate.outputDollarsPerMillion
+    }
+}
+
 struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var id = UUID()
     var sampledAt: Date
     var primaryRemainingPercent: Int?
     var weeklyRemainingPercent: Int?
+    var planType: String? = nil
 }
 
 struct LLMUsageSnapshot: Equatable {
@@ -206,6 +278,7 @@ struct LLMUsageSnapshot: Equatable {
     var localWeeklyTokens: UInt64
     var localWeeklyThreads: Int
     var localWindows: [LLMLocalUsageWindow]
+    var costEstimates: [LLMTokenCostEstimate]
     var recentSessions: [LLMUsageSession]
     var topWeeklySessions: [LLMUsageSession]
     var error: String?
@@ -240,6 +313,9 @@ final class MemoryModel: ObservableObject {
     private var previousLLMUsageRefresh: Date?
     private var previousLLMQuotaSample: Date?
     private var isRefreshing = false
+    private var isRefreshingStatus = false
+    private var isRefreshingLLMUsage = false
+    private static let llmQuotaHistoryLimit = 4_320
 
     init() {
         llmQuotaHistory = Self.loadLLMQuotaHistory()
@@ -258,6 +334,22 @@ final class MemoryModel: ObservableObject {
         self.network = network
         self.llmUsage = llmUsage
         self.llmQuotaHistory = llmQuotaHistory
+    }
+
+    func applyDemoSnapshots() {
+        sensors = .demo
+        cpuGPU = CPUReader.read(previous: nil, sensors: .demo).snapshot
+        network = .demo
+        llmUsage = .demo
+        llmQuotaHistory = .demo
+    }
+
+    func seedInitialMemorySnapshot() {
+        let stats = MemoryReader.read(includeProcesses: false, precisePressure: false)
+        snapshot = stats
+        previousCumulativePageIns = stats.cumulativePageIns
+        previousCumulativePageOuts = stats.cumulativePageOuts
+        history = [stats.breakdown]
     }
 
     func refresh() {
@@ -285,6 +377,10 @@ final class MemoryModel: ObservableObject {
         }
     }
 
+    func captureLLMQuotaSample() {
+        sampleLLMQuotaIfNeeded(force: true)
+    }
+
     func refreshInBackground(completion: (@MainActor @Sendable () -> Void)? = nil) {
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -294,8 +390,6 @@ final class MemoryModel: ObservableObject {
         let previousCPUInfo = previousCPUInfo
         let previousNetworkCounters = previousNetworkCounters
         let networkHistory = networkHistory
-        let previousLLMUsage = llmUsage
-        let previousLLMUsageRefresh = previousLLMUsageRefresh
 
         DispatchQueue.global(qos: .utility).async {
             let result = Self.collectRefresh(
@@ -303,9 +397,7 @@ final class MemoryModel: ObservableObject {
                 previousPageOuts: previousPageOuts,
                 previousCPUInfo: previousCPUInfo,
                 previousNetworkCounters: previousNetworkCounters,
-                networkHistory: networkHistory,
-                previousLLMUsage: previousLLMUsage,
-                previousLLMUsageRefresh: previousLLMUsageRefresh
+                networkHistory: networkHistory
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -317,14 +409,83 @@ final class MemoryModel: ObservableObject {
         }
     }
 
+    func refreshStatusInBackground(completion: (@MainActor @Sendable () -> Void)? = nil) {
+        guard !isRefreshingStatus else { return }
+        isRefreshingStatus = true
+
+        let previousPageIns = previousCumulativePageIns
+        let previousPageOuts = previousCumulativePageOuts
+
+        DispatchQueue.global(qos: .utility).async {
+            let stats = MemoryReader.read(includeProcesses: false, precisePressure: false)
+            var displayStats = stats
+            displayStats.pageIns = Self.deltaValue(from: previousPageIns, to: stats.cumulativePageIns)
+            displayStats.pageOuts = Self.deltaValue(from: previousPageOuts, to: stats.cumulativePageOuts)
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.previousCumulativePageIns = stats.cumulativePageIns
+                self.previousCumulativePageOuts = stats.cumulativePageOuts
+                self.snapshot = displayStats
+                self.history.append(stats.breakdown)
+                if self.history.count > 60 {
+                    self.history.removeFirst(self.history.count - 60)
+                }
+                self.isRefreshingStatus = false
+                completion?()
+            }
+        }
+    }
+
+    func refreshLLMUsageInBackground(force: Bool = false, completion: (@MainActor @Sendable () -> Void)? = nil) {
+        guard !isRefreshingLLMUsage else { return }
+        if !force,
+           let previousLLMUsageRefresh,
+           Date().timeIntervalSince(previousLLMUsageRefresh) < 60 {
+            completion?()
+            return
+        }
+
+        isRefreshingLLMUsage = true
+        DispatchQueue.global(qos: .utility).async {
+            let usage = LLMUsageReader.read()
+            let refreshedAt = Date()
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.llmUsage = usage
+                self.previousLLMUsageRefresh = refreshedAt
+                self.logFiveHourUsageWindow(from: usage)
+                self.sampleLLMQuotaIfNeeded()
+                self.isRefreshingLLMUsage = false
+                completion?()
+            }
+        }
+    }
+
+    func openFiveHourUsageLog() {
+        guard let url = Self.fiveHourUsageReportURL ?? Self.fiveHourUsageLogURL else { return }
+        do {
+            try Self.writeFiveHourUsageReport()
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            NSWorkspace.shared.open(url)
+        } catch {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+
     private struct RefreshResult {
         let stats: MemorySnapshot
         let displayStats: MemorySnapshot
         let sensors: SensorSnapshot
         let cpuResult: (snapshot: CPUGPUSnapshot, current: CPUReader.CPULoadInfo?)
         let networkResult: (snapshot: NetworkSnapshot, counters: NetworkReader.NetworkCounters?)
-        let llmUsage: LLMUsageSnapshot
-        let llmUsageRefresh: Date?
     }
 
     nonisolated private static func collectRefresh(
@@ -332,9 +493,7 @@ final class MemoryModel: ObservableObject {
         previousPageOuts: UInt64?,
         previousCPUInfo: CPUReader.CPULoadInfo?,
         previousNetworkCounters: NetworkReader.NetworkCounters?,
-        networkHistory: [NetworkSample],
-        previousLLMUsage: LLMUsageSnapshot,
-        previousLLMUsageRefresh: Date?
+        networkHistory: [NetworkSample]
     ) -> RefreshResult {
         let stats = MemoryReader.read()
         var displayStats = stats
@@ -343,17 +502,13 @@ final class MemoryModel: ObservableObject {
         let sensors = SensorReader.read()
         let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
         let networkResult = NetworkReader.read(previous: previousNetworkCounters, history: networkHistory)
-        let shouldRefreshLLMUsage = previousLLMUsageRefresh.map { Date().timeIntervalSince($0) > 60 } ?? true
-        let llmUsage = shouldRefreshLLMUsage ? LLMUsageReader.read() : previousLLMUsage
 
         return RefreshResult(
             stats: stats,
             displayStats: displayStats,
             sensors: sensors,
             cpuResult: cpuResult,
-            networkResult: networkResult,
-            llmUsage: llmUsage,
-            llmUsageRefresh: shouldRefreshLLMUsage ? Date() : previousLLMUsageRefresh
+            networkResult: networkResult
         )
     }
 
@@ -367,9 +522,6 @@ final class MemoryModel: ObservableObject {
         previousNetworkCounters = result.networkResult.counters
         networkHistory = result.networkResult.snapshot.history
         network = result.networkResult.snapshot
-        llmUsage = result.llmUsage
-        previousLLMUsageRefresh = result.llmUsageRefresh
-        sampleLLMQuotaIfNeeded()
         history.append(result.stats.breakdown)
         if history.count > 60 {
             history.removeFirst(history.count - 60)
@@ -399,13 +551,14 @@ final class MemoryModel: ObservableObject {
             LLMQuotaHistorySample(
                 sampledAt: now,
                 primaryRemainingPercent: limit.primary?.remainingPercent,
-                weeklyRemainingPercent: limit.secondary?.remainingPercent
+                weeklyRemainingPercent: limit.secondary?.remainingPercent,
+                planType: llmUsage.planType
             )
         )
         previousLLMQuotaSample = now
 
-        if llmQuotaHistory.count > 144 {
-            llmQuotaHistory.removeFirst(llmQuotaHistory.count - 144)
+        if llmQuotaHistory.count > Self.llmQuotaHistoryLimit {
+            llmQuotaHistory.removeFirst(llmQuotaHistory.count - Self.llmQuotaHistoryLimit)
         }
 
         saveLLMQuotaHistory()
@@ -430,6 +583,24 @@ final class MemoryModel: ObservableObject {
             .appendingPathComponent("llm-quota-history.json")
     }
 
+    private static var fiveHourUsageLogURL: URL? {
+        guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return directory
+            .appendingPathComponent("MenuBarStats", isDirectory: true)
+            .appendingPathComponent("llm-5h-usage-windows.jsonl")
+    }
+
+    private static var fiveHourUsageReportURL: URL? {
+        guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return directory
+            .appendingPathComponent("MenuBarStats", isDirectory: true)
+            .appendingPathComponent("llm-5h-usage-windows.html")
+    }
+
     private static func loadLLMQuotaHistory() -> [LLMQuotaHistorySample] {
         guard let url = llmQuotaHistoryURL,
               let data = try? Data(contentsOf: url),
@@ -437,7 +608,7 @@ final class MemoryModel: ObservableObject {
             return []
         }
 
-        return Array(samples.sorted { $0.sampledAt < $1.sampledAt }.suffix(144))
+        return Array(samples.sorted { $0.sampledAt < $1.sampledAt }.suffix(llmQuotaHistoryLimit))
     }
 
     private func saveLLMQuotaHistory() {
@@ -455,6 +626,209 @@ final class MemoryModel: ObservableObject {
         } catch {
             // Persistence is best-effort; the live graph should keep working if this write fails.
         }
+    }
+
+    private func logFiveHourUsageWindow(from usage: LLMUsageSnapshot) {
+        guard let estimate = usage.costEstimates.first(where: { $0.label.lowercased() == "5h" }),
+              let url = Self.fiveHourUsageLogURL,
+              let line = Self.logLine(for: LLMUsageWindowLogEntry(estimate: estimate)) else {
+            return
+        }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer {
+                try? handle.close()
+            }
+            try handle.seekToEnd()
+            handle.write(line)
+            try Self.writeFiveHourUsageReport()
+        } catch {
+            // The app should never block live stats because the usage log could not be written.
+        }
+    }
+
+    private static func logLine(for entry: LLMUsageWindowLogEntry) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard var data = try? encoder.encode(entry) else { return nil }
+        data.append(0x0A)
+        return data
+    }
+
+    private static func writeFiveHourUsageReport() throws {
+        guard let reportURL = fiveHourUsageReportURL,
+              let logURL = fiveHourUsageLogURL else {
+            return
+        }
+
+        let entries = readFiveHourUsageLog(from: logURL)
+        let html = fiveHourUsageHTML(entries: entries, rawLogURL: logURL)
+        try FileManager.default.createDirectory(
+            at: reportURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try html.write(to: reportURL, atomically: true, encoding: .utf8)
+    }
+
+    private static func readFiveHourUsageLog(from url: URL) -> [LLMUsageWindowLogEntry] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                guard let data = String(line).data(using: .utf8) else { return nil }
+                return try? decoder.decode(LLMUsageWindowLogEntry.self, from: data)
+            }
+            .sorted { $0.windowEndedAt > $1.windowEndedAt }
+    }
+
+    private static func fiveHourUsageHTML(entries: [LLMUsageWindowLogEntry], rawLogURL: URL) -> String {
+        let latest = entries.first
+        let rows = entries.map { entry in
+            """
+            <tr>
+              <td>\(html(entry.windowLabel))</td>
+              <td>\(html(dateRange(entry.windowStartedAt, entry.windowEndedAt)))</td>
+              <td>\(html(dateTime(entry.recordedAt)))</td>
+              <td class="num">\(entry.sessionCount)</td>
+              <td class="num">\(tokenString(entry.freshInputTokens))</td>
+              <td class="num">\(tokenString(entry.cachedInputTokens))</td>
+              <td class="num">\(tokenString(entry.outputTokens))</td>
+              <td class="num">\(tokenString(entry.totalTokens))</td>
+              <td class="num">\(entry.cacheHitPercent)%</td>
+              <td class="num">\(dollarString(entry.estimatedCostUSD))</td>
+            </tr>
+            """
+        }.joined(separator: "\n")
+
+        let latestCards = latest.map { entry in
+            """
+            <section class="summary">
+              <div><span>Window</span><strong>\(html(dateRange(entry.windowStartedAt, entry.windowEndedAt)))</strong></div>
+              <div><span>API Est.</span><strong>\(dollarString(entry.estimatedCostUSD))</strong></div>
+              <div><span>Cache Hit</span><strong>\(entry.cacheHitPercent)%</strong></div>
+              <div><span>Fresh Input</span><strong>\(tokenString(entry.freshInputTokens))</strong></div>
+              <div><span>Cached Input</span><strong>\(tokenString(entry.cachedInputTokens))</strong></div>
+              <div><span>Output</span><strong>\(tokenString(entry.outputTokens))</strong></div>
+            </section>
+            """
+        } ?? """
+        <section class="empty">No 5h usage samples have been recorded yet.</section>
+        """
+
+        return """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>MenuBarStats Codex 5h Usage Log</title>
+          <style>
+            :root { color-scheme: dark; --bg:#161922; --panel:#222638; --panel2:#2b3050; --text:#f7f7fb; --muted:#a8abb8; --blue:#0a84ff; --yellow:#ffcc24; }
+            body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; background:var(--bg); color:var(--text); }
+            main { max-width:1120px; margin:0 auto; padding:28px; }
+            h1 { margin:0 0 6px; font-size:28px; color:var(--blue); }
+            p { margin:0 0 20px; color:var(--muted); }
+            .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin:18px 0 20px; }
+            .summary div, .empty { background:var(--panel); border-radius:8px; padding:12px 14px; }
+            .summary span { display:block; color:var(--muted); font-size:12px; font-weight:650; text-transform:uppercase; letter-spacing:.02em; }
+            .summary strong { display:block; margin-top:5px; font-size:22px; }
+            table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:8px; overflow:hidden; }
+            th, td { padding:10px 12px; border-bottom:1px solid rgba(255,255,255,.07); text-align:left; white-space:nowrap; }
+            th { color:var(--blue); font-size:12px; text-transform:uppercase; letter-spacing:.03em; background:var(--panel2); }
+            td { color:rgba(247,247,251,.9); font-size:14px; }
+            .num { text-align:right; font-variant-numeric:tabular-nums; }
+            a { color:var(--blue); }
+            footer { margin-top:16px; color:var(--muted); font-size:12px; }
+          </style>
+        </head>
+        <body>
+          <main>
+            <h1>Codex 5h Usage Log</h1>
+            <p>API-equivalent estimate using fresh input, cached input, and output token pricing. Subscription usage may not map directly to API billing.</p>
+            \(latestCards)
+            <table>
+              <thead>
+                <tr>
+                  <th>Window</th>
+                  <th>Start-End</th>
+                  <th>Recorded</th>
+                  <th class="num">Sessions</th>
+                  <th class="num">Fresh</th>
+                  <th class="num">Cached</th>
+                  <th class="num">Output</th>
+                  <th class="num">Total</th>
+                  <th class="num">Cache</th>
+                  <th class="num">API Est.</th>
+                </tr>
+              </thead>
+              <tbody>
+                \(rows)
+              </tbody>
+            </table>
+            <footer>Raw JSONL: <a href="file://\(html(rawLogURL.path))">\(html(rawLogURL.path))</a></footer>
+          </main>
+        </body>
+        </html>
+        """
+    }
+
+    private static func tokenString(_ value: UInt64) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        }
+        if value >= 1_000 {
+            return String(format: "%.1fK", Double(value) / 1_000)
+        }
+        return "\(value)"
+    }
+
+    private static func dollarString(_ value: Double) -> String {
+        if value >= 100 {
+            return String(format: "$%.0f", value)
+        }
+        if value >= 10 {
+            return String(format: "$%.1f", value)
+        }
+        return String(format: "$%.2f", value)
+    }
+
+    private static func dateTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, h:mm a"
+        return formatter.string(from: date)
+    }
+
+    private static func dateRange(_ start: Date, _ end: Date) -> String {
+        let calendar = Calendar.current
+        let formatter = DateFormatter()
+        if calendar.isDate(start, inSameDayAs: end) {
+            formatter.dateFormat = "MMM d, h:mm a"
+            let startText = formatter.string(from: start)
+            formatter.dateFormat = "h:mm a"
+            return "\(startText)-\(formatter.string(from: end))"
+        }
+
+        formatter.dateFormat = "MMM d, h:mm a"
+        return "\(formatter.string(from: start))-\(formatter.string(from: end))"
+    }
+
+    private static func html(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 }
 
@@ -504,11 +878,14 @@ extension NetworkSnapshot {
 
 extension Array where Element == LLMQuotaHistorySample {
     static let demo: [LLMQuotaHistorySample] = [
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_400), primaryRemainingPercent: 48, weeklyRemainingPercent: 84),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-1_800), primaryRemainingPercent: 46, weeklyRemainingPercent: 83),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-1_200), primaryRemainingPercent: 44, weeklyRemainingPercent: 82),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-600), primaryRemainingPercent: 42, weeklyRemainingPercent: 81),
-        LLMQuotaHistorySample(sampledAt: Date(), primaryRemainingPercent: 42, weeklyRemainingPercent: 81)
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-6_000), primaryRemainingPercent: 99, weeklyRemainingPercent: 84, planType: "plus"),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-5_340), primaryRemainingPercent: 92, weeklyRemainingPercent: 83, planType: "plus"),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-4_680), primaryRemainingPercent: 56, weeklyRemainingPercent: 77, planType: "plus"),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-4_080), primaryRemainingPercent: 34, weeklyRemainingPercent: 74, planType: "plus"),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-3_420), primaryRemainingPercent: 11, weeklyRemainingPercent: 70, planType: "plus"),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_760), primaryRemainingPercent: 0, weeklyRemainingPercent: 68, planType: "plus"),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_100), primaryRemainingPercent: 0, weeklyRemainingPercent: 68, planType: "plus"),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-1_440), primaryRemainingPercent: 99, weeklyRemainingPercent: 100, planType: "prolite")
     ]
 }
 
@@ -523,6 +900,7 @@ extension LLMUsageSnapshot {
         localWeeklyTokens: 0,
         localWeeklyThreads: 0,
         localWindows: [],
+        costEstimates: [],
         recentSessions: [],
         topWeeklySessions: [],
         error: nil
@@ -548,6 +926,28 @@ extension LLMUsageSnapshot {
             LLMLocalUsageWindow(label: "5h", tokens: 200_670_848, threads: 6),
             LLMLocalUsageWindow(label: "24h", tokens: 208_400_000, threads: 9),
             LLMLocalUsageWindow(label: "7d", tokens: 216_176_212, threads: 17)
+        ],
+        costEstimates: [
+            LLMTokenCostEstimate(
+                label: "5h",
+                sessionCount: 6,
+                inputTokens: 95_000_000,
+                cachedInputTokens: 88_000_000,
+                outputTokens: 420_000,
+                totalTokens: 95_420_000,
+                windowStartedAt: Date().addingTimeInterval(-18_000),
+                windowEndedAt: Date()
+            ),
+            LLMTokenCostEstimate(
+                label: "Weekly",
+                sessionCount: 17,
+                inputTokens: 126_800_000,
+                cachedInputTokens: 120_200_000,
+                outputTokens: 289_600,
+                totalTokens: 127_089_600,
+                windowStartedAt: Date().addingTimeInterval(-604_800),
+                windowEndedAt: Date()
+            )
         ],
         recentSessions: [
             LLMUsageSession(
@@ -614,6 +1014,30 @@ extension SensorSnapshot {
         power: nil,
         voltage: nil,
         frequencyGHz: CPUReader.currentFrequencyGHz(),
+        lightLux: nil
+    )
+
+    static let demo = SensorSnapshot(
+        cpuTemperature: 67,
+        gpuTemperature: 52,
+        batteryTemperature: 30,
+        fanPercent: 0,
+        fanRPM: nil,
+        fanReadings: [],
+        temperatureReadings: [
+            TemperatureReading(label: "Airflow", celsius: 46.7),
+            TemperatureReading(label: "Battery", celsius: 30),
+            TemperatureReading(label: "CPU Efficiency Cores", celsius: 66.8),
+            TemperatureReading(label: "CPU Performance Cores", celsius: 67.2),
+            TemperatureReading(label: "Graphics", celsius: 51.7),
+            TemperatureReading(label: "Palm Rest", celsius: 27.8),
+            TemperatureReading(label: "SSD", celsius: 32.2),
+            TemperatureReading(label: "Wi-Fi", celsius: 47.2)
+        ],
+        amperage: 1.0,
+        power: 28,
+        voltage: 19.6,
+        frequencyGHz: 3.08,
         lightLux: nil
     )
 }
@@ -689,7 +1113,7 @@ extension MemoryBreakdown {
 }
 
 enum MemoryReader {
-    static func read() -> MemorySnapshot {
+    static func read(includeProcesses: Bool = true, precisePressure: Bool = true) -> MemorySnapshot {
         let pageSize = readPageSize()
         let vm = readVMStats()
         let free = UInt64(vm.free_count) * pageSize
@@ -702,10 +1126,11 @@ enum MemoryReader {
         let reserved = min(wired + compressed + available, total)
         let app = total - reserved
         let used = min(app + wired + compressed, total)
-        let pressure = readPressurePercent() ?? Int((Double(used) / Double(total) * 100).rounded())
+        let estimatedPressure = Int((Double(used) / Double(total) * 100).rounded())
+        let pressure = precisePressure ? readPressurePercent() ?? estimatedPressure : estimatedPressure
         let usedPercent = Int((Double(used) / Double(total) * 100).rounded())
         let swap = readSwap()
-        let processSnapshot = readTopProcesses()
+        let processSnapshot = includeProcesses ? readTopProcesses() : (grouped: [ProcessMemory](), rows: [ProcessMemory]())
 
         return MemorySnapshot(
             pressurePercent: min(max(pressure, 0), 100),
@@ -1428,6 +1853,7 @@ enum LLMUsageReader {
         let weeklyTokens: UInt64
         let weeklyThreads: Int
         let windows: [LLMLocalUsageWindow]
+        let costEstimates: [LLMTokenCostEstimate]
         let recentSessions: [LLMUsageSession]
         let topWeeklySessions: [LLMUsageSession]
     }
@@ -1503,6 +1929,7 @@ enum LLMUsageReader {
                 localWeeklyTokens: local.weeklyTokens,
                 localWeeklyThreads: local.weeklyThreads,
                 localWindows: local.windows,
+                costEstimates: local.costEstimates,
                 recentSessions: local.recentSessions,
                 topWeeklySessions: local.topWeeklySessions,
                 error: "Codex auth not found"
@@ -1549,6 +1976,7 @@ enum LLMUsageReader {
                 localWeeklyTokens: local.weeklyTokens,
                 localWeeklyThreads: local.weeklyThreads,
                 localWindows: local.windows,
+                costEstimates: local.costEstimates,
                 recentSessions: local.recentSessions,
                 topWeeklySessions: local.topWeeklySessions,
                 error: nil
@@ -1616,7 +2044,7 @@ enum LLMUsageReader {
     private static func readLocalCodexUsage() -> LocalCodexUsage {
         let databasePath = "\(NSHomeDirectory())/.codex/state_5.sqlite"
         guard FileManager.default.fileExists(atPath: databasePath) else {
-            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], recentSessions: [], topWeeklySessions: [])
+            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], costEstimates: [], recentSessions: [], topWeeklySessions: [])
         }
 
         let windows = [
@@ -1633,6 +2061,7 @@ enum LLMUsageReader {
             weeklyTokens: weekly.tokens,
             weeklyThreads: weekly.threads,
             windows: windows,
+            costEstimates: costEstimates(databasePath: databasePath),
             recentSessions: sessions(databasePath: databasePath, mode: .recent),
             topWeeklySessions: sessions(databasePath: databasePath, mode: .highestWeekly)
         )
@@ -1649,6 +2078,56 @@ enum LLMUsageReader {
             label: label,
             tokens: row.indices.contains(0) ? UInt64(row[0]) ?? 0 : 0,
             threads: row.indices.contains(1) ? Int(row[1]) ?? 0 : 0
+        )
+    }
+
+    private static func costEstimates(databasePath: String) -> [LLMTokenCostEstimate] {
+        let endedAt = Date()
+        return [
+            costEstimate(databasePath: databasePath, label: "5h", seconds: 18_000, endedAt: endedAt),
+            costEstimate(databasePath: databasePath, label: "Weekly", seconds: 604_800, endedAt: endedAt)
+        ].compactMap { $0 }
+    }
+
+    private static func costEstimate(databasePath: String, label: String, seconds: Int, endedAt: Date) -> LLMTokenCostEstimate? {
+        let query = """
+        select rollout_path
+        from threads
+        where tokens_used > 0
+          and coalesce(updated_at_ms, updated_at * 1000) >= (strftime('%s','now')-\(seconds))*1000
+          and rollout_path is not null
+          and rollout_path != '';
+        """
+
+        var sessionCount = 0
+        var inputTokens: UInt64 = 0
+        var cachedInputTokens: UInt64 = 0
+        var outputTokens: UInt64 = 0
+        var totalTokens: UInt64 = 0
+
+        for row in sqliteRows(databasePath: databasePath, query: query) {
+            guard let rolloutPath = row.first,
+                  let usage = tokenUsageSummary(from: rolloutPath) else {
+                continue
+            }
+            sessionCount += 1
+            inputTokens += usage.inputTokens
+            cachedInputTokens += usage.cachedInputTokens
+            outputTokens += usage.outputTokens
+            totalTokens += max(usage.totalTokens, usage.inputTokens + usage.outputTokens)
+        }
+
+        guard sessionCount > 0 else { return nil }
+
+        return LLMTokenCostEstimate(
+            label: label,
+            sessionCount: sessionCount,
+            inputTokens: inputTokens,
+            cachedInputTokens: cachedInputTokens,
+            outputTokens: outputTokens,
+            totalTokens: totalTokens,
+            windowStartedAt: endedAt.addingTimeInterval(-TimeInterval(seconds)),
+            windowEndedAt: endedAt
         )
     }
 
@@ -1706,8 +2185,7 @@ enum LLMUsageReader {
     private static func tokenUsageSummary(from rolloutPath: String) -> LLMTokenUsageSummary? {
         let path = rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty,
-              FileManager.default.fileExists(atPath: path),
-              let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+              FileManager.default.fileExists(atPath: path) else {
             return nil
         }
 
@@ -1719,7 +2197,7 @@ enum LLMUsageReader {
         var turnCount = 0
         var foundUsage = false
 
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) where line.contains("\"token_count\"") {
+        for line in tokenUsageLines(from: path) {
             guard let data = String(line).data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let payload = object["payload"] as? [String: Any],
@@ -1755,6 +2233,25 @@ enum LLMUsageReader {
             totalTokens: latestTotalTokens,
             turnCount: turnCount
         )
+    }
+
+    private static func tokenUsageLines(from path: String) -> [Substring] {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
+        defer {
+            try? handle.close()
+        }
+
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        let maxBytes: UInt64 = 512 * 1024
+        let offset = fileSize > maxBytes ? fileSize - maxBytes : 0
+        try? handle.seek(toOffset: offset)
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+
+        return Array(text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .filter { $0.contains("\"token_count\"") }
+            .suffix(60))
     }
 
     private static func tokenValue(_ dictionary: [String: Any], _ key: String) -> UInt64 {
@@ -1818,6 +2315,7 @@ enum LLMUsageReader {
             localWeeklyTokens: local.weeklyTokens,
             localWeeklyThreads: local.weeklyThreads,
             localWindows: local.windows,
+            costEstimates: local.costEstimates,
             recentSessions: local.recentSessions,
             topWeeklySessions: local.topWeeklySessions,
             error: error

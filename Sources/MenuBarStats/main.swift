@@ -90,12 +90,8 @@ enum MenuBarStatsLauncher {
 extension StatsPanel {
     init(argument: String) {
         switch argument.lowercased() {
-        case "sensors":
-            self = .sensors
-        case "cpu", "cpu/gpu", "cpugpu":
+        case "sensors", "cpu", "cpu/gpu", "cpugpu":
             self = .cpuGPU
-        case "network", "net":
-            self = .network
         case "llm", "usage", "llmusage", "llm-usage":
             self = .llmUsage
         default:
@@ -123,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        model.seedInitialMemorySnapshot()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
@@ -150,12 +147,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = makePopoverContent(selectedPanel: .llmUsage)
         self.popover = popover
 
-        refreshInBackground()
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        refreshStatusInBackground()
+        refreshLLMUsageInBackground(force: true)
+        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshInBackground()
+                guard let self else { return }
+                if self.isDetailedUIVisible {
+                    self.refreshInBackground()
+                } else {
+                    self.refreshStatusInBackground()
+                }
+                self.refreshLLMUsageInBackground()
             }
         }
+        timer?.tolerance = 5
 
         if shouldVerifyPopoverAction {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -177,6 +182,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func refreshStatusInBackground() {
+        model.refreshStatusInBackground { [weak self] in
+            guard let self else { return }
+            self.statusTitleView?.setLines(self.statusTextLines())
+        }
+    }
+
+    private func refreshLLMUsageInBackground(force: Bool = false) {
+        model.refreshLLMUsageInBackground(force: force) { [weak self] in
+            guard let self else { return }
+            self.statusTitleView?.setLines(self.statusTextLines())
+        }
+    }
+
+    private var isDetailedUIVisible: Bool {
+        popover?.isShown == true || detachedWindow?.isVisible == true
+    }
+
     @objc private func togglePopover() {
         let selectedPanel = selectedPanelForCurrentClick()
         guard let button = statusItem?.button, let popover else { return }
@@ -193,6 +216,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.contentViewController = makePopoverContent(selectedPanel: selectedPanel)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             refreshInBackground()
+            if selectedPanel == .llmUsage {
+                refreshLLMUsageInBackground()
+            }
         }
     }
 

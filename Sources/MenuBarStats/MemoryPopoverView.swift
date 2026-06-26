@@ -29,14 +29,17 @@ struct MemoryPopoverView: View {
             switch selectedPanel {
             case .memory:
                 MemoryPanelView(model: model, onPopOut: onPopOut, onQuit: onQuit)
-            case .sensors:
-                SensorsPanelView(snapshot: model.sensors, onPopOut: onPopOut, onQuit: onQuit)
             case .cpuGPU:
-                CPUGPUPanelView(snapshot: model.cpuGPU, onPopOut: onPopOut, onQuit: onQuit)
-            case .network:
-                NetworkPanelView(snapshot: model.network, onPopOut: onPopOut, onQuit: onQuit)
+                CPUGPUPanelView(snapshot: model.cpuGPU, sensors: model.sensors, onPopOut: onPopOut, onQuit: onQuit)
             case .llmUsage:
-                LLMUsagePanelView(snapshot: model.llmUsage, quotaHistory: model.llmQuotaHistory, onPopOut: onPopOut, onQuit: onQuit)
+                LLMUsagePanelView(
+                    snapshot: model.llmUsage,
+                    quotaHistory: model.llmQuotaHistory,
+                    onSampleQuota: { model.captureLLMQuotaSample() },
+                    onOpenUsageLog: { model.openFiveHourUsageLog() },
+                    onPopOut: onPopOut,
+                    onQuit: onQuit
+                )
             }
         }
         .padding(8)
@@ -57,9 +60,7 @@ struct MemoryPopoverView: View {
 enum StatsPanel: String, CaseIterable, Identifiable {
     case llmUsage = "LLM"
     case memory = "Memory"
-    case sensors = "Sensors"
     case cpuGPU = "CPU/GPU"
-    case network = "Network"
 
     var id: String { rawValue }
 }
@@ -74,7 +75,7 @@ struct PanelSwitch: View {
                     selectedPanel = panel
                 } label: {
                     Text(panel.rawValue)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 11, weight: .medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
                         .foregroundStyle(selectedPanel == panel ? .white : .white.opacity(0.68))
@@ -176,6 +177,7 @@ struct SensorsPanelView: View {
 
 struct CPUGPUPanelView: View {
     let snapshot: CPUGPUSnapshot
+    let sensors: SensorSnapshot
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
     @State private var processScale = CPUProcessScale.istatShare
@@ -185,11 +187,37 @@ struct CPUGPUPanelView: View {
             CPUHistoryCard(snapshot: snapshot)
             CoreRingsView(snapshot: snapshot)
             CPUProcessesView(processes: snapshot.processes, scale: $processScale)
-            GPUCard(snapshot: snapshot)
-            MetricCard(title: "LOAD", rows: [MetricRow(label: "", value: snapshot.loadAverages.map { String(format: "%.2f", $0) }.joined(separator: " "))])
+            SensorSummaryRingsView(snapshot: sensors)
+            MetricCard(title: "TEMPERATURE", rows: temperatureRows)
             MetricCard(title: "UPTIME", rows: [MetricRow(label: "", value: snapshot.uptime)])
             ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
+    }
+
+    private var temperatureRows: [MetricRow] {
+        guard !sensors.temperatureReadings.isEmpty else {
+            return [MetricRow(label: "CPU / GPU / Fans", value: "Requires helper")]
+        }
+
+        return sensors.temperatureReadings.map { reading in
+            MetricRow(label: reading.label, value: temperature(reading.celsius))
+        }
+    }
+}
+
+struct SensorSummaryRingsView: View {
+    let snapshot: SensorSnapshot
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ValueRingView(title: "CPU", value: temperature(snapshot.cpuTemperature), percent: temperaturePercent(snapshot.cpuTemperature))
+            ValueRingView(title: "GPU", value: temperature(snapshot.gpuTemperature), percent: temperaturePercent(snapshot.gpuTemperature))
+            ValueRingView(title: "FANS", value: fanStatus(snapshot), percent: fanPercent(snapshot))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(Color.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -219,6 +247,8 @@ struct NetworkPanelView: View {
 struct LLMUsagePanelView: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
+    var onSampleQuota: (() -> Void)?
+    var onOpenUsageLog: (() -> Void)?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
     @State private var limitsExpanded = false
@@ -231,6 +261,8 @@ struct LLMUsagePanelView: View {
                     if let codexLimit {
                         LLMUsageLimitCard(
                             limit: codexLimit,
+                            estimates: snapshot.costEstimates,
+                            onOpenUsageLog: onOpenUsageLog,
                             title: "CODEX USAGE (\(planName(snapshot.planType)))"
                         )
                     } else {
@@ -241,7 +273,7 @@ struct LLMUsagePanelView: View {
                         LLMUsageLimitsDisclosureCard(limits: additionalLimits, isExpanded: $limitsExpanded)
                     }
 
-                    LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory)
+                    LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
                     LLMAdvancedUsageCard(snapshot: snapshot, isExpanded: $advancedExpanded)
                 }
             }
@@ -327,16 +359,23 @@ struct LLMUsageSummaryCard: View {
 
 struct LLMUsageLimitCard: View {
     let limit: LLMUsageLimit
+    var estimates: [LLMTokenCostEstimate] = []
+    var onOpenUsageLog: (() -> Void)?
     var title: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title ?? limit.name.uppercased())
                 .sectionTitle()
-            LLMUsageProgress(window: limit.primary)
-            LLMUsageProgress(window: limit.secondary)
+            LLMUsageProgress(window: limit.primary, estimate: estimate(for: limit.primary), onOpenUsageLog: onOpenUsageLog)
+            LLMUsageProgress(window: limit.secondary, estimate: estimate(for: limit.secondary))
         }
         .sectionStyle()
+    }
+
+    private func estimate(for window: LLMUsageWindow?) -> LLMTokenCostEstimate? {
+        guard let window else { return nil }
+        return estimates.first { $0.label.lowercased() == window.label.lowercased() }
     }
 }
 
@@ -358,6 +397,7 @@ struct LLMUsageUnavailableCard: View {
 struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
+    var onSampleQuota: (() -> Void)?
     @State private var localWindowsExpanded = false
 
     var body: some View {
@@ -366,13 +406,24 @@ struct LLMLocalUsageCard: View {
                 Text("LOCAL DRAWDOWN")
                     .sectionTitle()
                 Spacer()
-                Text("(\(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt)))")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.52))
-                    .monospacedDigit()
+                Button {
+                    onSampleQuota?()
+                } label: {
+                    Text("(\(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt)))")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                        .monospacedDigit()
+                }
+                .buttonStyle(.plain)
+                .disabled(onSampleQuota == nil)
+                .help("Capture the current 5H and Week values now")
             }
 
             LLMQuotaHistoryGraph(samples: effectiveQuotaHistory)
+
+            if let drawdownInsight {
+                LLMQuotaDrawdownInsightView(insight: drawdownInsight)
+            }
 
             if !snapshot.localWindows.isEmpty {
                 DisclosureGroup(isExpanded: $localWindowsExpanded) {
@@ -417,9 +468,14 @@ struct LLMLocalUsageCard: View {
             LLMQuotaHistorySample(
                 sampledAt: snapshot.lastUpdated ?? Date(),
                 primaryRemainingPercent: limit.primary?.remainingPercent,
-                weeklyRemainingPercent: limit.secondary?.remainingPercent
+                weeklyRemainingPercent: limit.secondary?.remainingPercent,
+                planType: snapshot.planType
             )
         ]
+    }
+
+    private var drawdownInsight: LLMQuotaDrawdownInsight? {
+        quotaDrawdownInsight(from: effectiveQuotaHistory)
     }
 }
 
@@ -457,21 +513,15 @@ struct LLMQuotaHistoryGraph: View {
 
                     linePath(for: \.primaryRemainingPercent, in: chartRect)
                         .stroke(Color.accentBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    linePath(for: \.weeklyRemainingPercent, in: chartRect)
-                        .stroke(Color.compressedYellow, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-
                     latestBadge(for: \.primaryRemainingPercent, color: .accentBlue, in: chartRect)
-                    latestBadge(for: \.weeklyRemainingPercent, color: .compressedYellow, in: chartRect)
 
-                    sampleDots(for: \.primaryRemainingPercent, color: .accentBlue, in: chartRect)
-                    sampleDots(for: \.weeklyRemainingPercent, color: .compressedYellow, in: chartRect)
+                    sampleDots(for: \.primaryRemainingPercent, color: .accentBlue, label: "5H", in: chartRect)
                 }
             }
             .frame(height: 88)
 
             HStack(spacing: 10) {
                 LegendInline(color: .accentBlue, label: "5H left", value: latestValue(\.primaryRemainingPercent))
-                LegendInline(color: .compressedYellow, label: "Week left", value: latestValue(\.weeklyRemainingPercent))
             }
         }
     }
@@ -497,17 +547,13 @@ struct LLMQuotaHistoryGraph: View {
         }
     }
 
-    private func sampleDots(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, in rect: CGRect) -> some View {
+    private func sampleDots(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, label: String, in rect: CGRect) -> some View {
         ForEach(samples.compactMap { sample -> LLMQuotaPlotPoint? in
             guard let remaining = sample[keyPath: keyPath] else { return nil }
-            return LLMQuotaPlotPoint(sampledAt: sample.sampledAt, remainingPercent: remaining)
+            return LLMQuotaPlotPoint(series: label, sampledAt: sample.sampledAt, remainingPercent: remaining)
         }) { point in
-            Circle()
-                .fill(color)
-                .overlay(Circle().stroke(Color.background, lineWidth: 1))
-                .frame(width: 6, height: 6)
+            LLMQuotaSampleDot(point: point, color: color)
                 .position(pointPosition(for: point, in: rect))
-                .help("\(point.remainingPercent)% left at \(absoluteTime(point.sampledAt))")
         }
     }
 
@@ -560,10 +606,113 @@ struct LLMQuotaHistoryGraph: View {
     }
 }
 
-struct LLMQuotaPlotPoint: Identifiable {
-    var id: String { "\(sampledAt.timeIntervalSince1970)-\(remainingPercent)" }
+struct LLMQuotaDrawdownInsight: Identifiable {
+    var id: String { "\(startedAt.timeIntervalSince1970)-\(endedAt.timeIntervalSince1970)" }
+    let startPercent: Int
+    let endPercent: Int
+    let durationText: String
+    let subtitle: String
+    let planLabel: String
+    let startedAt: Date
+    let endedAt: Date
+    let milestones: [LLMQuotaMilestone]
+}
+
+struct LLMQuotaMilestone: Identifiable {
+    var id: String { "\(label)-\(sampledAt.timeIntervalSince1970)-\(remainingPercent)" }
+    let label: String
     let sampledAt: Date
     let remainingPercent: Int
+}
+
+struct LLMQuotaDrawdownInsightView: View {
+    let insight: LLMQuotaDrawdownInsight
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text("\(insight.startPercent)% → \(insight.endPercent)% in")
+                        .foregroundStyle(.white.opacity(0.86))
+                    Text(insight.durationText)
+                        .foregroundStyle(Color.accentBlue)
+                }
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+                Spacer(minLength: 6)
+                Text(insight.planLabel)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
+            }
+
+            Text(insight.subtitle)
+                .font(.system(size: 10.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.5))
+                .lineLimit(2)
+
+            VStack(spacing: 2) {
+                ForEach(insight.milestones) { milestone in
+                    HStack(spacing: 7) {
+                        Text(milestone.label)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(Color.accentBlue.opacity(0.9))
+                            .frame(width: 42, alignment: .leading)
+                        Text(quotaMilestoneTime(milestone.sampledAt))
+                            .font(.system(size: 10.5, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .monospacedDigit()
+                        Spacer(minLength: 6)
+                        Text("\(milestone.remainingPercent)%")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.78))
+                            .monospacedDigit()
+                    }
+                }
+            }
+        }
+        .padding(.top, 1)
+    }
+}
+
+struct LLMQuotaPlotPoint: Identifiable {
+    var id: String { "\(series)-\(sampledAt.timeIntervalSince1970)-\(remainingPercent)" }
+    let series: String
+    let sampledAt: Date
+    let remainingPercent: Int
+}
+
+struct LLMQuotaSampleDot: View {
+    let point: LLMQuotaPlotPoint
+    let color: Color
+    @State private var isHovered = false
+
+    var body: some View {
+        ZStack {
+            if isHovered {
+                Text("\(point.remainingPercent)% • \(quotaPointTime(point.sampledAt))")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.background.opacity(0.9))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .offset(y: -17)
+                    .zIndex(1)
+            }
+
+            Circle()
+                .fill(color)
+                .overlay(Circle().stroke(Color.background, lineWidth: 1))
+                .frame(width: 6, height: 6)
+        }
+        .frame(width: 128, height: 28)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .help("\(point.remainingPercent)% left at \(quotaPointTime(point.sampledAt))")
+    }
 }
 
 struct LLMLocalUsageWindowRow: View {
@@ -931,6 +1080,8 @@ struct LLMUsageWindowRow: View {
 
 struct LLMUsageProgress: View {
     let window: LLMUsageWindow?
+    var estimate: LLMTokenCostEstimate?
+    var onOpenUsageLog: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -961,6 +1112,35 @@ struct LLMUsageProgress: View {
             .font(.system(size: 11, weight: .regular))
             .foregroundStyle(.white.opacity(0.54))
             .monospacedDigit()
+
+            if let estimate {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Button {
+                            onOpenUsageLog?()
+                        } label: {
+                            Text("API est.")
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(onOpenUsageLog == nil)
+                        .help(onOpenUsageLog == nil ? "" : "Open the 5h usage window log")
+                        Spacer()
+                        Text("\(dollarEstimate(estimate.estimatedCost)) • \(estimate.cacheHitPercent)% cached")
+                            .foregroundStyle(.white.opacity(0.76))
+                    }
+                    HStack {
+                        Text("Fresh \(tokenCount(estimate.freshInputTokens))")
+                        Spacer()
+                        Text("Cached \(tokenCount(estimate.cachedInputTokens))")
+                        Spacer()
+                        Text("Out \(tokenCount(estimate.outputTokens))")
+                    }
+                    .foregroundStyle(.white.opacity(0.52))
+                }
+                .font(.system(size: 10.5, weight: .semibold))
+                .monospacedDigit()
+                .padding(.top, 1)
+            }
         }
     }
 
@@ -997,7 +1177,7 @@ struct RingView: View {
                     .font(.system(size: 27, weight: .regular, design: .rounded))
                     .monospacedDigit()
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 11, weight: .medium))
             }
         }
         .frame(width: 91, height: 91)
@@ -1531,7 +1711,8 @@ struct ProcessesView: View {
                         .lineLimit(1)
                     Spacer()
                     Text(ByteFormat.memory(process.bytes))
-                        .font(.system(size: 13.5, weight: .semibold))
+                        .font(.system(size: 13.5, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.86))
                         .monospacedDigit()
                 }
             }
@@ -1578,7 +1759,8 @@ struct SwapView: View {
                     .sectionTitle()
                 Spacer()
                 Text("\(ByteFormat.memory(snapshot.swapUsed)) of \(ByteFormat.memory(snapshot.swapTotal))")
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(.system(size: 13.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.86))
                     .monospacedDigit()
             }
 
@@ -1613,7 +1795,7 @@ struct HistoryView: View {
                     .sectionTitle()
                 Spacer()
                 Text("1 Hour")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12, weight: .medium))
             }
 
             GeometryReader { proxy in
@@ -1705,7 +1887,8 @@ struct LegendRow: View {
                 .foregroundStyle(.white.opacity(0.82))
             Spacer()
             Text(value)
-                .font(.system(size: 13.5, weight: .semibold))
+                .font(.system(size: 13.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.86))
                 .monospacedDigit()
         }
         .contentShape(Rectangle())
@@ -1724,7 +1907,8 @@ struct LabelValueRow: View {
                 .foregroundStyle(.white.opacity(0.82))
             Spacer()
             Text(value)
-                .font(.system(size: 13.5, weight: .semibold))
+                .font(.system(size: 13.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.86))
                 .monospacedDigit()
         }
     }
@@ -1933,6 +2117,171 @@ private func tokenCount(_ value: UInt64) -> String {
     return "\(value)"
 }
 
+private func dollarEstimate(_ value: Double) -> String {
+    if value >= 100 {
+        return String(format: "$%.0f", value)
+    }
+    if value >= 10 {
+        return String(format: "$%.1f", value)
+    }
+    return String(format: "$%.2f", value)
+}
+
+private func windowRange(_ start: Date, _ end: Date) -> String {
+    let calendar = Calendar.current
+    let formatter = DateFormatter()
+    if calendar.isDate(start, inSameDayAs: end) {
+        formatter.dateFormat = "MMM d, h:mm a"
+        let startText = formatter.string(from: start)
+        formatter.dateFormat = "h:mm a"
+        return "\(startText)-\(formatter.string(from: end))"
+    }
+
+    formatter.dateFormat = "MMM d, h:mm a"
+    return "\(formatter.string(from: start))-\(formatter.string(from: end))"
+}
+
+private struct LLMQuotaValue {
+    let sampledAt: Date
+    let remainingPercent: Int
+    let planType: String?
+}
+
+private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample]) -> LLMQuotaDrawdownInsight? {
+    let values = samples
+        .compactMap { sample -> LLMQuotaValue? in
+            guard let remaining = sample.primaryRemainingPercent else { return nil }
+            return LLMQuotaValue(
+                sampledAt: sample.sampledAt,
+                remainingPercent: remaining,
+                planType: sample.planType
+            )
+        }
+        .sorted { $0.sampledAt < $1.sampledAt }
+
+    guard values.count >= 2 else { return nil }
+
+    let resetIndices = values.indices.dropFirst().filter { index in
+        values[index].remainingPercent - values[index - 1].remainingPercent >= 50
+            && values[index].remainingPercent >= 80
+    }
+
+    var resetAfterIndex: Int?
+    var segmentEnd = values.count - 1
+    if let lastReset = resetIndices.last,
+       values.indices.contains(lastReset - 1),
+       values[lastReset - 1].remainingPercent <= 20 {
+        resetAfterIndex = lastReset
+        segmentEnd = lastReset - 1
+    }
+
+    guard segmentEnd > 0 else { return nil }
+
+    let segmentStart = resetIndices.last(where: { $0 < segmentEnd }) ?? 0
+    let dropIndex = firstDropIndex(in: values, start: segmentStart, end: segmentEnd)
+    let fullIndex = dropIndex.map { max(segmentStart, $0 - 1) }
+        ?? (segmentStart...segmentEnd).last(where: { values[$0].remainingPercent >= 95 })
+        ?? segmentStart
+
+    guard fullIndex <= segmentEnd else { return nil }
+
+    let lowIndex = firstThresholdCrossing(in: values, threshold: 5, start: fullIndex, end: segmentEnd)
+        ?? (fullIndex...segmentEnd).min { values[$0].remainingPercent < values[$1].remainingPercent }
+        ?? segmentEnd
+
+    var milestones: [LLMQuotaMilestone] = [
+        LLMQuotaMilestone(
+            label: "\(values[fullIndex].remainingPercent)%",
+            sampledAt: values[fullIndex].sampledAt,
+            remainingPercent: values[fullIndex].remainingPercent
+        )
+    ]
+
+    for threshold in [50, 20, 5] {
+        if let index = firstThresholdCrossing(in: values, threshold: threshold, start: fullIndex, end: segmentEnd) {
+            milestones.append(
+                LLMQuotaMilestone(
+                    label: "≤\(threshold)",
+                    sampledAt: values[index].sampledAt,
+                    remainingPercent: values[index].remainingPercent
+                )
+            )
+        }
+    }
+
+    if let resetAfterIndex {
+        milestones.append(
+            LLMQuotaMilestone(
+                label: "Reset",
+                sampledAt: values[resetAfterIndex].sampledAt,
+                remainingPercent: values[resetAfterIndex].remainingPercent
+            )
+        )
+    }
+
+    let duration = values[lowIndex].sampledAt.timeIntervalSince(values[fullIndex].sampledAt)
+    let subtitle = resetAfterIndex == nil
+        ? "Latest sampled drawdown; crossings may fall between samples."
+        : "Last exhausted run before the current reset; crossings may fall between samples."
+
+    return LLMQuotaDrawdownInsight(
+        startPercent: values[fullIndex].remainingPercent,
+        endPercent: values[lowIndex].remainingPercent,
+        durationText: durationLabel(duration),
+        subtitle: subtitle,
+        planLabel: planLabel(from: values, start: fullIndex, end: lowIndex),
+        startedAt: values[fullIndex].sampledAt,
+        endedAt: values[lowIndex].sampledAt,
+        milestones: deduplicatedMilestones(milestones)
+    )
+}
+
+private func firstDropIndex(in values: [LLMQuotaValue], start: Int, end: Int) -> Int? {
+    guard start < end else { return nil }
+    for index in (start + 1)...end where values[index].remainingPercent < values[index - 1].remainingPercent {
+        return index
+    }
+    return nil
+}
+
+private func firstThresholdCrossing(in values: [LLMQuotaValue], threshold: Int, start: Int, end: Int) -> Int? {
+    guard start < end else { return nil }
+    for index in (start + 1)...end
+        where values[index - 1].remainingPercent > threshold
+            && values[index].remainingPercent <= threshold {
+        return index
+    }
+    return nil
+}
+
+private func deduplicatedMilestones(_ milestones: [LLMQuotaMilestone]) -> [LLMQuotaMilestone] {
+    var seen = Set<String>()
+    return milestones.filter { milestone in
+        let key = "\(Int(milestone.sampledAt.timeIntervalSince1970))-\(milestone.remainingPercent)"
+        guard !seen.contains(key) else { return false }
+        seen.insert(key)
+        return true
+    }
+}
+
+private func planLabel(from values: [LLMQuotaValue], start: Int, end: Int) -> String {
+    let plans = values[start...end].compactMap(\.planType)
+    let uniquePlans = Array(Set(plans)).sorted()
+    guard !uniquePlans.isEmpty else { return "Plan not logged" }
+    return uniquePlans.map { planName($0) }.joined(separator: " / ")
+}
+
+private func durationLabel(_ interval: TimeInterval) -> String {
+    let minutes = max(Int((interval / 60).rounded()), 0)
+    if minutes < 60 {
+        return "\(minutes)m"
+    }
+
+    let hours = minutes / 60
+    let remainingMinutes = minutes % 60
+    return remainingMinutes == 0 ? "\(hours)h" : "\(hours)h \(remainingMinutes)m"
+}
+
 private func planName(_ value: String?) -> String {
     guard let value, !value.isEmpty else { return "-" }
     if value.lowercased() == "prolite" {
@@ -1973,6 +2322,27 @@ private func relativeTime(_ value: Date?) -> String {
 private func absoluteTime(_ value: Date) -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "MMM d, h:mm a"
+    return formatter.string(from: value)
+}
+
+private func quotaPointTime(_ value: Date) -> String {
+    let elapsed = Date().timeIntervalSince(value)
+    if elapsed >= 0, elapsed < 3_600 {
+        let minutes = max(Int(elapsed / 60), 0)
+        if minutes <= 0 {
+            return "just now"
+        }
+        return minutes == 1 ? "1 min ago" : "\(minutes) mins ago"
+    }
+
+    let formatter = DateFormatter()
+    formatter.dateFormat = "h:mm a"
+    return formatter.string(from: value)
+}
+
+private func quotaMilestoneTime(_ value: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "h:mm a"
     return formatter.string(from: value)
 }
 

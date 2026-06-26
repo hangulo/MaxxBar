@@ -5,6 +5,7 @@ import SwiftUI
 enum PopoverRenderer {
     static func renderDemo(to url: URL, panel: StatsPanel = .memory) throws {
         let model = MemoryModel(snapshot: .demo, history: MemoryBreakdown.demoHistory())
+        model.applyDemoSnapshots()
         let view = MemoryPopoverView(model: model, onPopOut: {}, onQuit: {}, selectedPanel: panel)
         let hostingView = NSHostingView(rootView: view)
         hostingView.frame = NSRect(x: 0, y: 0, width: 306, height: 662)

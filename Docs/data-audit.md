@@ -35,6 +35,24 @@ cpuProcessesRaw=Codex=35.8%,WindowServer=18.3%,MenuBarStats=17.7%,Google Chrome=
 
 Both process lists come from the same `ps %CPU` sample. The `cpuProcesses` values divide raw CPU by the 14 logical CPUs on this Mac, which is closer to an iStat-style share of the whole machine. The `cpuProcessesRaw` values are closer to Activity Monitor's process scale, where grouped helper processes can add up to large numbers and individual processes can exceed 100% on multicore systems.
 
+## LLM Quota History
+
+Codex quota samples are persisted locally at:
+
+```text
+~/Library/Application Support/MenuBarStats/llm-quota-history.json
+```
+
+Each sample stores the sampled time, 5H remaining percentage, weekly remaining
+percentage, and the plan type reported by the usage API when available. The UI
+derives the latest drawdown segment from those samples: the last full point,
+threshold crossings at 50%, 20%, and 5%, exhaustion, reset, elapsed time, and
+the plan logged for that segment.
+
+The history file is a sampled log, not a continuous event stream. Threshold and
+exhaustion times are therefore observed sample times; the true crossing may have
+happened between samples.
+
 ## iStat Data Available Locally
 
 iStat Menus stores history in:

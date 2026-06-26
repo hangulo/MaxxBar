@@ -1,6 +1,6 @@
 # MenuBarStats
 
-A macOS menu bar system monitor with a compact menu bar readout and popover panels for LLM usage, memory, sensors, CPU/GPU, and network activity.
+A macOS menu bar system monitor with a compact menu bar readout and popover panels for LLM usage, memory, and CPU/GPU activity.
 
 ## Screenshots
 
@@ -8,31 +8,26 @@ A macOS menu bar system monitor with a compact menu bar readout and popover pane
 
 ![LLM usage panel](Artifacts/screenshot-llm.png)
 
+The LLM panel shows live Codex 5H and weekly limits, local token estimates,
+and a persisted drawdown timeline. The drawdown summary highlights how long the
+most recent run took to reach exhaustion, the threshold-crossing samples, the
+reset sample, and the plan type logged for that run.
+
 ### Memory
 
 ![Memory panel](Artifacts/screenshot-memory.png)
-
-### Sensors
-
-![Sensors panel](Artifacts/screenshot-sensors.png)
 
 ### CPU/GPU
 
 ![CPU/GPU panel](Artifacts/screenshot-cpugpu.png)
 
-### Network
-
-![Network panel](Artifacts/screenshot-network.png)
-
 ## Current Features
 
 - Two-line menu bar status for Codex usage and memory pressure.
-- LLM usage panel with Codex limits, persistent local quota history, cache-token detail, token/session totals, top token users, and context actions for local Codex sessions.
-- Memory popover with pressure, memory breakdown, top processes, paging, swap, and history.
+- LLM usage panel with Codex limits, persistent local quota history, drawdown milestones, cache-token detail, token/session totals, top token users, and context actions for local Codex sessions.
+- Memory popover with pressure, memory breakdown, top processes, paging, swap, history, and lighter-weight numeric values for scanability.
 - Grouped and raw process memory views with app icons.
-- CPU/GPU panel with user/system history, per-core efficiency/performance load rings, grouped CPU processes, load averages, and uptime.
-- Sensors panel with battery/system input telemetry and native helper cache support.
-- Network panel with interface throughput, IP address, and traffic history.
+- CPU/GPU panel with user/system history, per-core efficiency/performance load rings, grouped CPU processes, thermal summary, detailed temperatures, and uptime.
 - Pop-out window mode with resize support and quit control.
 
 ## Known Limits
@@ -59,7 +54,25 @@ swift build
 Scripts/build-app.sh
 ```
 
-The app bundle is written to `Dist/MenuBarStats.app`.
+The app bundle is written to `Dist/MenuBarStats.app`. The renderer used for the
+README screenshots can write any panel to a PNG:
+
+```sh
+.build/debug/MenuBarStats --render-popover Artifacts/screenshot-llm.png llm
+.build/debug/MenuBarStats --render-popover Artifacts/screenshot-memory.png memory
+.build/debug/MenuBarStats --render-popover Artifacts/screenshot-cpugpu.png cpugpu
+```
+
+## Install On This Mac
+
+```sh
+Scripts/install-app.sh
+```
+
+The install script builds a fresh local app bundle, copies it to
+`~/Applications/MenuBarStats.app`, signs it ad hoc, and recreates the Desktop
+shortcut so it points at the local install instead of an iCloud-hosted build
+artifact from another laptop.
 
 ## Sensor Helper
 
@@ -93,3 +106,16 @@ Dist/MenuBarStats.app/Contents/MacOS/MenuBarStats --verify-popout-action
 ## Data Notes
 
 See `Docs/data-audit.md` for implementation notes about source paths, validation, and remaining telemetry gaps.
+
+LLM quota history is stored in:
+
+```text
+~/Library/Application Support/MenuBarStats/llm-quota-history.json
+```
+
+Each sample records the sampled time, 5H remaining percentage, weekly remaining
+percentage, and current plan type when the Codex usage API reports one. The LLM
+panel derives the most recent drawdown timeline from these samples, including
+the last full point, threshold crossings, exhaustion, reset, elapsed time, and
+the plan logged for that run. Exact crossing times are bounded by the sampling
+interval.
