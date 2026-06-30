@@ -164,6 +164,7 @@ struct LLMUsageSession: Identifiable, Equatable {
     var rolloutPath: String
     var tokens: UInt64
     var tokenUsage: LLMTokenUsageSummary?
+    var createdAt: Date?
     var updatedAt: Date?
 
     var detail: String {
@@ -187,12 +188,77 @@ struct LLMTokenUsageSummary: Equatable {
         guard inputTokens > 0 else { return 0 }
         return Int((Double(cachedInputTokens) / Double(inputTokens) * 100).rounded())
     }
+
+    func estimatedCost(for modelName: String) -> Double {
+        let pricing = LLMTokenPricing.rates(for: modelName)
+        return pricing.estimatedCost(
+            freshInputTokens: nonCachedInputTokens,
+            cachedInputTokens: cachedInputTokens,
+            outputTokens: outputTokens
+        )
+    }
+
+    func pricingLabel(for modelName: String) -> String {
+        LLMTokenPricing.rates(for: modelName).label
+    }
+}
+
+struct LLMTokenPricing: Equatable {
+    static let gpt55 = LLMTokenPricing(label: "gpt-5.5 API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 30.0)
+    static let gpt54 = LLMTokenPricing(label: "gpt-5.4 API", freshInputDollarsPerMillion: 2.5, cachedInputDollarsPerMillion: 0.25, outputDollarsPerMillion: 15.0)
+    static let gpt54Mini = LLMTokenPricing(label: "gpt-5.4-mini API", freshInputDollarsPerMillion: 0.75, cachedInputDollarsPerMillion: 0.075, outputDollarsPerMillion: 4.5)
+    static let gpt54Nano = LLMTokenPricing(label: "gpt-5.4-nano API", freshInputDollarsPerMillion: 0.20, cachedInputDollarsPerMillion: 0.02, outputDollarsPerMillion: 1.25)
+    static let gpt53Codex = LLMTokenPricing(label: "gpt-5.3-codex API", freshInputDollarsPerMillion: 1.75, cachedInputDollarsPerMillion: 0.175, outputDollarsPerMillion: 14.0)
+    static let gpt51Codex = LLMTokenPricing(label: "gpt-5.1-codex API", freshInputDollarsPerMillion: 1.25, cachedInputDollarsPerMillion: 0.125, outputDollarsPerMillion: 10.0)
+    static let codexMini = LLMTokenPricing(label: "codex-mini API", freshInputDollarsPerMillion: 1.5, cachedInputDollarsPerMillion: 0.375, outputDollarsPerMillion: 6.0)
+
+    var label: String
+    var freshInputDollarsPerMillion: Double
+    var cachedInputDollarsPerMillion: Double
+    var outputDollarsPerMillion: Double
+
+    static func rates(for modelName: String) -> LLMTokenPricing {
+        let model = modelName.lowercased()
+        if model.hasPrefix("codex-mini") {
+            return .codexMini
+        }
+        if model.hasPrefix("gpt-5.3-codex") || model.hasPrefix("gpt-5.2-codex") {
+            return .gpt53Codex
+        }
+        if model.hasPrefix("gpt-5.1-codex") || model.hasPrefix("gpt-5-codex") {
+            return .gpt51Codex
+        }
+        if model.hasPrefix("gpt-5.4-mini") {
+            return .gpt54Mini
+        }
+        if model.hasPrefix("gpt-5.4-nano") {
+            return .gpt54Nano
+        }
+        if model.hasPrefix("gpt-5.4") {
+            return .gpt54
+        }
+        return .gpt55
+    }
+
+    func estimatedCost(
+        freshInputTokens: UInt64,
+        cachedInputTokens: UInt64,
+        outputTokens: UInt64
+    ) -> Double {
+        dollars(for: freshInputTokens, rate: freshInputDollarsPerMillion)
+            + dollars(for: cachedInputTokens, rate: cachedInputDollarsPerMillion)
+            + dollars(for: outputTokens, rate: outputDollarsPerMillion)
+    }
+
+    private func dollars(for tokens: UInt64, rate: Double) -> Double {
+        Double(tokens) / 1_000_000 * rate
+    }
 }
 
 struct LLMTokenCostEstimate: Identifiable, Equatable {
-    static let freshInputDollarsPerMillion = 1.75
-    static let cachedInputDollarsPerMillion = 0.175
-    static let outputDollarsPerMillion = 14.0
+    static let freshInputDollarsPerMillion = LLMTokenPricing.gpt55.freshInputDollarsPerMillion
+    static let cachedInputDollarsPerMillion = LLMTokenPricing.gpt55.cachedInputDollarsPerMillion
+    static let outputDollarsPerMillion = LLMTokenPricing.gpt55.outputDollarsPerMillion
 
     var id: String { label }
     var label: String
@@ -214,13 +280,11 @@ struct LLMTokenCostEstimate: Identifiable, Equatable {
     }
 
     var estimatedCost: Double {
-        dollars(for: freshInputTokens, rate: Self.freshInputDollarsPerMillion)
-            + dollars(for: cachedInputTokens, rate: Self.cachedInputDollarsPerMillion)
-            + dollars(for: outputTokens, rate: Self.outputDollarsPerMillion)
-    }
-
-    private func dollars(for tokens: UInt64, rate: Double) -> Double {
-        Double(tokens) / 1_000_000 * rate
+        LLMTokenPricing.gpt55.estimatedCost(
+            freshInputTokens: freshInputTokens,
+            cachedInputTokens: cachedInputTokens,
+            outputTokens: outputTokens
+        )
     }
 }
 
@@ -268,6 +332,29 @@ struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var planType: String? = nil
 }
 
+private struct LLMQuotaActivitySignature: Equatable {
+    var primaryRemainingPercent: Int?
+    var weeklyRemainingPercent: Int?
+    var planType: String?
+    var localFiveHourTokens: UInt64
+    var localWeeklyTokens: UInt64
+    var localWeeklyThreads: Int
+    var latestSessionUpdateSecond: Int?
+
+    init(usage: LLMUsageSnapshot, limit: LLMUsageLimit) {
+        self.primaryRemainingPercent = limit.primary?.remainingPercent
+        self.weeklyRemainingPercent = limit.secondary?.remainingPercent
+        self.planType = usage.planType
+        self.localFiveHourTokens = usage.localFiveHourTokens
+        self.localWeeklyTokens = usage.localWeeklyTokens
+        self.localWeeklyThreads = usage.localWeeklyThreads
+        self.latestSessionUpdateSecond = (usage.recentSessions + usage.topWeeklySessions)
+            .compactMap(\.updatedAt)
+            .map { Int($0.timeIntervalSince1970) }
+            .max()
+    }
+}
+
 struct LLMUsageSnapshot: Equatable {
     var email: String?
     var planType: String?
@@ -282,6 +369,43 @@ struct LLMUsageSnapshot: Equatable {
     var recentSessions: [LLMUsageSession]
     var topWeeklySessions: [LLMUsageSession]
     var error: String?
+}
+
+struct AIUsageCounter: Identifiable, Equatable {
+    var id: String { label }
+    let label: String
+    let count: Int
+}
+
+struct AIWorkflowPath: Identifiable, Equatable {
+    var id: String { "\(before)|\(surface)|\(after)|\(useCase)" }
+    let before: String
+    let surface: String
+    let after: String
+    let useCase: String
+    let count: Int
+}
+
+struct AIUsageSnapshot: Equatable {
+    var sampledAt: Date?
+    var activeApp: String
+    var activeSite: String?
+    var activeTool: String?
+    var activeSurface: String?
+    var activeUseCase: String
+    var sessionsToday: Int
+    var sessionsSevenDays: Int
+    var timeTodaySeconds: TimeInterval
+    var timeSevenDaysSeconds: TimeInterval
+    var averageSessionSeconds: TimeInterval
+    var contextConfidence: String
+    var topTools: [AIUsageCounter]
+    var topBeforeApps: [AIUsageCounter]
+    var topAfterApps: [AIUsageCounter]
+    var workflowPaths: [AIWorkflowPath]
+    var momentsToday: Int
+    var lastMomentAt: Date?
+    var lastError: String?
 }
 
 @MainActor
@@ -305,6 +429,7 @@ final class MemoryModel: ObservableObject {
     @Published private(set) var network = NetworkSnapshot.empty
     @Published private(set) var llmUsage = LLMUsageSnapshot.empty
     @Published private(set) var llmQuotaHistory: [LLMQuotaHistorySample] = []
+    @Published private(set) var aiUsage = AIUsageSnapshot.empty
     private var previousCumulativePageIns: UInt64?
     private var previousCumulativePageOuts: UInt64?
     private var previousCPUInfo: CPUReader.CPULoadInfo?
@@ -312,6 +437,7 @@ final class MemoryModel: ObservableObject {
     private var networkHistory: [NetworkSample] = []
     private var previousLLMUsageRefresh: Date?
     private var previousLLMQuotaSample: Date?
+    private var previousLLMQuotaActivitySignature: LLMQuotaActivitySignature?
     private var isRefreshing = false
     private var isRefreshingStatus = false
     private var isRefreshingLLMUsage = false
@@ -327,12 +453,14 @@ final class MemoryModel: ObservableObject {
         history: [MemoryBreakdown],
         network: NetworkSnapshot = .demo,
         llmUsage: LLMUsageSnapshot = .demo,
+        aiUsage: AIUsageSnapshot = .demo,
         llmQuotaHistory: [LLMQuotaHistorySample] = .demo
     ) {
         self.snapshot = snapshot
         self.history = history
         self.network = network
         self.llmUsage = llmUsage
+        self.aiUsage = aiUsage
         self.llmQuotaHistory = llmQuotaHistory
     }
 
@@ -341,6 +469,7 @@ final class MemoryModel: ObservableObject {
         cpuGPU = CPUReader.read(previous: nil, sensors: .demo).snapshot
         network = .demo
         llmUsage = .demo
+        aiUsage = .demo
         llmQuotaHistory = .demo
     }
 
@@ -369,6 +498,7 @@ final class MemoryModel: ObservableObject {
         networkHistory = networkResult.snapshot.history
         network = networkResult.snapshot
         llmUsage = LLMUsageReader.read()
+        aiUsage = AIUsageReader.recordAndRead(memory: snapshot, cpuGPU: cpuGPU, llmUsage: llmUsage)
         previousLLMUsageRefresh = Date()
         sampleLLMQuotaIfNeeded(force: true)
         history.append(stats.breakdown)
@@ -427,6 +557,7 @@ final class MemoryModel: ObservableObject {
                 self.previousCumulativePageIns = stats.cumulativePageIns
                 self.previousCumulativePageOuts = stats.cumulativePageOuts
                 self.snapshot = displayStats
+                self.aiUsage = AIUsageReader.recordAndRead(memory: displayStats, cpuGPU: self.cpuGPU, llmUsage: self.llmUsage)
                 self.history.append(stats.breakdown)
                 if self.history.count > 60 {
                     self.history.removeFirst(self.history.count - 60)
@@ -454,6 +585,7 @@ final class MemoryModel: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.llmUsage = usage
+                self.aiUsage = AIUsageReader.recordAndRead(memory: self.snapshot, cpuGPU: self.cpuGPU, llmUsage: usage)
                 self.previousLLMUsageRefresh = refreshedAt
                 self.logFiveHourUsageWindow(from: usage)
                 self.sampleLLMQuotaIfNeeded()
@@ -478,6 +610,15 @@ final class MemoryModel: ObservableObject {
         } catch {
             NSWorkspace.shared.open(url.deletingLastPathComponent())
         }
+    }
+
+    func captureMaxxMoment() {
+        aiUsage = AIUsageReader.captureMoment(memory: snapshot, cpuGPU: cpuGPU, llmUsage: llmUsage)
+    }
+
+    func openAIUsageReport() {
+        guard let url = AIUsageReader.writeReport() else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private struct RefreshResult {
@@ -522,6 +663,7 @@ final class MemoryModel: ObservableObject {
         previousNetworkCounters = result.networkResult.counters
         networkHistory = result.networkResult.snapshot.history
         network = result.networkResult.snapshot
+        aiUsage = AIUsageReader.recordAndRead(memory: result.displayStats, cpuGPU: cpuGPU, llmUsage: llmUsage)
         history.append(result.stats.breakdown)
         if history.count > 60 {
             history.removeFirst(history.count - 60)
@@ -541,9 +683,10 @@ final class MemoryModel: ObservableObject {
     private func sampleLLMQuotaIfNeeded(force: Bool = false) {
         guard let limit = llmUsage.limits.first(where: { $0.name == "Codex" }) ?? llmUsage.limits.first else { return }
         let now = Date()
+        let activitySignature = LLMQuotaActivitySignature(usage: llmUsage, limit: limit)
         if !force,
            let previousLLMQuotaSample,
-           now.timeIntervalSince(previousLLMQuotaSample) < llmQuotaSampleInterval {
+           now.timeIntervalSince(previousLLMQuotaSample) < llmQuotaSampleInterval(for: activitySignature) {
             return
         }
 
@@ -556,6 +699,7 @@ final class MemoryModel: ObservableObject {
             )
         )
         previousLLMQuotaSample = now
+        previousLLMQuotaActivitySignature = activitySignature
 
         if llmQuotaHistory.count > Self.llmQuotaHistoryLimit {
             llmQuotaHistory.removeFirst(llmQuotaHistory.count - Self.llmQuotaHistoryLimit)
@@ -564,7 +708,11 @@ final class MemoryModel: ObservableObject {
         saveLLMQuotaHistory()
     }
 
-    private var llmQuotaSampleInterval: TimeInterval {
+    private func llmQuotaSampleInterval(for activitySignature: LLMQuotaActivitySignature) -> TimeInterval {
+        if previousLLMQuotaActivitySignature == activitySignature {
+            return 3_600
+        }
+
         if llmQuotaHistory.count < 5 {
             return 60
         }
@@ -579,7 +727,7 @@ final class MemoryModel: ObservableObject {
             return nil
         }
         return directory
-            .appendingPathComponent("MenuBarStats", isDirectory: true)
+            .appendingPathComponent("MaxxBar", isDirectory: true)
             .appendingPathComponent("llm-quota-history.json")
     }
 
@@ -588,7 +736,7 @@ final class MemoryModel: ObservableObject {
             return nil
         }
         return directory
-            .appendingPathComponent("MenuBarStats", isDirectory: true)
+            .appendingPathComponent("MaxxBar", isDirectory: true)
             .appendingPathComponent("llm-5h-usage-windows.jsonl")
     }
 
@@ -597,7 +745,7 @@ final class MemoryModel: ObservableObject {
             return nil
         }
         return directory
-            .appendingPathComponent("MenuBarStats", isDirectory: true)
+            .appendingPathComponent("MaxxBar", isDirectory: true)
             .appendingPathComponent("llm-5h-usage-windows.html")
     }
 
@@ -731,7 +879,7 @@ final class MemoryModel: ObservableObject {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>MenuBarStats Codex 5h Usage Log</title>
+          <title>MaxxBar Codex 5h Usage Log</title>
           <style>
             :root { color-scheme: dark; --bg:#161922; --panel:#222638; --panel2:#2b3050; --text:#f7f7fb; --muted:#a8abb8; --blue:#0a84ff; --yellow:#ffcc24; }
             body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; background:var(--bg); color:var(--text); }
@@ -952,52 +1100,117 @@ extension LLMUsageSnapshot {
         recentSessions: [
             LLMUsageSession(
                 id: "demo-1",
-                title: "MenuBarStats LLM usage tab",
-                projectName: "Menu bar stats",
+                title: "MaxxBar LLM usage tab",
+                projectName: "MaxxBar",
                 modelName: "GPT-5 Codex",
                 preview: "Added usage windows and advanced local session detail.",
                 rolloutPath: "",
                 tokens: 84_200_000,
                 tokenUsage: LLMTokenUsageSummary(inputTokens: 70_000_000, cachedInputTokens: 48_000_000, outputTokens: 10_000_000, reasoningOutputTokens: 4_200_000, totalTokens: 84_200_000, turnCount: 28),
+                createdAt: Date().addingTimeInterval(-8_400),
                 updatedAt: Date().addingTimeInterval(-420)
             ),
             LLMUsageSession(
                 id: "demo-2",
                 title: "Sensor helper",
-                projectName: "Menu bar stats",
+                projectName: "MaxxBar",
                 modelName: "GPT-5 Codex",
                 preview: "Built native helper for thermal and fan data.",
                 rolloutPath: "",
                 tokens: 31_500_000,
                 tokenUsage: LLMTokenUsageSummary(inputTokens: 25_000_000, cachedInputTokens: 16_000_000, outputTokens: 4_500_000, reasoningOutputTokens: 2_000_000, totalTokens: 31_500_000, turnCount: 12),
+                createdAt: Date().addingTimeInterval(-10_200),
                 updatedAt: Date().addingTimeInterval(-7_200)
             )
         ],
         topWeeklySessions: [
             LLMUsageSession(
                 id: "demo-1",
-                title: "MenuBarStats LLM usage tab",
-                projectName: "Menu bar stats",
+                title: "MaxxBar LLM usage tab",
+                projectName: "MaxxBar",
                 modelName: "GPT-5 Codex",
                 preview: "Added usage windows and advanced local session detail.",
                 rolloutPath: "",
                 tokens: 84_200_000,
                 tokenUsage: LLMTokenUsageSummary(inputTokens: 70_000_000, cachedInputTokens: 48_000_000, outputTokens: 10_000_000, reasoningOutputTokens: 4_200_000, totalTokens: 84_200_000, turnCount: 28),
+                createdAt: Date().addingTimeInterval(-8_400),
                 updatedAt: Date().addingTimeInterval(-420)
             ),
             LLMUsageSession(
                 id: "demo-3",
                 title: "CPU/GPU panel",
-                projectName: "Menu bar stats",
+                projectName: "MaxxBar",
                 modelName: "GPT-5 Codex",
                 preview: "Compared CPU and GPU data with iStat style panels.",
                 rolloutPath: "",
                 tokens: 58_700_000,
                 tokenUsage: LLMTokenUsageSummary(inputTokens: 47_000_000, cachedInputTokens: 30_000_000, outputTokens: 7_400_000, reasoningOutputTokens: 4_300_000, totalTokens: 58_700_000, turnCount: 19),
+                createdAt: Date().addingTimeInterval(-90_000),
                 updatedAt: Date().addingTimeInterval(-86_400)
             )
         ],
         error: nil
+    )
+}
+
+extension AIUsageSnapshot {
+    static let empty = AIUsageSnapshot(
+        sampledAt: nil,
+        activeApp: "Unknown",
+        activeSite: nil,
+        activeTool: nil,
+        activeSurface: nil,
+        activeUseCase: "Unknown",
+        sessionsToday: 0,
+        sessionsSevenDays: 0,
+        timeTodaySeconds: 0,
+        timeSevenDaysSeconds: 0,
+        averageSessionSeconds: 0,
+        contextConfidence: "None",
+        topTools: [],
+        topBeforeApps: [],
+        topAfterApps: [],
+        workflowPaths: [],
+        momentsToday: 0,
+        lastMomentAt: nil,
+        lastError: nil
+    )
+
+    static let demo = AIUsageSnapshot(
+        sampledAt: Date(),
+        activeApp: "Codex",
+        activeSite: "chatgpt.com/codex",
+        activeTool: "Codex",
+        activeSurface: "Codex web",
+        activeUseCase: "Coding",
+        sessionsToday: 7,
+        sessionsSevenDays: 24,
+        timeTodaySeconds: 7_820,
+        timeSevenDaysSeconds: 42_600,
+        averageSessionSeconds: 1_775,
+        contextConfidence: "High",
+        topTools: [
+            AIUsageCounter(label: "Codex", count: 12),
+            AIUsageCounter(label: "ChatGPT", count: 8),
+            AIUsageCounter(label: "Claude", count: 4)
+        ],
+        topBeforeApps: [
+            AIUsageCounter(label: "Terminal", count: 6),
+            AIUsageCounter(label: "GitHub", count: 4),
+            AIUsageCounter(label: "Gmail", count: 3)
+        ],
+        topAfterApps: [
+            AIUsageCounter(label: "Xcode", count: 5),
+            AIUsageCounter(label: "Markdown Viewer", count: 4),
+            AIUsageCounter(label: "Google Chrome", count: 3)
+        ],
+        workflowPaths: [
+            AIWorkflowPath(before: "Terminal", surface: "Codex web", after: "Xcode", useCase: "Coding", count: 5),
+            AIWorkflowPath(before: "Gmail", surface: "ChatGPT web", after: "Google Docs", useCase: "Email / comms", count: 3)
+        ],
+        momentsToday: 2,
+        lastMomentAt: Date().addingTimeInterval(-1_800),
+        lastError: nil
     )
 }
 
@@ -1516,7 +1729,7 @@ private struct NativeSensorCache: Codable {
     }
 
     static func read() -> NativeSensorCache? {
-        let path = "/Library/Application Support/MenuBarStats/sensors.json"
+        let path = "/Library/Application Support/MaxxBar/sensors.json"
         let url = URL(fileURLWithPath: path)
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
               let modified = attributes[.modificationDate] as? Date,
@@ -1847,6 +2060,572 @@ enum NetworkReader {
     }
 }
 
+enum AIUsageReader {
+    private struct ActiveContext {
+        let app: String
+        let bundleID: String
+        let url: String?
+        let title: String?
+        let site: String?
+        let tool: String?
+        let surface: String?
+        let useCase: String
+    }
+
+    private struct AIActivityRecord: Codable {
+        var ts: Date
+        var app: String
+        var bundleID: String
+        var url: String?
+        var title: String?
+        var site: String?
+        var tool: String?
+        var surface: String?
+        var useCase: String
+        var memoryPressurePercent: Int
+        var memoryUsedPercent: Int
+        var cpuUserPercent: Int
+        var cpuSystemPercent: Int
+        var codexFiveHourRemainingPercent: Int?
+        var codexWeeklyRemainingPercent: Int?
+    }
+
+    private struct MaxxMomentRecord: Codable {
+        var ts: Date
+        var app: String
+        var bundleID: String
+        var site: String?
+        var tool: String?
+        var surface: String?
+        var useCase: String
+        var memoryPressurePercent: Int
+        var memoryUsedPercent: Int
+        var cpuUserPercent: Int
+        var cpuSystemPercent: Int
+        var codexFiveHourRemainingPercent: Int?
+        var codexWeeklyRemainingPercent: Int?
+        var note: String
+    }
+
+    static func recordAndRead(memory: MemorySnapshot, cpuGPU: CPUGPUSnapshot, llmUsage: LLMUsageSnapshot) -> AIUsageSnapshot {
+        let context = activeContext()
+        let record = record(from: context, memory: memory, cpuGPU: cpuGPU, llmUsage: llmUsage)
+        append(record, to: activityLogURL)
+        return snapshot(current: record, error: nil)
+    }
+
+    static func captureMoment(memory: MemorySnapshot, cpuGPU: CPUGPUSnapshot, llmUsage: LLMUsageSnapshot) -> AIUsageSnapshot {
+        let context = activeContext()
+        let record = record(from: context, memory: memory, cpuGPU: cpuGPU, llmUsage: llmUsage)
+        append(record, to: activityLogURL)
+        append(
+            MaxxMomentRecord(
+                ts: record.ts,
+                app: record.app,
+                bundleID: record.bundleID,
+                site: record.site,
+                tool: record.tool,
+                surface: record.surface,
+                useCase: record.useCase,
+                memoryPressurePercent: record.memoryPressurePercent,
+                memoryUsedPercent: record.memoryUsedPercent,
+                cpuUserPercent: record.cpuUserPercent,
+                cpuSystemPercent: record.cpuSystemPercent,
+                codexFiveHourRemainingPercent: record.codexFiveHourRemainingPercent,
+                codexWeeklyRemainingPercent: record.codexWeeklyRemainingPercent,
+                note: "AI was wrong"
+            ),
+            to: momentsLogURL
+        )
+        return snapshot(current: record, error: nil)
+    }
+
+    static func writeReport() -> URL? {
+        guard let url = reportURL else { return nil }
+        let records = recentActivityRecords(days: 7)
+        let moments = recentMomentRecords(days: 7)
+        let html = reportHTML(records: records, moments: moments)
+
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try html.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    private static func record(
+        from context: ActiveContext,
+        memory: MemorySnapshot,
+        cpuGPU: CPUGPUSnapshot,
+        llmUsage: LLMUsageSnapshot
+    ) -> AIActivityRecord {
+        let codexLimit = llmUsage.limits.first(where: { $0.name == "Codex" }) ?? llmUsage.limits.first
+        return AIActivityRecord(
+            ts: Date(),
+            app: context.app,
+            bundleID: context.bundleID,
+            url: context.url,
+            title: context.title,
+            site: context.site,
+            tool: context.tool,
+            surface: context.surface,
+            useCase: context.useCase,
+            memoryPressurePercent: memory.pressurePercent,
+            memoryUsedPercent: memory.usedPercent,
+            cpuUserPercent: cpuGPU.cpuUserPercent,
+            cpuSystemPercent: cpuGPU.cpuSystemPercent,
+            codexFiveHourRemainingPercent: codexLimit?.primary?.remainingPercent,
+            codexWeeklyRemainingPercent: codexLimit?.secondary?.remainingPercent
+        )
+    }
+
+    private static func snapshot(current: AIActivityRecord?, error: String?) -> AIUsageSnapshot {
+        let records = recentActivityRecords(days: 7)
+        let moments = recentMomentRecords(days: 7)
+        let now = Date()
+        let startOfDay = Calendar.current.startOfDay(for: now)
+        let todayRecords = records.filter { $0.ts >= startOfDay }
+        let aiRecords = records.filter { $0.tool != nil }
+        let todayAIRecords = todayRecords.filter { $0.tool != nil }
+        let sevenDaySessions = sessions(from: records)
+        let todaySessions = sessions(from: todayRecords)
+        let workflows = workflowCounters(from: records)
+        let confidence = contextConfidence(workflows: workflows, aiRecords: aiRecords)
+
+        return AIUsageSnapshot(
+            sampledAt: current?.ts,
+            activeApp: current?.app ?? "Unknown",
+            activeSite: current?.site,
+            activeTool: current?.tool,
+            activeSurface: current?.surface,
+            activeUseCase: current?.useCase ?? "Unknown",
+            sessionsToday: todaySessions.count,
+            sessionsSevenDays: sevenDaySessions.count,
+            timeTodaySeconds: inferredAISeconds(todayAIRecords),
+            timeSevenDaysSeconds: inferredAISeconds(aiRecords),
+            averageSessionSeconds: sevenDaySessions.isEmpty ? 0 : inferredAISeconds(aiRecords) / Double(sevenDaySessions.count),
+            contextConfidence: confidence,
+            topTools: counters(aiRecords.compactMap(\.tool), limit: 4),
+            topBeforeApps: counters(workflows.map(\.before), limit: 4),
+            topAfterApps: counters(workflows.map(\.after), limit: 4),
+            workflowPaths: topWorkflowPaths(workflows),
+            momentsToday: moments.filter { $0.ts >= startOfDay }.count,
+            lastMomentAt: moments.map(\.ts).max(),
+            lastError: error
+        )
+    }
+
+    private static func activeContext() -> ActiveContext {
+        let app = NSWorkspace.shared.frontmostApplication
+        let appName = app?.localizedName ?? "Unknown"
+        let bundleID = app?.bundleIdentifier ?? ""
+        let browser = browserContext(appName: appName, bundleID: bundleID)
+        let site = browser.url.flatMap(siteLabel)
+        let toolInfo = aiTool(appName: appName, url: browser.url)
+        let useCase = useCase(before: appName, surface: toolInfo.surface, after: site)
+        return ActiveContext(
+            app: site ?? appName,
+            bundleID: bundleID,
+            url: browser.url,
+            title: browser.title,
+            site: site,
+            tool: toolInfo.tool,
+            surface: toolInfo.surface,
+            useCase: useCase
+        )
+    }
+
+    private static func browserContext(appName: String, bundleID: String) -> (url: String?, title: String?) {
+        guard bundleID == "com.google.Chrome" || bundleID == "com.google.Chrome.canary" || bundleID == "company.thebrowser.Browser" else {
+            return (nil, nil)
+        }
+
+        let target = bundleID == "company.thebrowser.Browser" || appName.localizedCaseInsensitiveContains("Arc")
+            ? "Arc"
+            : "Google Chrome"
+        let script = """
+        tell application "\(target)"
+          if (count of windows) is 0 then return ""
+          set activeUrl to URL of active tab of front window
+          set activeTitle to title of active tab of front window
+          return activeUrl & "\n" & activeTitle
+        end tell
+        """
+        let output = runProcess("/usr/bin/osascript", arguments: ["-e", script])
+        let parts = output.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        let url = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : nil
+        return (url?.isEmpty == true ? nil : url, title?.isEmpty == true ? nil : title)
+    }
+
+    private static func aiTool(appName: String, url: String?) -> (tool: String?, surface: String?) {
+        if let url, let components = URLComponents(string: url), let host = components.host?.lowercased() {
+            let path = components.path.lowercased()
+            if host == "chatgpt.com", path.hasPrefix("/codex") {
+                return ("Codex", "Codex web")
+            }
+            if host == "codex.openai.com" || host.hasSuffix(".codex.openai.com") {
+                return ("Codex", "Codex web")
+            }
+            if host == "chatgpt.com" || host == "chat.openai.com" || host.hasSuffix(".chatgpt.com") {
+                return ("ChatGPT", "ChatGPT web")
+            }
+            if host == "claude.ai" || host.hasSuffix(".claude.ai") {
+                return ("Claude", "Claude web")
+            }
+            if host == "perplexity.ai" || host.hasSuffix(".perplexity.ai") {
+                return ("Perplexity", "Perplexity web")
+            }
+        }
+
+        let lowerApp = appName.lowercased()
+        if lowerApp.contains("codex") { return ("Codex", "Codex client") }
+        if lowerApp.contains("chatgpt") { return ("ChatGPT", "ChatGPT client") }
+        if lowerApp.contains("claude") { return ("Claude", "Claude client") }
+        if lowerApp.contains("cursor") { return ("Cursor", "Cursor client") }
+        if lowerApp.contains("windsurf") { return ("Windsurf", "Windsurf client") }
+        return (nil, nil)
+    }
+
+    private static func siteLabel(_ url: String) -> String? {
+        guard let components = URLComponents(string: url), let host = components.host?.lowercased() else { return nil }
+        let path = components.path
+        if host == "chatgpt.com", path.lowercased().hasPrefix("/codex") {
+            return "Codex"
+        }
+
+        let known = [
+            "mail.google.com": "Gmail",
+            "calendar.google.com": "Calendar",
+            "docs.google.com": "Google Docs",
+            "sheets.google.com": "Google Sheets",
+            "slides.google.com": "Google Slides",
+            "github.com": "GitHub",
+            "linear.app": "Linear",
+            "notion.so": "Notion",
+            "figma.com": "Figma",
+            "claude.ai": "Claude",
+            "chatgpt.com": "ChatGPT",
+            "chat.openai.com": "ChatGPT",
+            "codex.openai.com": "Codex",
+            "perplexity.ai": "Perplexity"
+        ]
+
+        if let label = known[host] {
+            return label
+        }
+
+        let pieces = host.split(separator: ".")
+        guard pieces.count >= 2 else { return host }
+        return pieces.suffix(2).joined(separator: ".")
+    }
+
+    private static func useCase(before: String?, surface: String?, after: String?) -> String {
+        let text = [before, surface, after].compactMap { $0?.lowercased() }.joined(separator: " ")
+        if text.contains("xcode") || text.contains("terminal") || text.contains("github") || text.contains("cursor") || text.contains("codex") {
+            return "Coding"
+        }
+        if text.contains("gmail") || text.contains("mail") || text.contains("slack") || text.contains("messages") || text.contains("calendar") {
+            return "Email / comms"
+        }
+        if text.contains("docs") || text.contains("slides") || text.contains("sheets") || text.contains("markdown") || text.contains("pdf") {
+            return "Docs / writing"
+        }
+        if text.contains("perplexity") || text.contains("google chrome") || text.contains("safari") || text.contains("reddit") {
+            return "Research"
+        }
+        if text.contains("linear") || text.contains("jira") || text.contains("notion") {
+            return "Planning"
+        }
+        return surface == nil ? "Non-AI" : "Unknown"
+    }
+
+    private static func sessions(from records: [AIActivityRecord]) -> [[AIActivityRecord]] {
+        let aiRecords = records.filter { $0.tool != nil }.sorted { $0.ts < $1.ts }
+        var sessions: [[AIActivityRecord]] = []
+        for record in aiRecords {
+            if let last = sessions.last?.last, record.ts.timeIntervalSince(last.ts) <= 300 {
+                sessions[sessions.count - 1].append(record)
+            } else {
+                sessions.append([record])
+            }
+        }
+        return sessions
+    }
+
+    private static func inferredAISeconds(_ records: [AIActivityRecord]) -> TimeInterval {
+        let sorted = records.sorted { $0.ts < $1.ts }
+        guard !sorted.isEmpty else { return 0 }
+        var total: TimeInterval = 0
+        for index in sorted.indices {
+            if index < sorted.index(before: sorted.endIndex) {
+                total += min(max(sorted[sorted.index(after: index)].ts.timeIntervalSince(sorted[index].ts), 15), 120)
+            } else {
+                total += 15
+            }
+        }
+        return total
+    }
+
+    private static func workflowCounters(from records: [AIActivityRecord]) -> [AIWorkflowPath] {
+        let sorted = records.sorted { $0.ts < $1.ts }
+        var counts: [String: (before: String, surface: String, after: String, useCase: String, count: Int)] = [:]
+        for index in sorted.indices where sorted[index].tool != nil {
+            let before = nearestNonAI(in: sorted, from: index, step: -1) ?? "Start"
+            let after = nearestNonAI(in: sorted, from: index, step: 1) ?? "End"
+            let surface = sorted[index].surface ?? sorted[index].tool ?? "AI"
+            let useCase = useCase(before: before, surface: surface, after: after)
+            let key = "\(before)|\(surface)|\(after)|\(useCase)"
+            var current = counts[key] ?? (before, surface, after, useCase, 0)
+            current.count += 1
+            counts[key] = current
+        }
+
+        return counts.values.map {
+            AIWorkflowPath(before: $0.before, surface: $0.surface, after: $0.after, useCase: $0.useCase, count: $0.count)
+        }
+    }
+
+    private static func nearestNonAI(in records: [AIActivityRecord], from index: Int, step: Int) -> String? {
+        var cursor = index + step
+        while records.indices.contains(cursor) {
+            if records[cursor].tool == nil {
+                return records[cursor].site ?? records[cursor].app
+            }
+            cursor += step
+        }
+        return nil
+    }
+
+    private static func counters(_ values: [String], limit: Int) -> [AIUsageCounter] {
+        let counts = Dictionary(grouping: values.filter { !$0.isEmpty }, by: { $0 }).mapValues(\.count)
+        return counts
+            .sorted { lhs, rhs in lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value }
+            .prefix(limit)
+            .map { AIUsageCounter(label: $0.key, count: $0.value) }
+    }
+
+    private static func topWorkflowPaths(_ workflows: [AIWorkflowPath]) -> [AIWorkflowPath] {
+        workflows
+            .sorted { lhs, rhs in lhs.count == rhs.count ? lhs.id < rhs.id : lhs.count > rhs.count }
+            .prefix(6)
+            .map { $0 }
+    }
+
+    private static func contextConfidence(workflows: [AIWorkflowPath], aiRecords: [AIActivityRecord]) -> String {
+        guard !aiRecords.isEmpty else { return "None" }
+        if workflows.contains(where: { $0.before != "Start" && $0.after != "End" }) { return "High" }
+        if workflows.contains(where: { $0.before != "Start" || $0.after != "End" }) { return "Medium" }
+        return "Low"
+    }
+
+    private static func recentActivityRecords(days: Int) -> [AIActivityRecord] {
+        readJSONLines(AIActivityRecord.self, from: activityLogURL, days: days)
+    }
+
+    private static func recentMomentRecords(days: Int) -> [MaxxMomentRecord] {
+        readJSONLines(MaxxMomentRecord.self, from: momentsLogURL, days: days)
+    }
+
+    private static func readJSONLines<T: Decodable>(_ type: T.Type, from url: URL?, days: Int) -> [T] {
+        guard let url,
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8) else {
+            return []
+        }
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                guard let data = String(line).data(using: .utf8),
+                      let record = try? decoder.decode(T.self, from: data) else {
+                    return nil
+                }
+                if let activity = record as? AIActivityRecord { return activity.ts >= cutoff ? record : nil }
+                if let moment = record as? MaxxMomentRecord { return moment.ts >= cutoff ? record : nil }
+                return record
+            }
+    }
+
+    private static func append<T: Encodable>(_ value: T, to url: URL?) {
+        guard let url else { return }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(value) else { return }
+
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.write(contentsOf: Data("\n".utf8))
+        } catch {
+            return
+        }
+    }
+
+    private static func runProcess(_ path: String, arguments: [String]) -> String {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = arguments
+        let output = Pipe()
+        task.standardOutput = output
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return ""
+        }
+        return String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    private static var supportDirectoryURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("MaxxBar", isDirectory: true)
+    }
+
+    private static var activityLogURL: URL? {
+        supportDirectoryURL?.appendingPathComponent("ai-activity.jsonl")
+    }
+
+    private static var momentsLogURL: URL? {
+        supportDirectoryURL?.appendingPathComponent("maxx-moments.jsonl")
+    }
+
+    private static var reportURL: URL? {
+        supportDirectoryURL?.appendingPathComponent("ai-usage-insights.html")
+    }
+
+    private static func reportHTML(records: [AIActivityRecord], moments: [MaxxMomentRecord]) -> String {
+        let aiRecords = records.filter { $0.tool != nil }
+        let workflows = topWorkflowPaths(workflowCounters(from: records))
+        let topTools = counters(aiRecords.compactMap(\.tool), limit: 8)
+        let before = counters(workflows.map(\.before), limit: 8)
+        let after = counters(workflows.map(\.after), limit: 8)
+        let useCases = counters(aiRecords.map(\.useCase), limit: 8)
+        let totalAISeconds = inferredAISeconds(aiRecords)
+        let sessionCount = sessions(from: records).count
+        let latest = records.sorted { $0.ts < $1.ts }.last
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>MaxxBar AI Usage Insights</title>
+          <style>
+            :root{color-scheme:dark;--bg:#101113;--panel:#181a1f;--panel2:#20232a;--text:#f4f7fb;--muted:#9aa4b2;--line:#303642;--accent:#38bdf8;--green:#34d399;--amber:#f59e0b}
+            *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;padding:24px;line-height:1.45}
+            h1{margin:0 0 4px;font-size:30px}h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 12px;color:var(--accent)}
+            .sub{color:var(--muted);margin:0 0 22px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.card span{display:block;color:var(--muted);font-size:12px}.card strong{display:block;font-size:24px;margin-top:4px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}.list div{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}.list div:last-child{border-bottom:0}.list span{color:var(--muted);font-variant-numeric:tabular-nums}.paths div{display:grid;grid-template-columns:minmax(0,1fr)68px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.06)}.paths em{display:block;color:var(--muted);font-style:normal;font-size:12px;margin-top:2px}.sankey{width:100%;min-width:760px}.sankey-wrap{overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px}.node{fill:#263241;stroke:#3b4758}.link{fill:none;stroke:var(--accent);stroke-opacity:.35;stroke-linecap:round}.label{fill:var(--text);font-size:12px;font-weight:700}.muted{fill:var(--muted);font-size:10px}.footer{margin-top:20px;color:var(--muted);font-size:12px}
+          </style>
+        </head>
+        <body>
+          <h1>MaxxBar AI Usage Insights</h1>
+          <p class="sub">Local-only metadata view. No screenshots, OCR, typed text, or cloud upload.</p>
+          <div class="grid">
+            \(card("AI sessions", "\(sessionCount)", "last 7 days"))
+            \(card("AI time", duration(totalAISeconds), "sample-inferred"))
+            \(card("Maxx Moments", "\(moments.count)", "AI was wrong captures"))
+            \(card("Active", html(latest?.tool ?? latest?.app ?? "Unknown"), html(latest?.surface ?? latest?.site ?? "latest sample")))
+          </div>
+          <section class="two">
+            \(panel("Top Tools", list(topTools)))
+            \(panel("Likely Use Cases", list(useCases)))
+          </section>
+          <section class="two">
+            \(panel("Before AI", list(before)))
+            \(panel("After AI", list(after)))
+          </section>
+          \(pathVisual(workflows))
+          \(panel("Workflow Paths", pathRows(workflows)))
+          <div class="footer">Activity log: \(html(activityLogURL?.path ?? "-"))<br>Moments log: \(html(momentsLogURL?.path ?? "-"))</div>
+        </body>
+        </html>
+        """
+    }
+
+    private static func card(_ title: String, _ value: String, _ subtitle: String) -> String {
+        "<div class=\"card\"><span>\(html(title))</span><strong>\(value)</strong><span>\(html(subtitle))</span></div>"
+    }
+
+    private static func panel(_ title: String, _ body: String) -> String {
+        "<div class=\"panel\"><h2>\(html(title))</h2>\(body)</div>"
+    }
+
+    private static func list(_ rows: [AIUsageCounter]) -> String {
+        guard !rows.isEmpty else { return "<p class=\"sub\">No local signals yet.</p>" }
+        return "<div class=\"list\">" + rows.map { "<div><strong>\(html($0.label))</strong><span>\($0.count)</span></div>" }.joined() + "</div>"
+    }
+
+    private static func pathRows(_ paths: [AIWorkflowPath]) -> String {
+        guard !paths.isEmpty else { return "<p class=\"sub\">No before -> AI -> after paths yet.</p>" }
+        return "<div class=\"paths\">" + paths.map {
+            "<div><strong>\(html($0.before)) -> \(html($0.surface)) -> \(html($0.after))</strong><em>\(html($0.useCase))</em><span>\($0.count)x</span></div>"
+        }.joined() + "</div>"
+    }
+
+    private static func pathVisual(_ paths: [AIWorkflowPath]) -> String {
+        guard !paths.isEmpty else { return panel("AI Paths", "<p class=\"sub\">No ChatGPT/Codex/Claude paths found yet.</p>") }
+        let maxCount = max(paths.map(\.count).max() ?? 1, 1)
+        let rows = paths.prefix(6).enumerated().map { index, path -> String in
+            let y = 42 + index * 44
+            let width = max(4, Int(Double(path.count) / Double(maxCount) * 24))
+            return """
+            <path class="link" stroke-width="\(width)" d="M 170 \(y) C 250 \(y), 270 \(y), 350 \(y)"></path>
+            <path class="link" stroke-width="\(width)" d="M 470 \(y) C 550 \(y), 570 \(y), 650 \(y)"></path>
+            <text class="label" x="20" y="\(y + 4)">\(html(short(path.before)))</text>
+            <text class="label" x="360" y="\(y + 4)">\(html(short(path.surface)))</text>
+            <text class="label" x="660" y="\(y + 4)">\(html(short(path.after)))</text>
+            <text class="muted" x="360" y="\(y + 20)">\(path.count)x · \(html(path.useCase))</text>
+            """
+        }.joined()
+        return """
+        <section class="panel">
+          <h2>AI Paths</h2>
+          <div class="sankey-wrap">
+            <svg class="sankey" viewBox="0 0 840 330" role="img" aria-label="Before AI after path flow">
+              <text class="muted" x="20" y="20">Before</text>
+              <text class="muted" x="360" y="20">AI surface</text>
+              <text class="muted" x="660" y="20">After</text>
+              \(rows)
+            </svg>
+          </div>
+        </section>
+        """
+    }
+
+    private static func short(_ value: String) -> String {
+        value.count <= 24 ? value : String(value.prefix(21)) + "..."
+    }
+
+    private static func duration(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        if minutes >= 60 {
+            return "\(minutes / 60)h \(minutes % 60)m"
+        }
+        return "\(minutes)m"
+    }
+
+    private static func html(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+    }
+}
+
 enum LLMUsageReader {
     private struct LocalCodexUsage {
         let fiveHourTokens: UInt64
@@ -2148,6 +2927,7 @@ enum LLMUsageReader {
             id,
             replace(replace(coalesce(nullif(title,''),'Untitled'), char(10), ' '), char(9), ' '),
             coalesce(tokens_used,0),
+            coalesce(created_at_ms, created_at * 1000),
             coalesce(updated_at_ms, updated_at * 1000),
             replace(replace(coalesce(nullif(model,''), nullif(model_provider,''), ''), char(10), ' '), char(9), ' '),
             replace(replace(coalesce(nullif(cwd,''), ''), char(10), ' '), char(9), ' '),
@@ -2156,18 +2936,19 @@ enum LLMUsageReader {
         from threads
         \(whereClause)
         \(orderClause)
-        limit 5;
+        limit 15;
         """
 
         return sqliteRows(databasePath: databasePath, query: query).compactMap { row in
-            guard row.count >= 8 else { return nil }
+            guard row.count >= 9 else { return nil }
             let title = compactText(row[1], fallback: "Untitled")
             let tokens = UInt64(row[2]) ?? 0
-            let updatedAt = TimeInterval(row[3]).map { Date(timeIntervalSince1970: $0 / 1000) }
-            let model = compactText(row[4], fallback: "Model unavailable")
-            let project = projectName(from: row[5])
-            let preview = compactText(row[6], fallback: "No prompt preview stored")
-            let rolloutPath = compactText(row[7], fallback: "")
+            let createdAt = TimeInterval(row[3]).map { Date(timeIntervalSince1970: $0 / 1000) }
+            let updatedAt = TimeInterval(row[4]).map { Date(timeIntervalSince1970: $0 / 1000) }
+            let model = compactText(row[5], fallback: "Model unavailable")
+            let project = projectName(from: row[6])
+            let preview = compactText(row[7], fallback: "No prompt preview stored")
+            let rolloutPath = compactText(row[8], fallback: "")
             return LLMUsageSession(
                 id: row[0],
                 title: title,
@@ -2177,6 +2958,7 @@ enum LLMUsageReader {
                 rolloutPath: rolloutPath,
                 tokens: tokens,
                 tokenUsage: tokenUsageSummary(from: rolloutPath),
+                createdAt: createdAt,
                 updatedAt: updatedAt
             )
         }

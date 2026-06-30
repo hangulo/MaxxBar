@@ -6,13 +6,13 @@ struct MemoryPopoverView: View {
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
     var fixedSize: Bool
-    @State private var selectedPanel = StatsPanel.memory
+    @State private var selectedPanel = StatsPanel.runway
 
     init(
         model: MemoryModel,
         onPopOut: (() -> Void)? = nil,
         onQuit: (() -> Void)? = nil,
-        selectedPanel: StatsPanel = .memory,
+        selectedPanel: StatsPanel = .runway,
         fixedSize: Bool = true
     ) {
         self.model = model
@@ -32,11 +32,20 @@ struct MemoryPopoverView: View {
             case .cpuGPU:
                 CPUGPUPanelView(snapshot: model.cpuGPU, sensors: model.sensors, onPopOut: onPopOut, onQuit: onQuit)
             case .llmUsage:
-                LLMUsagePanelView(
+                AIUsagePanelView(
+                    aiUsage: model.aiUsage,
+                    snapshot: model.llmUsage,
+                    quotaHistory: model.llmQuotaHistory,
+                    onCaptureMaxxMoment: { model.captureMaxxMoment() },
+                    onOpenAIReport: { model.openAIUsageReport() },
+                    onPopOut: onPopOut,
+                    onQuit: onQuit
+                )
+            case .runway:
+                LLMRunwayPanelView(
                     snapshot: model.llmUsage,
                     quotaHistory: model.llmQuotaHistory,
                     onSampleQuota: { model.captureLLMQuotaSample() },
-                    onOpenUsageLog: { model.openFiveHourUsageLog() },
                     onPopOut: onPopOut,
                     onQuit: onQuit
                 )
@@ -58,11 +67,16 @@ struct MemoryPopoverView: View {
 }
 
 enum StatsPanel: String, CaseIterable, Identifiable {
-    case llmUsage = "LLM"
+    case runway = "Runway"
+    case llmUsage = "Insights"
     case memory = "Memory"
     case cpuGPU = "CPU/GPU"
 
     var id: String { rawValue }
+
+    static var visibleCases: [StatsPanel] {
+        [.runway, .llmUsage, .memory]
+    }
 }
 
 struct PanelSwitch: View {
@@ -70,7 +84,7 @@ struct PanelSwitch: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(StatsPanel.allCases) { panel in
+            ForEach(StatsPanel.visibleCases) { panel in
                 Button {
                     selectedPanel = panel
                 } label: {
@@ -81,8 +95,11 @@ struct PanelSwitch: View {
                         .foregroundStyle(selectedPanel == panel ? .white : .white.opacity(0.68))
                         .background(selectedPanel == panel ? Color.panelLift : Color.clear)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
             }
         }
         .padding(3)
@@ -244,15 +261,42 @@ struct NetworkPanelView: View {
     }
 }
 
-struct LLMUsagePanelView: View {
+struct AIUsagePanelView: View {
+    let aiUsage: AIUsageSnapshot
+    let snapshot: LLMUsageSnapshot
+    let quotaHistory: [LLMQuotaHistorySample]
+    var onCaptureMaxxMoment: (() -> Void)?
+    var onOpenAIReport: (() -> Void)?
+    var onPopOut: (() -> Void)?
+    var onQuit: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 7) {
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 7) {
+                    AIUsageOverviewCard(snapshot: aiUsage)
+                    AIWorkflowMiniCard(snapshot: aiUsage)
+                    MaxxMomentCard(
+                        snapshot: aiUsage,
+                        onCaptureMaxxMoment: onCaptureMaxxMoment,
+                        onOpenAIReport: onOpenAIReport
+                    )
+                    DrawdownInsightCard(snapshot: snapshot, quotaHistory: quotaHistory)
+                }
+            }
+
+            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
+        }
+    }
+}
+
+struct LLMRunwayPanelView: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
-    var onOpenUsageLog: (() -> Void)?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
-    @State private var limitsExpanded = false
-    @State private var advancedExpanded = true
+    @State private var advancedExpanded = false
 
     var body: some View {
         VStack(spacing: 7) {
@@ -261,16 +305,10 @@ struct LLMUsagePanelView: View {
                     if let codexLimit {
                         LLMUsageLimitCard(
                             limit: codexLimit,
-                            estimates: snapshot.costEstimates,
-                            onOpenUsageLog: onOpenUsageLog,
-                            title: "CODEX USAGE (\(planName(snapshot.planType)))"
+                            title: "CODEX RUNWAY (\(planName(snapshot.planType)))"
                         )
                     } else {
                         LLMUsageUnavailableCard(message: snapshot.error ?? "Codex usage unavailable")
-                    }
-
-                    if !additionalLimits.isEmpty {
-                        LLMUsageLimitsDisclosureCard(limits: additionalLimits, isExpanded: $limitsExpanded)
                     }
 
                     LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
@@ -286,9 +324,165 @@ struct LLMUsagePanelView: View {
         snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first
     }
 
-    private var additionalLimits: [LLMUsageLimit] {
-        guard let codexLimit else { return snapshot.limits }
-        return snapshot.limits.filter { $0.id != codexLimit.id }
+}
+
+struct AIUsageOverviewCard: View {
+    let snapshot: AIUsageSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("MAXX INSIGHTS")
+                    .sectionTitle()
+                Spacer()
+                Text(snapshot.activeTool ?? "Watching")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle((snapshot.activeTool == nil ? Color.white.opacity(0.52) : Color.accentBlue))
+            }
+
+            HStack(spacing: 7) {
+                aiMetric("Today", "\(snapshot.sessionsToday)", "sessions")
+                aiMetric("AI time", aiDuration(snapshot.timeTodaySeconds), "today")
+                aiMetric("Avg", aiDuration(snapshot.averageSessionSeconds), "session")
+            }
+
+            HStack(spacing: 6) {
+                Text(snapshot.activeSurface ?? snapshot.activeSite ?? snapshot.activeApp)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.84))
+                    .lineLimit(1)
+                Spacer()
+                Text(snapshot.contextConfidence)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .monospacedDigit()
+            }
+        }
+        .sectionStyle()
+    }
+
+    private func aiMetric(_ label: String, _ value: String, _ sublabel: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.48))
+            Text(value)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            Text(sublabel)
+                .font(.system(size: 9.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.42))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.background.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+struct AIWorkflowMiniCard: View {
+    let snapshot: AIUsageSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("AI FLOW")
+                    .sectionTitle()
+                Spacer()
+                Text("\(snapshot.sessionsSevenDays) 7d")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.52))
+                    .monospacedDigit()
+            }
+
+            if snapshot.topTools.isEmpty && snapshot.workflowPaths.isEmpty {
+                Text("No local AI samples yet")
+                    .font(.system(size: 12.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.58))
+            } else {
+                HStack(alignment: .top, spacing: 10) {
+                    counterColumn("Tools", snapshot.topTools)
+                    counterColumn("Before", snapshot.topBeforeApps)
+                    counterColumn("After", snapshot.topAfterApps)
+                }
+
+                if let path = snapshot.workflowPaths.first {
+                    Text("\(path.before) -> \(path.surface) -> \(path.after)")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(2)
+                }
+            }
+        }
+        .sectionStyle()
+    }
+
+    private func counterColumn(_ title: String, _ counters: [AIUsageCounter]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.44))
+            ForEach(counters.prefix(2)) { counter in
+                HStack(spacing: 4) {
+                    Text(counter.label)
+                        .font(.system(size: 10.5, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(1)
+                    Spacer(minLength: 2)
+                    Text("\(counter.count)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.48))
+                        .monospacedDigit()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+struct MaxxMomentCard: View {
+    let snapshot: AIUsageSnapshot
+    var onCaptureMaxxMoment: (() -> Void)?
+    var onOpenAIReport: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                onCaptureMaxxMoment?()
+            } label: {
+                Label("Maxx Moment", systemImage: "exclamationmark.bubble")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(Color.accentBlue.opacity(0.78))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .disabled(onCaptureMaxxMoment == nil)
+            .help("Capture this moment as AI was wrong")
+
+            IconActionButton(systemName: "chart.bar.xaxis", help: "Open AI usage insights", action: { onOpenAIReport?() })
+                .disabled(onOpenAIReport == nil)
+
+            Text(momentText)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.48))
+                .monospacedDigit()
+                .frame(width: 62, alignment: .trailing)
+        }
+        .sectionStyle()
+    }
+
+    private var momentText: String {
+        if let lastMomentAt = snapshot.lastMomentAt {
+            return relativeTime(lastMomentAt)
+        }
+        return "\(snapshot.momentsToday) today"
     }
 }
 
@@ -359,23 +553,16 @@ struct LLMUsageSummaryCard: View {
 
 struct LLMUsageLimitCard: View {
     let limit: LLMUsageLimit
-    var estimates: [LLMTokenCostEstimate] = []
-    var onOpenUsageLog: (() -> Void)?
     var title: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title ?? limit.name.uppercased())
                 .sectionTitle()
-            LLMUsageProgress(window: limit.primary, estimate: estimate(for: limit.primary), onOpenUsageLog: onOpenUsageLog)
-            LLMUsageProgress(window: limit.secondary, estimate: estimate(for: limit.secondary))
+            LLMUsageProgress(window: limit.primary)
+            LLMUsageProgress(window: limit.secondary)
         }
         .sectionStyle()
-    }
-
-    private func estimate(for window: LLMUsageWindow?) -> LLMTokenCostEstimate? {
-        guard let window else { return nil }
-        return estimates.first { $0.label.lowercased() == window.label.lowercased() }
     }
 }
 
@@ -394,35 +581,103 @@ struct LLMUsageUnavailableCard: View {
     }
 }
 
+struct DrawdownInsightCard: View {
+    let snapshot: LLMUsageSnapshot
+    let quotaHistory: [LLMQuotaHistorySample]
+    @State private var range = LLMQuotaHistoryRange.sixHours
+    @State private var mode = LLMQuotaDrawdownMode.last
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("DRAWDOWN INSIGHT")
+                    .sectionTitle()
+                Spacer()
+                LLMQuotaHistoryRangeToggle(selection: $range)
+            }
+
+            if let insight {
+                HStack {
+                    Spacer()
+                    LLMQuotaDrawdownModeToggle(selection: $mode)
+                }
+                LLMQuotaDrawdownInsightView(insight: insight)
+            } else {
+                Text("No local drawdown pattern yet")
+                    .font(.system(size: 12.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+        }
+        .sectionStyle()
+    }
+
+    private var insight: LLMQuotaDrawdownInsight? {
+        quotaDrawdownInsight(from: rangedQuotaHistory, mode: mode)
+    }
+
+    private var rangedQuotaHistory: [LLMQuotaHistorySample] {
+        let cutoff = Date().addingTimeInterval(-range.interval)
+        let samples = effectiveQuotaHistory.filter { $0.sampledAt >= cutoff }
+        return samples.isEmpty ? Array(effectiveQuotaHistory.suffix(1)) : samples
+    }
+
+    private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
+        if !quotaHistory.isEmpty {
+            return quotaHistory
+        }
+
+        guard let limit = snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first else {
+            return []
+        }
+
+        return [
+            LLMQuotaHistorySample(
+                sampledAt: snapshot.lastUpdated ?? Date(),
+                primaryRemainingPercent: limit.primary?.remainingPercent,
+                weeklyRemainingPercent: limit.secondary?.remainingPercent,
+                planType: snapshot.planType
+            )
+        ]
+    }
+}
+
 struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
     @State private var localWindowsExpanded = false
+    @State private var drawdownRange = LLMQuotaHistoryRange.sixHours
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("LOCAL DRAWDOWN")
-                    .sectionTitle()
-                Spacer()
-                Button {
-                    onSampleQuota?()
-                } label: {
-                    Text("(\(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt)))")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.52))
-                        .monospacedDigit()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("LOCAL DRAWDOWN")
+                        .sectionTitle()
+                    Spacer()
+                    Button {
+                        onSampleQuota?()
+                    } label: {
+                        Text("(\(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt)))")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.52))
+                            .monospacedDigit()
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(onSampleQuota == nil)
+                    .help("Capture the current 5H and Week values now")
                 }
-                .buttonStyle(.plain)
-                .disabled(onSampleQuota == nil)
-                .help("Capture the current 5H and Week values now")
+
+                HStack {
+                    Spacer()
+                    LLMQuotaHistoryRangeToggle(selection: $drawdownRange)
+                }
             }
 
-            LLMQuotaHistoryGraph(samples: effectiveQuotaHistory)
+            LLMQuotaHistoryGraph(samples: rangedQuotaHistory, range: drawdownRange)
 
-            if let drawdownInsight {
-                LLMQuotaDrawdownInsightView(insight: drawdownInsight)
+            if !sessionTimelineSessions.isEmpty {
+                LLMSessionTimelineView(sessions: sessionTimelineSessions, range: drawdownRange)
             }
 
             if !snapshot.localWindows.isEmpty {
@@ -474,13 +729,121 @@ struct LLMLocalUsageCard: View {
         ]
     }
 
-    private var drawdownInsight: LLMQuotaDrawdownInsight? {
-        quotaDrawdownInsight(from: effectiveQuotaHistory)
+    private var rangedQuotaHistory: [LLMQuotaHistorySample] {
+        let cutoff = Date().addingTimeInterval(-drawdownRange.interval)
+        let samples = effectiveQuotaHistory.filter { $0.sampledAt >= cutoff }
+        return samples.isEmpty ? Array(effectiveQuotaHistory.suffix(1)) : samples
+    }
+
+    private var sessionTimelineSessions: [LLMUsageSession] {
+        var seen = Set<String>()
+        let combined = (snapshot.recentSessions + snapshot.topWeeklySessions).filter { session in
+            guard !seen.contains(session.id) else { return false }
+            seen.insert(session.id)
+            return true
+        }
+
+        let axisEnd = Date()
+        let axisStart = axisEnd.addingTimeInterval(-drawdownRange.interval)
+        return combined
+            .filter { session in
+                let end = session.updatedAt ?? session.createdAt ?? axisEnd
+                let start = session.createdAt ?? end.addingTimeInterval(-min(drawdownRange.interval, 3_600))
+                return start <= axisEnd && end >= axisStart
+            }
+            .sorted { lhs, rhs in
+                let lhsStart = lhs.createdAt ?? lhs.updatedAt ?? .distantPast
+                let rhsStart = rhs.createdAt ?? rhs.updatedAt ?? .distantPast
+                if lhsStart == rhsStart {
+                    return lhs.tokens > rhs.tokens
+                }
+                return lhsStart < rhsStart
+            }
+            .prefix(8)
+            .map { $0 }
+    }
+}
+
+enum LLMQuotaHistoryRange: String, CaseIterable, Identifiable {
+    case sixHours = "6H"
+    case day = "24H"
+
+    var id: String { rawValue }
+
+    var interval: TimeInterval {
+        switch self {
+        case .sixHours:
+            return 6 * 60 * 60
+        case .day:
+            return 24 * 60 * 60
+        }
+    }
+}
+
+struct LLMQuotaHistoryRangeToggle: View {
+    @Binding var selection: LLMQuotaHistoryRange
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(LLMQuotaHistoryRange.allCases) { range in
+                Button {
+                    selection = range
+                } label: {
+                    Text(range.rawValue)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(selection == range ? .white : .white.opacity(0.55))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(selection == range ? Color.panelLift : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(Color.background.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .help("Show local drawdown over \(selection.rawValue)")
+    }
+}
+
+enum LLMQuotaDrawdownMode: String, CaseIterable, Identifiable {
+    case last = "Last"
+    case current = "Current"
+
+    var id: String { rawValue }
+}
+
+struct LLMQuotaDrawdownModeToggle: View {
+    @Binding var selection: LLMQuotaDrawdownMode
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(LLMQuotaDrawdownMode.allCases) { mode in
+                Button {
+                    selection = mode
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(selection == mode ? .white : .white.opacity(0.55))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(selection == mode ? Color.panelLift : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(Color.background.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .help("Show \(selection.rawValue.lowercased()) drawdown milestones")
     }
 }
 
 struct LLMQuotaHistoryGraph: View {
     let samples: [LLMQuotaHistorySample]
+    let range: LLMQuotaHistoryRange
 
     var body: some View {
         VStack(spacing: 5) {
@@ -548,13 +911,41 @@ struct LLMQuotaHistoryGraph: View {
     }
 
     private func sampleDots(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, label: String, in rect: CGRect) -> some View {
-        ForEach(samples.compactMap { sample -> LLMQuotaPlotPoint? in
-            guard let remaining = sample[keyPath: keyPath] else { return nil }
-            return LLMQuotaPlotPoint(series: label, sampledAt: sample.sampledAt, remainingPercent: remaining)
-        }) { point in
+        ForEach(thinnedPlotPoints(for: keyPath, label: label)) { point in
             LLMQuotaSampleDot(point: point, color: color)
                 .position(pointPosition(for: point, in: rect))
         }
+    }
+
+    private func thinnedPlotPoints(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, label: String) -> [LLMQuotaPlotPoint] {
+        let values = samples.compactMap { sample -> (Date, Int)? in
+            guard let remaining = sample[keyPath: keyPath] else { return nil }
+            return (sample.sampledAt, remaining)
+        }
+        guard values.count > 2 else {
+            return values.map { LLMQuotaPlotPoint(series: label, sampledAt: $0.0, remainingPercent: $0.1) }
+        }
+
+        var points: [LLMQuotaPlotPoint] = []
+        var previousKeptPointAt: Date?
+
+        for index in values.indices {
+            let value = values[index]
+            let previous = index > 0 ? values[index - 1].1 : nil
+            let next = index < values.count - 1 ? values[index + 1].1 : nil
+            let isEndpoint = index == values.startIndex || index == values.index(before: values.endIndex)
+            let isChangePoint = value.1 != previous || value.1 != next
+            let shouldKeepFlatPoint = previousKeptPointAt.map { value.0.timeIntervalSince($0) >= 3_600 } ?? true
+
+            guard isEndpoint || isChangePoint || shouldKeepFlatPoint else {
+                continue
+            }
+
+            points.append(LLMQuotaPlotPoint(series: label, sampledAt: value.0, remainingPercent: value.1))
+            previousKeptPointAt = value.0
+        }
+
+        return points
     }
 
     private func linePath(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, in rect: CGRect) -> Path {
@@ -564,20 +955,20 @@ struct LLMQuotaHistoryGraph: View {
         }
         guard !values.isEmpty else { return Path() }
 
-        let start = values.first?.0 ?? Date()
-        let end = values.last?.0 ?? start
-        let duration = max(end.timeIntervalSince(start), 1)
+        let bounds = dateBounds()
+        let duration = max(bounds.end.timeIntervalSince(bounds.start), 1)
 
         return Path { path in
             if values.count == 1, let value = values.first?.1 {
                 let y = yPosition(for: value, in: rect)
-                path.move(to: CGPoint(x: rect.minX, y: y))
-                path.addLine(to: CGPoint(x: rect.maxX, y: y))
+                let x = xPosition(for: values[0].0, start: bounds.start, duration: duration, in: rect)
+                path.move(to: CGPoint(x: x, y: y))
+                path.addLine(to: CGPoint(x: x, y: y))
                 return
             }
 
             for (index, value) in values.enumerated() {
-                let x = rect.minX + CGFloat(value.0.timeIntervalSince(start) / duration) * rect.width
+                let x = xPosition(for: value.0, start: bounds.start, duration: duration, in: rect)
                 let y = yPosition(for: value.1, in: rect)
                 let point = CGPoint(x: x, y: y)
                 if index == 0 {
@@ -594,15 +985,21 @@ struct LLMQuotaHistoryGraph: View {
     }
 
     private func pointPosition(for point: LLMQuotaPlotPoint, in rect: CGRect) -> CGPoint {
-        let datedSamples = samples.map(\.sampledAt)
-        let start = datedSamples.first ?? point.sampledAt
-        let end = datedSamples.last ?? start
-        let duration = max(end.timeIntervalSince(start), 1)
-        let x = samples.count == 1
-            ? rect.maxX
-            : rect.minX + CGFloat(point.sampledAt.timeIntervalSince(start) / duration) * rect.width
+        let bounds = dateBounds()
+        let duration = max(bounds.end.timeIntervalSince(bounds.start), 1)
+        let x = xPosition(for: point.sampledAt, start: bounds.start, duration: duration, in: rect)
         let y = yPosition(for: point.remainingPercent, in: rect)
         return CGPoint(x: x, y: y)
+    }
+
+    private func dateBounds() -> (start: Date, end: Date) {
+        let end = Date()
+        return (end.addingTimeInterval(-range.interval), end)
+    }
+
+    private func xPosition(for date: Date, start: Date, duration: TimeInterval, in rect: CGRect) -> CGFloat {
+        let progress = min(max(date.timeIntervalSince(start) / duration, 0), 1)
+        return rect.minX + CGFloat(progress) * rect.width
     }
 }
 
@@ -750,6 +1147,181 @@ struct LLMLocalUsageWindowRow: View {
     }
 }
 
+struct LLMSessionTimelineView: View {
+    let sessions: [LLMUsageSession]
+    let range: LLMQuotaHistoryRange
+
+    private let rowHeight: CGFloat = 34
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("SESSION TIMELINE")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(Color.accentBlue)
+                Spacer()
+                Text("\(sessions.count) sessions")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.52))
+                    .monospacedDigit()
+            }
+
+            GeometryReader { proxy in
+                let axis = axisBounds()
+                let labelWidth = min(max(proxy.size.width * 0.38, 92), 168)
+                let plotX = labelWidth + 8
+                let plotWidth = max(proxy.size.width - plotX - 2, 1)
+                let maxTokens = max(sessions.map(displayTokens).max() ?? 1, 1)
+
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.background.opacity(0.38))
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+
+                    ForEach(tickFractions(for: proxy.size.width), id: \.self) { fraction in
+                        let x = plotX + plotWidth * fraction
+                        Path { path in
+                            path.move(to: CGPoint(x: x, y: 0))
+                            path.addLine(to: CGPoint(x: x, y: proxy.size.height - 13))
+                        }
+                        .stroke(Color.white.opacity(fraction == 0 || fraction == 1 ? 0.12 : 0.07), lineWidth: 1)
+
+                        Text(tickLabel(fraction: fraction, axis: axis))
+                            .font(.system(size: 8.5, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.42))
+                            .monospacedDigit()
+                            .position(x: x, y: proxy.size.height - 6)
+                    }
+
+                    ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
+                        let y = CGFloat(index) * rowHeight + 17
+                        let span = sessionSpan(session, axis: axis)
+                        let startX = plotX + plotWidth * span.start
+                        let endX = plotX + plotWidth * span.end
+                        let width = max(endX - startX, 6)
+                        let thickness = barThickness(for: displayTokens(session), maxTokens: maxTokens)
+
+                        if index % 2 == 1 {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.025))
+                                .frame(width: proxy.size.width, height: rowHeight)
+                                .position(x: proxy.size.width / 2, y: y)
+                        }
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(session.title)
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.86))
+                                .lineLimit(1)
+                            Text(sessionTimelineMeta(session))
+                                .font(.system(size: 8.5, weight: .regular))
+                                .foregroundStyle(.white.opacity(0.48))
+                                .lineLimit(1)
+                                .monospacedDigit()
+                        }
+                        .frame(width: labelWidth, alignment: .leading)
+                        .position(x: labelWidth / 2, y: y)
+
+                        Capsule()
+                            .fill(timelineColor(for: session).opacity(0.9))
+                            .frame(width: width, height: thickness)
+                            .position(x: startX + width / 2, y: y)
+
+                        if span.clippedStart {
+                            Text("←")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(timelineColor(for: session))
+                                .position(x: plotX - 5, y: y)
+                        }
+
+                        if span.clippedEnd {
+                            Text("→")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(timelineColor(for: session))
+                                .position(x: plotX + plotWidth + 5, y: y)
+                        }
+                    }
+                }
+            }
+            .frame(height: CGFloat(sessions.count) * rowHeight + 18)
+
+            HStack(spacing: 10) {
+                timelineLegend(color: .accentBlue, label: "gpt-5.5")
+                timelineLegend(color: timelineReviewColor, label: "review")
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func timelineLegend(color: Color, label: String) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 9.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.48))
+        }
+    }
+
+    private var timelineReviewColor: Color {
+        Color(red: 191 / 255, green: 90 / 255, blue: 242 / 255)
+    }
+
+    private func axisBounds() -> (start: Date, end: Date) {
+        let end = Date()
+        return (end.addingTimeInterval(-range.interval), end)
+    }
+
+    private func tickFractions(for width: CGFloat) -> [CGFloat] {
+        width > 380 ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.5, 1]
+    }
+
+    private func tickLabel(fraction: CGFloat, axis: (start: Date, end: Date)) -> String {
+        let interval = axis.end.timeIntervalSince(axis.start)
+        return exactClockTime(axis.start.addingTimeInterval(interval * TimeInterval(fraction)))
+    }
+
+    private func sessionSpan(_ session: LLMUsageSession, axis: (start: Date, end: Date)) -> (start: CGFloat, end: CGFloat, clippedStart: Bool, clippedEnd: Bool) {
+        let rawEnd = session.updatedAt ?? session.createdAt ?? axis.end
+        let rawStart = session.createdAt ?? rawEnd.addingTimeInterval(-min(range.interval, 3_600))
+        let duration = max(axis.end.timeIntervalSince(axis.start), 1)
+        let clippedStart = rawStart < axis.start
+        let clippedEnd = rawEnd > axis.end
+        let start = min(max(rawStart.timeIntervalSince(axis.start) / duration, 0), 1)
+        let end = min(max(rawEnd.timeIntervalSince(axis.start) / duration, 0), 1)
+        return (CGFloat(start), CGFloat(max(end, start)), clippedStart, clippedEnd)
+    }
+
+    private func displayTokens(_ session: LLMUsageSession) -> UInt64 {
+        guard let totalTokens = session.tokenUsage?.totalTokens, totalTokens > 0 else {
+            return session.tokens
+        }
+        return totalTokens
+    }
+
+    private func barThickness(for tokens: UInt64, maxTokens: UInt64) -> CGFloat {
+        4 + 12 * CGFloat(sqrt(Double(tokens) / Double(maxTokens)))
+    }
+
+    private func timelineColor(for session: LLMUsageSession) -> Color {
+        session.modelName.lowercased().contains("auto")
+            ? timelineReviewColor
+            : .accentBlue
+    }
+
+    private func sessionTimelineMeta(_ session: LLMUsageSession) -> String {
+        var parts = [tokenCount(displayTokens(session))]
+        if let turns = session.tokenUsage?.turnCount, turns > 0 {
+            parts.append("\(turns)t")
+        }
+        if let usage = session.tokenUsage, usage.inputTokens > 0 {
+            parts.append("\(usage.cacheHitPercent)%")
+        }
+        return parts.joined(separator: " • ")
+    }
+}
+
 struct LLMAdvancedUsageCard: View {
     let snapshot: LLMUsageSnapshot
     @Binding var isExpanded: Bool
@@ -811,12 +1383,14 @@ struct LLMAdvancedUsageCard: View {
     }
 
     private var selectedSessions: [LLMUsageSession] {
+        let sessions: [LLMUsageSession]
         switch sessionMode {
         case .recent:
-            return snapshot.recentSessions
+            sessions = snapshot.recentSessions
         case .highest:
-            return snapshot.topWeeklySessions
+            sessions = snapshot.topWeeklySessions
         }
+        return Array(sessions.prefix(5))
     }
 }
 
@@ -919,7 +1493,7 @@ struct LLMSessionRow: View {
                     LLMSessionDetailRow(label: "Model", value: session.modelName)
                     LLMSessionDetailRow(label: "Tokens", value: tokenCount(session.tokens))
                     if let tokenUsage = session.tokenUsage {
-                        LLMSessionTokenUsageView(usage: tokenUsage)
+                        LLMSessionTokenUsageView(usage: tokenUsage, modelName: session.modelName)
                     }
                     LLMSessionDetailRow(label: "Updated", value: session.updatedAt.map { absoluteTime($0) } ?? "-")
                     LLMSessionDetailRow(label: "Session", value: session.id)
@@ -998,9 +1572,12 @@ struct LLMSessionRow: View {
 
 struct LLMSessionTokenUsageView: View {
     let usage: LLMTokenUsageSummary
+    let modelName: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            LLMSessionMetricRow(label: "API est.", value: dollarEstimate(usage.estimatedCost(for: modelName)))
+            LLMSessionMetricRow(label: "Est. rate", value: usage.pricingLabel(for: modelName))
             LLMSessionMetricRow(label: "Cache hit", value: "\(usage.cacheHitPercent)% of input")
             LLMSessionMetricRow(label: "Cached input", value: tokenCount(usage.cachedInputTokens))
             LLMSessionMetricRow(label: "Fresh input", value: tokenCount(usage.nonCachedInputTokens))
@@ -1080,8 +1657,6 @@ struct LLMUsageWindowRow: View {
 
 struct LLMUsageProgress: View {
     let window: LLMUsageWindow?
-    var estimate: LLMTokenCostEstimate?
-    var onOpenUsageLog: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1112,35 +1687,6 @@ struct LLMUsageProgress: View {
             .font(.system(size: 11, weight: .regular))
             .foregroundStyle(.white.opacity(0.54))
             .monospacedDigit()
-
-            if let estimate {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Button {
-                            onOpenUsageLog?()
-                        } label: {
-                            Text("API est.")
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(onOpenUsageLog == nil)
-                        .help(onOpenUsageLog == nil ? "" : "Open the 5h usage window log")
-                        Spacer()
-                        Text("\(dollarEstimate(estimate.estimatedCost)) • \(estimate.cacheHitPercent)% cached")
-                            .foregroundStyle(.white.opacity(0.76))
-                    }
-                    HStack {
-                        Text("Fresh \(tokenCount(estimate.freshInputTokens))")
-                        Spacer()
-                        Text("Cached \(tokenCount(estimate.cachedInputTokens))")
-                        Spacer()
-                        Text("Out \(tokenCount(estimate.outputTokens))")
-                    }
-                    .foregroundStyle(.white.opacity(0.52))
-                }
-                .font(.system(size: 10.5, weight: .semibold))
-                .monospacedDigit()
-                .padding(.top, 1)
-            }
         }
     }
 
@@ -1825,6 +2371,8 @@ struct ActionBarView: View {
                 IconActionButton(systemName: "rectangle.on.rectangle", help: "Open as window", action: onPopOut)
             }
 
+            IconActionButton(systemName: "arrow.clockwise", help: "Relaunch app", action: relaunchCurrentApp)
+
             if let onQuit {
                 IconActionButton(systemName: "power", help: "Quit app", action: onQuit)
             }
@@ -1834,6 +2382,21 @@ struct ActionBarView: View {
         .background(Color.panel)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
+}
+
+@MainActor
+private func relaunchCurrentApp() {
+    let bundleURL = Bundle.main.bundleURL
+    guard bundleURL.pathExtension == "app" else {
+        NSApp.terminate(nil)
+        return
+    }
+
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    task.arguments = ["-n", bundleURL.path]
+    try? task.run()
+    NSApp.terminate(nil)
 }
 
 struct IconActionButton: View {
@@ -2147,7 +2710,7 @@ private struct LLMQuotaValue {
     let planType: String?
 }
 
-private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample]) -> LLMQuotaDrawdownInsight? {
+private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample], mode: LLMQuotaDrawdownMode) -> LLMQuotaDrawdownInsight? {
     let values = samples
         .compactMap { sample -> LLMQuotaValue? in
             guard let remaining = sample.primaryRemainingPercent else { return nil }
@@ -2167,17 +2730,32 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample]) -> LLMQ
     }
 
     var resetAfterIndex: Int?
-    var segmentEnd = values.count - 1
-    if let lastReset = resetIndices.last,
-       values.indices.contains(lastReset - 1),
-       values[lastReset - 1].remainingPercent <= 20 {
-        resetAfterIndex = lastReset
-        segmentEnd = lastReset - 1
+    let segmentStart: Int
+    let segmentEnd: Int
+    let subtitle: String
+
+    switch mode {
+    case .last:
+        if let lastReset = resetIndices.last,
+           values.indices.contains(lastReset - 1),
+           values[lastReset - 1].remainingPercent <= 20 {
+            resetAfterIndex = lastReset
+            segmentEnd = lastReset - 1
+            segmentStart = resetIndices.last(where: { $0 < segmentEnd }) ?? 0
+            subtitle = "Last exhausted run before the current reset; crossings may fall between samples."
+        } else {
+            segmentEnd = values.count - 1
+            segmentStart = resetIndices.last(where: { $0 < segmentEnd }) ?? 0
+            subtitle = "Latest sampled drawdown; crossings may fall between samples."
+        }
+    case .current:
+        segmentEnd = values.count - 1
+        segmentStart = resetIndices.last ?? 0
+        subtitle = "Current sampled drawdown; crossings may fall between samples."
     }
 
     guard segmentEnd > 0 else { return nil }
 
-    let segmentStart = resetIndices.last(where: { $0 < segmentEnd }) ?? 0
     let dropIndex = firstDropIndex(in: values, start: segmentStart, end: segmentEnd)
     let fullIndex = dropIndex.map { max(segmentStart, $0 - 1) }
         ?? (segmentStart...segmentEnd).last(where: { values[$0].remainingPercent >= 95 })
@@ -2185,9 +2763,15 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample]) -> LLMQ
 
     guard fullIndex <= segmentEnd else { return nil }
 
-    let lowIndex = firstThresholdCrossing(in: values, threshold: 5, start: fullIndex, end: segmentEnd)
-        ?? (fullIndex...segmentEnd).min { values[$0].remainingPercent < values[$1].remainingPercent }
-        ?? segmentEnd
+    let lowIndex: Int
+    switch mode {
+    case .last:
+        lowIndex = firstThresholdCrossing(in: values, threshold: 5, start: fullIndex, end: segmentEnd)
+            ?? (fullIndex...segmentEnd).min { values[$0].remainingPercent < values[$1].remainingPercent }
+            ?? segmentEnd
+    case .current:
+        lowIndex = segmentEnd
+    }
 
     var milestones: [LLMQuotaMilestone] = [
         LLMQuotaMilestone(
@@ -2197,7 +2781,7 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample]) -> LLMQ
         )
     ]
 
-    for threshold in [50, 20, 5] {
+    for threshold in stride(from: 90, through: 0, by: -10) where threshold < values[fullIndex].remainingPercent {
         if let index = firstThresholdCrossing(in: values, threshold: threshold, start: fullIndex, end: segmentEnd) {
             milestones.append(
                 LLMQuotaMilestone(
@@ -2220,9 +2804,6 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample]) -> LLMQ
     }
 
     let duration = values[lowIndex].sampledAt.timeIntervalSince(values[fullIndex].sampledAt)
-    let subtitle = resetAfterIndex == nil
-        ? "Latest sampled drawdown; crossings may fall between samples."
-        : "Last exhausted run before the current reset; crossings may fall between samples."
 
     return LLMQuotaDrawdownInsight(
         startPercent: values[fullIndex].remainingPercent,
@@ -2257,7 +2838,7 @@ private func firstThresholdCrossing(in values: [LLMQuotaValue], threshold: Int, 
 private func deduplicatedMilestones(_ milestones: [LLMQuotaMilestone]) -> [LLMQuotaMilestone] {
     var seen = Set<String>()
     return milestones.filter { milestone in
-        let key = "\(Int(milestone.sampledAt.timeIntervalSince1970))-\(milestone.remainingPercent)"
+        let key = "\(milestone.label)-\(Int(milestone.sampledAt.timeIntervalSince1970))-\(milestone.remainingPercent)"
         guard !seen.contains(key) else { return false }
         seen.insert(key)
         return true
@@ -2280,6 +2861,14 @@ private func durationLabel(_ interval: TimeInterval) -> String {
     let hours = minutes / 60
     let remainingMinutes = minutes % 60
     return remainingMinutes == 0 ? "\(hours)h" : "\(hours)h \(remainingMinutes)m"
+}
+
+private func aiDuration(_ interval: TimeInterval) -> String {
+    let minutes = max(Int((interval / 60).rounded()), 0)
+    if minutes >= 60 {
+        return "\(minutes / 60)h \(minutes % 60)m"
+    }
+    return "\(minutes)m"
 }
 
 private func planName(_ value: String?) -> String {
@@ -2326,34 +2915,24 @@ private func absoluteTime(_ value: Date) -> String {
 }
 
 private func quotaPointTime(_ value: Date) -> String {
-    let elapsed = Date().timeIntervalSince(value)
-    if elapsed >= 0, elapsed < 3_600 {
-        let minutes = max(Int(elapsed / 60), 0)
-        if minutes <= 0 {
-            return "just now"
-        }
-        return minutes == 1 ? "1 min ago" : "\(minutes) mins ago"
-    }
-
-    let formatter = DateFormatter()
-    formatter.dateFormat = "h:mm a"
-    return formatter.string(from: value)
+    exactClockTime(value)
 }
 
 private func quotaMilestoneTime(_ value: Date) -> String {
+    exactClockTime(value)
+}
+
+private func exactClockTime(_ value: Date) -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "h:mm a"
     return formatter.string(from: value)
+        .replacingOccurrences(of: "AM", with: "a.m.")
+        .replacingOccurrences(of: "PM", with: "p.m.")
 }
 
 private func localDrawdownUpdatedAt(_ value: Date?) -> String {
     guard let value else { return "not sampled" }
-    if abs(value.timeIntervalSinceNow) < 60 {
-        return "just now"
-    }
-    let formatter = RelativeDateTimeFormatter()
-    formatter.unitsStyle = .short
-    return formatter.localizedString(for: value, relativeTo: Date())
+    return exactClockTime(value)
 }
 
 extension View {

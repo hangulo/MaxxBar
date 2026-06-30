@@ -2,9 +2,9 @@
 set -eu
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="MenuBarStats"
+APP_NAME="MaxxBar"
 CONFIGURATION="${CONFIGURATION:-debug}"
-APP_DIR="${APP_DIR:-$ROOT_DIR/Dist/$APP_NAME.app}"
+APP_DIR="${APP_DIR:-$ROOT_DIR/Dist.noindex/$APP_NAME.app}"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -18,11 +18,16 @@ else
     BUILD_DIR=".build/debug"
 fi
 
+mkdir -p "$(dirname "$APP_DIR")"
+touch "$(dirname "$APP_DIR")/.metadata_never_index" 2>/dev/null || true
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/$APP_NAME" "$MACOS_DIR/$APP_NAME"
-if [ -x "$BUILD_DIR/MenuBarStatsSensorHelper" ]; then
-    cp "$BUILD_DIR/MenuBarStatsSensorHelper" "$RESOURCES_DIR/MenuBarStatsSensorHelper"
+if [ -f "$ROOT_DIR/Assets/AppIcon.icns" ]; then
+    cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+fi
+if [ -x "$BUILD_DIR/MaxxBarSensorHelper" ]; then
+    cp "$BUILD_DIR/MaxxBarSensorHelper" "$RESOURCES_DIR/MaxxBarSensorHelper"
 fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
@@ -33,13 +38,15 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>MenuBarStats</string>
+    <string>MaxxBar</string>
     <key>CFBundleIdentifier</key>
-    <string>com.hector.menubarstats</string>
+    <string>com.hector.MaxxBar</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>MenuBarStats</string>
+    <string>MaxxBar</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

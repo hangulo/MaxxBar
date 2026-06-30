@@ -3,3 +3,4 @@
 DerivedData/
 *.xcuserdata/
 Dist/
+Dist.noindex/

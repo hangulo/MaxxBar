@@ -31,20 +31,20 @@ Secondary values:
 
 ## Current Helper Architecture
 
-The repo now includes a standalone `MenuBarStatsSensorHelper` executable target. It can print a single JSON snapshot, write one snapshot, or run continuously as a LaunchDaemon:
+The repo now includes a standalone `MaxxBarSensorHelper` executable target. It can print a single JSON snapshot, write one snapshot, or run continuously as a LaunchDaemon:
 
 ```sh
-.build/release/MenuBarStatsSensorHelper
-.build/release/MenuBarStatsSensorHelper --write /tmp/menubarstats-sensors.json
-.build/release/MenuBarStatsSensorHelper --daemon --output "/Library/Application Support/MenuBarStats/sensors.json" --interval 3
+.build/release/MaxxBarSensorHelper
+.build/release/MaxxBarSensorHelper --write /tmp/maxxbar-sensors.json
+.build/release/MaxxBarSensorHelper --daemon --output "/Library/Application Support/MaxxBar/sensors.json" --interval 3
 ```
 
 Install scripts:
 
-- `Scripts/install-sensor-helper.sh` builds the helper, copies it to `/Library/PrivilegedHelperTools/com.hector.MenuBarStatsSensorHelper`, installs a LaunchDaemon, and starts it.
+- `Scripts/install-sensor-helper.sh` builds the helper, copies it to `/Library/PrivilegedHelperTools/com.hector.MaxxBarSensorHelper`, installs a LaunchDaemon, and starts it.
 - `Scripts/uninstall-sensor-helper.sh` unloads and removes the helper.
 
-The menu bar app reads `/Library/Application Support/MenuBarStats/sensors.json` first. If the cache is missing or stale, it falls back to the temporary iStat history bridge and public battery telemetry.
+The menu bar app reads `/Library/Application Support/MaxxBar/sensors.json` first. If the cache is missing or stale, it falls back to the temporary iStat history bridge and public battery telemetry.
 
 ## Proposed Architecture
 

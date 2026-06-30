@@ -3,7 +3,7 @@ import SwiftUI
 
 @main
 @MainActor
-enum MenuBarStatsLauncher {
+enum MaxxBarLauncher {
     private static var delegate: AppDelegate?
 
     static func main() {
@@ -15,7 +15,7 @@ enum MenuBarStatsLauncher {
             let path = CommandLine.arguments[renderIndex + 1]
             let panel = CommandLine.arguments.indices.contains(renderIndex + 2)
                 ? StatsPanel(argument: CommandLine.arguments[renderIndex + 2])
-                : .memory
+                : .runway
             do {
                 try PopoverRenderer.renderDemo(to: URL(fileURLWithPath: path), panel: panel)
                 print("rendered=\(path)")
@@ -56,6 +56,12 @@ enum MenuBarStatsLauncher {
             print("llmLocalFiveHourTokens=\(llmUsage.localFiveHourTokens)")
             print("llmLocalWeeklyTokens=\(llmUsage.localWeeklyTokens)")
             print("llmError=\(llmUsage.error ?? "-")")
+            let aiUsage = AIUsageReader.recordAndRead(memory: snapshot, cpuGPU: .empty, llmUsage: llmUsage)
+            print("aiActiveTool=\(aiUsage.activeTool ?? "-")")
+            print("aiSessionsToday=\(aiUsage.sessionsToday)")
+            print("aiTimeToday=\(Int(aiUsage.timeTodaySeconds))")
+            print("aiTopTools=\(aiUsage.topTools.map { "\($0.label)=\($0.count)" }.joined(separator: ","))")
+            print("aiMomentsToday=\(aiUsage.momentsToday)")
             let sensors = SensorReader.read()
             print("sensorCPUTemp=\(sensors.cpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
             print("sensorGPUTemp=\(sensors.gpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
@@ -76,6 +82,15 @@ enum MenuBarStatsLauncher {
             return
         }
 
+        if CommandLine.arguments.contains("--write-ai-report") {
+            if let url = AIUsageReader.writeReport() {
+                print("aiReport=\(url.path)")
+                return
+            }
+            fputs("AI report generation failed\n", stderr)
+            exit(1)
+        }
+
         let app = NSApplication.shared
         let appDelegate = AppDelegate(
             shouldVerifyPopoverAction: shouldVerifyPopoverAction,
@@ -92,7 +107,9 @@ extension StatsPanel {
         switch argument.lowercased() {
         case "sensors", "cpu", "cpu/gpu", "cpugpu":
             self = .cpuGPU
-        case "llm", "usage", "llmusage", "llm-usage":
+        case "runway", "limits", "quota":
+            self = .runway
+        case "ai", "insights", "maxxinsights", "maxx-insights", "llm", "usage", "llmusage", "llm-usage":
             self = .llmUsage
         default:
             self = .memory
@@ -110,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var detachedWindow: NSWindow?
     private var timer: Timer?
-    private var currentPopoverPanel: StatsPanel = .llmUsage
+    private var currentPopoverPanel: StatsPanel = .runway
 
     init(shouldVerifyPopoverAction: Bool = false, shouldVerifyPopOutAction: Bool = false) {
         self.shouldVerifyPopoverAction = shouldVerifyPopoverAction
@@ -124,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.length = 95
+        item.length = 68
         if let button = item.button {
             button.title = ""
             let titleView = StatusTitleView()
@@ -144,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 306, height: 662)
-        popover.contentViewController = makePopoverContent(selectedPanel: .llmUsage)
+        popover.contentViewController = makePopoverContent(selectedPanel: .runway)
         self.popover = popover
 
         refreshStatusInBackground()
@@ -216,22 +233,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.contentViewController = makePopoverContent(selectedPanel: selectedPanel)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             refreshInBackground()
-            if selectedPanel == .llmUsage {
+            if selectedPanel == .llmUsage || selectedPanel == .runway {
                 refreshLLMUsageInBackground()
             }
         }
     }
 
     private func selectedPanelForCurrentClick() -> StatsPanel {
-        guard let button = statusItem?.button,
-              let event = NSApp.currentEvent,
-              event.window === button.window else {
-            return .llmUsage
-        }
-
-        let point = button.convert(event.locationInWindow, from: nil)
-        let third = button.bounds.width / 3
-        return point.x >= third * 2 ? .memory : .llmUsage
+        .runway
     }
 
     private func makePopoverContent(selectedPanel: StatsPanel) -> NSHostingController<MemoryPopoverView> {
@@ -249,13 +258,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first,
               let fiveHourRemaining = codexLimit.primary?.remainingPercent,
               let weeklyRemaining = codexLimit.secondary?.remainingPercent else {
-            return ("MEM", "\(model.snapshot.pressurePercent)%")
+            return ("-- Week", "- -")
         }
 
         return (
-            "5H Week MEM",
-            "\(fiveHourRemaining)% \(weeklyRemaining)% \(model.snapshot.pressurePercent)%"
+            "\(hoursLeftLabel(codexLimit.primary?.resetAt)) Week",
+            "\(fiveHourRemaining)% \(weeklyRemaining)%"
         )
+    }
+
+    private func hoursLeftLabel(_ resetAt: Date?) -> String {
+        guard let resetAt else { return "--" }
+        let hours = max(resetAt.timeIntervalSinceNow / 3_600, 0)
+        let rounded = (hours * 2).rounded() / 2
+        if rounded.rounded() == rounded {
+            return "\(Int(rounded))H"
+        }
+        return String(format: "%.1fH", rounded)
     }
 
     private func statusTitleForDebug() -> String {
@@ -302,7 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: MemoryPopoverView(
                 model: model,
                 onQuit: { NSApp.terminate(nil) },
-                selectedPanel: .llmUsage,
+                selectedPanel: .runway,
                 fixedSize: false
             )
         )
@@ -329,8 +348,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 final class StatusTitleView: NSView {
-    private var topItems = ["5H", "Week", "MEM"]
-    private var bottomItems = ["-", "-", "-"]
+    private var topItems = ["5H", "Week"]
+    private var bottomItems = ["-", "-"]
     private let amberUsageColor = NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.18, alpha: 1.0)
     private let lowUsageColor = NSColor(calibratedRed: 1.0, green: 0.27, blue: 0.34, alpha: 1.0)
 

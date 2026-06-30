@@ -1,4 +1,4 @@
-# MenuBarStats Data Audit
+# MaxxBar Data Audit
 
 Audit time: May 28, 2026, around 20:35 Pacific.
 
@@ -29,8 +29,8 @@ The app's current sample reported:
 ```text
 cpuUser=7%
 cpuSystem=8%
-cpuProcesses=Codex=2.6%,WindowServer=1.3%,MenuBarStats=1.3%,Google Chrome=0.9%,Activity Monitor=0.6%
-cpuProcessesRaw=Codex=35.8%,WindowServer=18.3%,MenuBarStats=17.7%,Google Chrome=12.0%,Activity Monitor=9.0%
+cpuProcesses=Codex=2.6%,WindowServer=1.3%,MaxxBar=1.3%,Google Chrome=0.9%,Activity Monitor=0.6%
+cpuProcessesRaw=Codex=35.8%,WindowServer=18.3%,MaxxBar=17.7%,Google Chrome=12.0%,Activity Monitor=9.0%
 ```
 
 Both process lists come from the same `ps %CPU` sample. The `cpuProcesses` values divide raw CPU by the 14 logical CPUs on this Mac, which is closer to an iStat-style share of the whole machine. The `cpuProcessesRaw` values are closer to Activity Monitor's process scale, where grouped helper processes can add up to large numbers and individual processes can exceed 100% on multicore systems.
@@ -40,7 +40,7 @@ Both process lists come from the same `ps %CPU` sample. The `cpuProcesses` value
 Codex quota samples are persisted locally at:
 
 ```text
-~/Library/Application Support/MenuBarStats/llm-quota-history.json
+~/Library/Application Support/MaxxBar/llm-quota-history.json
 ```
 
 Each sample stores the sampled time, 5H remaining percentage, weekly remaining

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-HELPER_ID="com.hector.MenuBarStatsSensorHelper"
+HELPER_ID="com.hector.MaxxBarSensorHelper"
 HELPER_BINARY="/Library/PrivilegedHelperTools/$HELPER_ID"
 PLIST="/Library/LaunchDaemons/$HELPER_ID.plist"
 
