@@ -2438,10 +2438,11 @@ enum AIUsageReader {
     private static func workflowCounters(from records: [AIActivityRecord]) -> [AIWorkflowPath] {
         let sorted = records.sorted { $0.ts < $1.ts }
         var counts: [String: (before: String, surface: String, after: String, useCase: String, count: Int)] = [:]
-        for index in sorted.indices where sorted[index].tool != nil {
-            let before = nearestNonAI(in: sorted, from: index, step: -1) ?? "Start"
-            let after = nearestNonAI(in: sorted, from: index, step: 1) ?? "End"
-            let surface = sorted[index].surface ?? sorted[index].tool ?? "AI"
+
+        for run in aiRuns(in: sorted) {
+            let before = nearestNonAI(in: sorted, from: run.start, step: -1, within: 600) ?? "Start"
+            let after = nearestNonAI(in: sorted, from: run.end, step: 1, within: 600) ?? "End"
+            let surface = sorted[run.start].surface ?? sorted[run.start].tool ?? "AI"
             let useCase = useCase(before: before, surface: surface, after: after)
             let key = "\(before)|\(surface)|\(after)|\(useCase)"
             var current = counts[key] ?? (before, surface, after, useCase, 0)
@@ -2454,10 +2455,25 @@ enum AIUsageReader {
         }
     }
 
-    private static func nearestNonAI(in records: [AIActivityRecord], from index: Int, step: Int) -> String? {
+    private static func aiRuns(in records: [AIActivityRecord]) -> [(start: Int, end: Int)] {
+        var runs: [(start: Int, end: Int)] = []
+        for index in records.indices where records[index].tool != nil {
+            if let last = runs.last,
+               records[index].ts.timeIntervalSince(records[last.end].ts) <= 300 {
+                runs[runs.count - 1] = (last.start, index)
+            } else {
+                runs.append((index, index))
+            }
+        }
+        return runs
+    }
+
+    private static func nearestNonAI(in records: [AIActivityRecord], from index: Int, step: Int, within seconds: TimeInterval) -> String? {
         var cursor = index + step
+        let anchor = records[index].ts
         while records.indices.contains(cursor) {
             if records[cursor].tool == nil {
+                guard abs(records[cursor].ts.timeIntervalSince(anchor)) <= seconds else { return nil }
                 return records[cursor].site ?? records[cursor].app
             }
             cursor += step
