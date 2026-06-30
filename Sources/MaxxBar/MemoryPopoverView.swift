@@ -1280,6 +1280,7 @@ struct LLMLocalUsageWindowRow: View {
 struct LLMSessionTimelineView: View {
     let sessions: [LLMUsageSession]
     let range: LLMQuotaHistoryRange
+    @State private var hoveredSessionID: String?
 
     private let rowHeight: CGFloat = 34
 
@@ -1341,7 +1342,7 @@ struct LLMSessionTimelineView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(session.title)
+                            Text(sessionDisplayTitle(session))
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.86))
                                 .lineLimit(1)
@@ -1352,14 +1353,20 @@ struct LLMSessionTimelineView: View {
                                 .monospacedDigit()
                         }
                         .frame(width: labelWidth, alignment: .leading)
+                        .contentShape(Rectangle())
                         .position(x: labelWidth / 2, y: y)
-                        .help(sessionTooltip(session))
+                        .onHover { isHovered in
+                            hoveredSessionID = isHovered ? session.id : (hoveredSessionID == session.id ? nil : hoveredSessionID)
+                        }
 
                         Capsule()
                             .fill(timelineColor(for: session).opacity(0.9))
                             .frame(width: width, height: thickness)
+                            .contentShape(Rectangle())
                             .position(x: startX + width / 2, y: y)
-                            .help(sessionTooltip(session))
+                            .onHover { isHovered in
+                                hoveredSessionID = isHovered ? session.id : (hoveredSessionID == session.id ? nil : hoveredSessionID)
+                            }
 
                         if span.clippedStart {
                             Text("←")
@@ -1373,7 +1380,24 @@ struct LLMSessionTimelineView: View {
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundStyle(timelineColor(for: session))
                                 .position(x: plotX + plotWidth + 5, y: y)
-                        }
+                            }
+                    }
+
+                    if let hovered = hoveredSession(proxyHeight: proxy.size.height) {
+                        LLMSessionHoverCard(
+                            session: hovered.session,
+                            displayTitle: sessionDisplayTitle(hovered.session),
+                            displayTokens: displayTokens(hovered.session),
+                            promptPreview: sessionPromptPreview(hovered.session)
+                        )
+                        .frame(width: min(proxy.size.width - 24, 268), alignment: .leading)
+                        .offset(
+                            x: min(max(labelWidth + 12, 8), max(proxy.size.width - 280, 8)),
+                            y: hovered.y
+                        )
+                        .zIndex(100)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
                     }
                 }
             }
@@ -1455,39 +1479,155 @@ struct LLMSessionTimelineView: View {
         return parts.joined(separator: " • ")
     }
 
-    private func sessionTooltip(_ session: LLMUsageSession) -> String {
-        var lines = [
-            session.title,
-            "Project: \(session.projectName)",
-            "Model: \(session.modelName)",
-            "Tokens shown: \(tokenCount(displayTokens(session)))"
-        ]
-        if let createdAt = session.createdAt {
-            lines.append("Started: \(absoluteTime(createdAt))")
+    private func hoveredSession(proxyHeight: CGFloat) -> (session: LLMUsageSession, y: CGFloat)? {
+        guard let hoveredSessionID,
+              let index = sessions.firstIndex(where: { $0.id == hoveredSessionID }) else {
+            return nil
         }
-        if let updatedAt = session.updatedAt {
-            lines.append("Updated: \(absoluteTime(updatedAt))")
+
+        let rowY = CGFloat(index) * rowHeight + 17
+        let cardY = rowY < proxyHeight * 0.5
+            ? min(rowY + 8, max(proxyHeight - 118, 8))
+            : max(rowY - 118, 8)
+        return (sessions[index], cardY)
+    }
+
+    private func sessionDisplayTitle(_ session: LLMUsageSession) -> String {
+        let title = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if title.localizedCaseInsensitiveContains("Codex agent history")
+            || title.localizedCaseInsensitiveContains("approval request") {
+            return "Approval review"
         }
-        if let usage = session.tokenUsage {
-            lines.append("Turns: \(usage.turnCount)")
-            lines.append("Input: \(tokenCount(usage.inputTokens))")
-            lines.append("Cached input: \(tokenCount(usage.cachedInputTokens))")
-            lines.append("Output: \(tokenCount(usage.outputTokens))")
-            if usage.reasoningOutputTokens > 0 {
-                lines.append("Reasoning output: \(tokenCount(usage.reasoningOutputTokens))")
+        return title.isEmpty ? "Untitled session" : title
+    }
+
+    private func sessionPromptPreview(_ session: LLMUsageSession) -> String? {
+        let preview = session.preview
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !preview.isEmpty,
+              preview != "No prompt preview stored" else {
+            return nil
+        }
+
+        let lowercased = preview.lowercased()
+        if lowercased.contains("codex agent history")
+            || lowercased.contains("approval request")
+            || lowercased.contains("transcript start")
+            || lowercased.contains("planned action json") {
+            return nil
+        }
+
+        return trimmedText(preview, maxLength: 180)
+    }
+}
+
+struct LLMSessionHoverCard: View {
+    let session: LLMUsageSession
+    let displayTitle: String
+    let displayTokens: UInt64
+    let promptPreview: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayTitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                Text("\(session.projectName) • \(session.modelName)")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(1)
             }
-            if usage.inputTokens > 0 {
-                lines.append("Cache hit: \(usage.cacheHitPercent)%")
+
+            HStack(spacing: 6) {
+                hoverMetric("Tokens", tokenCount(displayTokens))
+                if let turns = session.tokenUsage?.turnCount, turns > 0 {
+                    hoverMetric("Turns", "\(turns)")
+                }
+                if let usage = session.tokenUsage, usage.inputTokens > 0 {
+                    hoverMetric("Cache", "\(usage.cacheHitPercent)%")
+                }
             }
-            lines.append("Estimated cost: \(dollarEstimate(usage.estimatedCost(for: session.modelName)))")
+
+            if let usage = session.tokenUsage {
+                VStack(alignment: .leading, spacing: 3) {
+                    hoverLine("Input", tokenCount(usage.inputTokens))
+                    hoverLine("Cached", tokenCount(usage.cachedInputTokens))
+                    hoverLine("Output", tokenCount(usage.outputTokens))
+                    if usage.reasoningOutputTokens > 0 {
+                        hoverLine("Reasoning", tokenCount(usage.reasoningOutputTokens))
+                    }
+                    hoverLine("Cost est.", dollarEstimate(usage.estimatedCost(for: session.modelName)))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                if let createdAt = session.createdAt {
+                    hoverLine("Started", absoluteTime(createdAt))
+                }
+                if let updatedAt = session.updatedAt {
+                    hoverLine("Updated", absoluteTime(updatedAt))
+                }
+            }
+
+            if let promptPreview {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Prompt")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.48))
+                    Text(promptPreview)
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(3)
+                }
+            }
+
+            if !session.rolloutPath.isEmpty {
+                hoverLine("Trace", URL(fileURLWithPath: session.rolloutPath).lastPathComponent)
+            }
         }
-        if !session.preview.isEmpty {
-            lines.append("Preview: \(session.preview)")
+        .padding(10)
+        .background(Color.background.opacity(0.98))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: .black.opacity(0.32), radius: 10, x: 0, y: 5)
+    }
+
+    private func hoverMetric(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.42))
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.88))
+                .monospacedDigit()
+                .lineLimit(1)
         }
-        if !session.rolloutPath.isEmpty {
-            lines.append("Trace: \(session.rolloutPath)")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(Color.panel.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+
+    private func hoverLine(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 9.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.46))
+            Spacer(minLength: 4)
+            Text(value)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.76))
+                .monospacedDigit()
+                .lineLimit(1)
         }
-        return lines.joined(separator: "\n")
     }
 }
 
@@ -3103,6 +3243,12 @@ private func exactClockTime(_ value: Date) -> String {
 private func localDrawdownUpdatedAt(_ value: Date?) -> String {
     guard let value else { return "not sampled" }
     return exactClockTime(value)
+}
+
+private func trimmedText(_ text: String, maxLength: Int) -> String {
+    guard text.count > maxLength else { return text }
+    let end = text.index(text.startIndex, offsetBy: maxLength - 1)
+    return String(text[..<end]) + "..."
 }
 
 private let codexRunwayHelp = """

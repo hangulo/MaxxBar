@@ -15,6 +15,8 @@ instead of leaving most of the chart empty.
 
 ### Insights
 
+![Insights panel](Artifacts/screenshot-insights.png)
+
 The Insights panel shows local AI session patterns, before/after context,
 TraceWork-inspired workflow paths, and a Maxx Moment capture flow for saving
 frustration or delight moments with an optional local screenshot and note.

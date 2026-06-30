@@ -2612,7 +2612,7 @@ enum AIUsageReader {
             :root{color-scheme:dark;--bg:#101113;--panel:#181a1f;--panel2:#20232a;--text:#f4f7fb;--muted:#9aa4b2;--line:#303642;--accent:#38bdf8;--green:#34d399;--amber:#f59e0b}
             *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;padding:24px;line-height:1.45}
             h1{margin:0 0 4px;font-size:30px}h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 12px;color:var(--accent)}
-            .sub{color:var(--muted);margin:0 0 22px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.card span{display:block;color:var(--muted);font-size:12px}.card strong{display:block;font-size:24px;margin-top:4px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}.list div{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}.list div:last-child{border-bottom:0}.list span{color:var(--muted);font-variant-numeric:tabular-nums}.paths div{display:grid;grid-template-columns:minmax(0,1fr)68px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.06)}.paths em{display:block;color:var(--muted);font-style:normal;font-size:12px;margin-top:2px}.sankey{width:100%;min-width:760px}.sankey-wrap{overflow:auto;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px}.node{fill:#263241;stroke:#3b4758}.link{fill:none;stroke:var(--accent);stroke-opacity:.35;stroke-linecap:round}.label{fill:var(--text);font-size:12px;font-weight:700}.muted{fill:var(--muted);font-size:10px}.footer{margin-top:20px;color:var(--muted);font-size:12px}
+            .sub{color:var(--muted);margin:0 0 22px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.card span{display:block;color:var(--muted);font-size:12px}.card strong{display:block;font-size:24px;margin-top:4px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}.list div{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}.list div:last-child{border-bottom:0}.list span{color:var(--muted);font-variant-numeric:tabular-nums}.paths div,.ai-path-top div{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06);color:var(--muted);font-size:12px}.paths em,.ai-path-top em{font:700 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;font-style:normal;color:var(--muted)}.paths span,.ai-path-top span{color:var(--accent);font-weight:900}.ai-path-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.ai-path-head h2{margin:0 0 6px}.ai-path-head p{margin:0;color:var(--muted)}.ai-path-head strong{font:800 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:rgba(56,189,248,.12);border-radius:999px;padding:7px 10px;white-space:nowrap}.ai-sankey-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel2);padding:10px}.ai-sankey{display:block;min-width:860px;width:100%;height:auto}.ai-sankey-stage{fill:var(--muted);font:800 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase}.ai-sankey-link{fill:none;stroke:var(--accent);stroke-linecap:round;opacity:.18}.ai-sankey-link:hover{opacity:.38}.ai-sankey-node{fill:#2a7796;opacity:.94}.ai-sankey-icon text{font:800 7px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0}.ai-sankey-label{fill:var(--text);font:600 12px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.ai-sankey-count{fill:var(--muted);font:650 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.ai-path-top{display:grid;gap:2px;margin-top:12px}.footer{margin-top:20px;color:var(--muted);font-size:12px}
           </style>
         </head>
         <body>
@@ -2662,32 +2662,156 @@ enum AIUsageReader {
 
     private static func pathVisual(_ paths: [AIWorkflowPath]) -> String {
         guard !paths.isEmpty else { return panel("AI Paths", "<p class=\"sub\">No ChatGPT/Codex/Claude paths found yet.</p>") }
-        let maxCount = max(paths.map(\.count).max() ?? 1, 1)
-        let rows = paths.prefix(6).enumerated().map { index, path -> String in
-            let y = 42 + index * 44
-            let width = max(4, Int(Double(path.count) / Double(maxCount) * 24))
+
+        let total = max(paths.reduce(0) { $0 + $1.count }, 1)
+        var beforeCounts: [String: Int] = [:]
+        var surfaceCounts: [String: Int] = [:]
+        var afterCounts: [String: Int] = [:]
+        var leftLinks: [String: (source: String, target: String, count: Int)] = [:]
+        var rightLinks: [String: (source: String, target: String, count: Int)] = [:]
+
+        for path in paths {
+            beforeCounts[path.before, default: 0] += path.count
+            surfaceCounts[path.surface, default: 0] += path.count
+            afterCounts[path.after, default: 0] += path.count
+
+            let leftKey = "\(path.before)|\(path.surface)"
+            let rightKey = "\(path.surface)|\(path.after)"
+            var left = leftLinks[leftKey] ?? (path.before, path.surface, 0)
+            left.count += path.count
+            leftLinks[leftKey] = left
+            var right = rightLinks[rightKey] ?? (path.surface, path.after, 0)
+            right.count += path.count
+            rightLinks[rightKey] = right
+        }
+
+        struct NodePosition {
+            let x: Double
+            let y: Double
+            let height: Double
+        }
+
+        struct Stage {
+            let title: String
+            let counts: [String: Int]
+            let x: Double
+        }
+
+        func topLabels(_ counts: [String: Int]) -> [String] {
+            Array(counts.sorted { lhs, rhs in
+                lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+            }.prefix(6).map(\.key))
+        }
+
+        func percent(_ count: Int) -> String {
+            "\(Int((Double(count) / Double(total) * 100).rounded()))%"
+        }
+
+        func icon(for label: String) -> (String, String) {
+            let lower = label.lowercased()
+            let color: String
+            if lower.contains("gmail") { color = "#ea4335" }
+            else if lower.contains("github") { color = "#f5f7fb" }
+            else if lower.contains("safari") { color = "#38bdf8" }
+            else if lower.contains("codex") || lower.contains("chatgpt") { color = "#34d399" }
+            else if lower.contains("maxx") { color = "#38bdf8" }
+            else { color = "#a78bfa" }
+            let initials = label
+                .split(separator: " ")
+                .prefix(2)
+                .compactMap { $0.first }
+                .map { String($0).uppercased() }
+                .joined()
+            return (initials.isEmpty ? "AI" : initials, color)
+        }
+
+        let stages = [
+            Stage(title: "Before", counts: beforeCounts, x: 24),
+            Stage(title: "AI surface", counts: surfaceCounts, x: 382),
+            Stage(title: "After", counts: afterCounts, x: 740)
+        ]
+
+        let nodeWidth = 132.0
+        let top = 58.0
+        let availableHeight = 252.0
+        var positions: [String: NodePosition] = [:]
+        var stageMarkup = ""
+
+        for stage in stages {
+            let labels = topLabels(stage.counts)
+            let rawHeights = labels.map { max(24.0, Double(stage.counts[$0] ?? 0) / Double(total) * 190.0) }
+            let gap = 14.0
+            let needed = rawHeights.reduce(0, +) + max(0.0, Double(labels.count - 1)) * gap
+            let scale = needed > 0 ? min(1.0, availableHeight / needed) : 1.0
+            var y = top
+
+            stageMarkup += #"<text class="ai-sankey-stage" x="\#(stage.x)" y="24">\#(html(stage.title))</text>"#
+            for (index, label) in labels.enumerated() {
+                let count = stage.counts[label] ?? 0
+                let height = max(20.0, rawHeights[index] * scale)
+                positions["\(stage.title)|\(label)"] = NodePosition(x: stage.x, y: y, height: height)
+                let (iconText, iconColor) = icon(for: label)
+                let iconX = stage.x + nodeWidth + 8
+                let iconY = y + 4
+                let labelX = iconX + 26
+                stageMarkup += """
+                <rect class="ai-sankey-node" x="\(format(stage.x))" y="\(format(y))" width="\(format(nodeWidth))" height="\(format(height))" rx="4"><title>\(html(label)) · \(count)x · \(percent(count))</title></rect>
+                <g class="ai-sankey-icon" transform="translate(\(format(iconX)),\(format(iconY)))"><rect width="18" height="18" rx="5" fill="\(iconColor)" opacity=".2"></rect><text x="9" y="12.5" text-anchor="middle" fill="\(iconColor)">\(html(iconText))</text></g>
+                <text class="ai-sankey-label" x="\(format(labelX))" y="\(format(y + 12))">\(html(short(label)))</text>
+                <text class="ai-sankey-count" x="\(format(labelX))" y="\(format(y + 28))">\(count) (\(percent(count)))</text>
+                """
+                y += height + gap
+            }
+        }
+
+        func linkMarkup(_ links: [String: (source: String, target: String, count: Int)], fromStage: String, toStage: String) -> String {
+            links.values.sorted { lhs, rhs in
+                lhs.count == rhs.count ? "\(lhs.source)|\(lhs.target)" < "\(rhs.source)|\(rhs.target)" : lhs.count > rhs.count
+            }.prefix(18).compactMap { link in
+                guard let start = positions["\(fromStage)|\(link.source)"],
+                      let end = positions["\(toStage)|\(link.target)"] else {
+                    return nil
+                }
+                let sx = start.x + nodeWidth
+                let sy = start.y + start.height / 2
+                let ex = end.x
+                let ey = end.y + end.height / 2
+                let width = max(3.0, min(30.0, Double(link.count) / Double(total) * 36.0))
+                return #"<path class="ai-sankey-link" d="M \#(format(sx)) \#(format(sy)) C \#(format(sx + 95)) \#(format(sy)), \#(format(ex - 95)) \#(format(ey)), \#(format(ex)) \#(format(ey))" stroke-width="\#(format(width))"><title>\#(html(link.source)) → \#(html(link.target)) · \#(link.count)x · \#(percent(link.count))</title></path>"#
+            }.joined()
+        }
+
+        let links = linkMarkup(leftLinks, fromStage: "Before", toStage: "AI surface")
+            + linkMarkup(rightLinks, fromStage: "AI surface", toStage: "After")
+
+        let topRows = paths.prefix(6).map { path -> String in
             return """
-            <path class="link" stroke-width="\(width)" d="M 170 \(y) C 250 \(y), 270 \(y), 350 \(y)"></path>
-            <path class="link" stroke-width="\(width)" d="M 470 \(y) C 550 \(y), 570 \(y), 650 \(y)"></path>
-            <text class="label" x="20" y="\(y + 4)">\(html(short(path.before)))</text>
-            <text class="label" x="360" y="\(y + 4)">\(html(short(path.surface)))</text>
-            <text class="label" x="660" y="\(y + 4)">\(html(short(path.after)))</text>
-            <text class="muted" x="360" y="\(y + 20)">\(path.count)x · \(html(path.useCase))</text>
+            <div><strong>\(html(path.before))</strong><span>→</span><strong>\(html(path.surface))</strong><span>→</span><strong>\(html(path.after))</strong><em>\(percent(path.count)) · \(path.count)x · \(html(path.useCase))</em></div>
             """
         }.joined()
+
         return """
         <section class="panel">
-          <h2>AI Paths</h2>
-          <div class="sankey-wrap">
-            <svg class="sankey" viewBox="0 0 840 330" role="img" aria-label="Before AI after path flow">
-              <text class="muted" x="20" y="20">Before</text>
-              <text class="muted" x="360" y="20">AI surface</text>
-              <text class="muted" x="660" y="20">After</text>
-              \(rows)
+          <div class="ai-path-head">
+            <div>
+              <h2>AI Paths</h2>
+              <p>Most common before → AI surface → after workflows.</p>
+            </div>
+            <strong>\(total) moments</strong>
+          </div>
+          <div class="ai-sankey-wrap">
+            <svg class="ai-sankey" viewBox="0 0 980 340" role="img" aria-label="Before AI after path flow">
+              \(links)
+              \(stageMarkup)
             </svg>
           </div>
+          <div class="ai-path-top">\(topRows)</div>
         </section>
         """
+    }
+
+    private static func format(_ value: Double) -> String {
+        String(format: "%.1f", value)
     }
 
     private static func short(_ value: String) -> String {
