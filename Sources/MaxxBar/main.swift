@@ -367,7 +367,7 @@ final class StatusTitleView: NSView {
     private var topItems = ["5H", "Week"]
     private var bottomItems = ["-", "-"]
     private let amberUsageColor = NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.18, alpha: 1.0)
-    private let lowUsageColor = NSColor(calibratedRed: 1.0, green: 0.27, blue: 0.34, alpha: 1.0)
+    private let lowUsageColor = NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.62, alpha: 1.0)
 
     override var isFlipped: Bool { true }
 
