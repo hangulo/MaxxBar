@@ -52,7 +52,7 @@ enum SensorHelperMain {
     }
 
     private static func runDaemon(arguments: [String]) {
-        let outputPath = value(after: "--output", in: arguments) ?? "/Library/Application Support/MenuBarStats/sensors.json"
+        let outputPath = value(after: "--output", in: arguments) ?? "/Library/Application Support/MaxxBar/sensors.json"
         let interval = value(after: "--interval", in: arguments).flatMap(Double.init) ?? 3
 
         while true {
@@ -130,7 +130,7 @@ enum SensorCollector {
         let gpuTemperature = averageTemperature(containing: ["GPU", "Graphics"], in: temperatures)
 
         return HelperSnapshot(
-            source: "MenuBarStatsSensorHelper",
+            source: "MaxxBarSensorHelper",
             generatedAt: Date(),
             requiresPrivileges: powerMetrics.requiresPrivileges,
             temperatures: temperatures,

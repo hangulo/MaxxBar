@@ -2,7 +2,7 @@
 set -eu
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="MenuBarStats"
+APP_NAME="MaxxBar"
 STAGING_DIR="${TMPDIR:-/tmp}/$APP_NAME-install"
 STAGING_APP="$STAGING_DIR/$APP_NAME.app"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
@@ -19,8 +19,9 @@ ditto "$STAGING_APP" "$INSTALL_APP"
 xattr -cr "$INSTALL_APP" 2>/dev/null || true
 codesign --force --sign - "$INSTALL_APP" >/dev/null 2>&1 || true
 
-rm -f "$DESKTOP_LINK"
-ln -s "$INSTALL_APP" "$DESKTOP_LINK"
+if [ -L "$DESKTOP_LINK" ]; then
+    rm -f "$DESKTOP_LINK"
+fi
 
 codesign --verify --deep --strict "$INSTALL_APP"
 echo "$INSTALL_APP"

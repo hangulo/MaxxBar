@@ -1,17 +1,16 @@
-# MenuBarStats
+# MaxxBar
 
-A macOS menu bar system monitor with a compact menu bar readout and popover panels for LLM usage, memory, and CPU/GPU activity.
+A macOS menu bar companion for AI runway, AI session patterns, and machine load. MaxxBar keeps the useful Codex quota, token, memory, and CPU/GPU foundations from Menu Bar Stats, then adds local AI usage context: what AI tool is active, how often AI sessions happen, what apps/sites come before and after, and when you capture a Maxx Moment because AI was wrong.
 
 ## Screenshots
 
-### LLM Usage
+### AI Usage
 
-![LLM usage panel](Artifacts/screenshot-llm.png)
+![AI usage panel](Artifacts/maxxbar-ai-popover.png)
 
-The LLM panel shows live Codex 5H and weekly limits, local token estimates,
-and a persisted drawdown timeline. The drawdown summary highlights how long the
-most recent run took to reach exhaustion, the threshold-crossing samples, the
-reset sample, and the plan type logged for that run.
+The AI panel shows live Codex 5H and weekly limits, local token estimates,
+persisted drawdown, AI session summaries, before/after app context, and a
+one-click Maxx Moment capture for times when AI was wrong.
 
 ### Memory
 
@@ -23,8 +22,11 @@ reset sample, and the plan type logged for that run.
 
 ## Current Features
 
-- Two-line menu bar status for Codex usage and memory pressure.
-- LLM usage panel with Codex limits, persistent local quota history, drawdown milestones, cache-token detail, token/session totals, top token users, and context actions for local Codex sessions.
+- Two-line menu bar status for AI runway and memory pressure.
+- AI usage panel with Codex limits, persistent local quota history, drawdown milestones, cache-token detail, token/session totals, top token users, and context actions for local Codex sessions.
+- Local AI activity logging for app/site metadata, AI surface detection, session duration estimates, before/after workflow paths, and nearby system-load context.
+- Maxx Moment capture for saving the current local context when AI was wrong.
+- Local HTML AI insights report with top tools, likely use cases, before/after apps, workflow paths, and a Sankey-style path visual.
 - Memory popover with pressure, memory breakdown, top processes, paging, swap, history, and lighter-weight numeric values for scanability.
 - Grouped and raw process memory views with app icons.
 - CPU/GPU panel with user/system history, per-core efficiency/performance load rings, grouped CPU processes, thermal summary, detailed temperatures, and uptime.
@@ -54,13 +56,13 @@ swift build
 Scripts/build-app.sh
 ```
 
-The app bundle is written to `Dist/MenuBarStats.app`. The renderer used for the
+The app bundle is written to `Dist/MaxxBar.app`. The renderer used for the
 README screenshots can write any panel to a PNG:
 
 ```sh
-.build/debug/MenuBarStats --render-popover Artifacts/screenshot-llm.png llm
-.build/debug/MenuBarStats --render-popover Artifacts/screenshot-memory.png memory
-.build/debug/MenuBarStats --render-popover Artifacts/screenshot-cpugpu.png cpugpu
+.build/debug/MaxxBar --render-popover Artifacts/screenshot-llm.png llm
+.build/debug/MaxxBar --render-popover Artifacts/screenshot-memory.png memory
+.build/debug/MaxxBar --render-popover Artifacts/screenshot-cpugpu.png cpugpu
 ```
 
 ## Install On This Mac
@@ -70,7 +72,7 @@ Scripts/install-app.sh
 ```
 
 The install script builds a fresh local app bundle, copies it to
-`~/Applications/MenuBarStats.app`, signs it ad hoc, and recreates the Desktop
+`~/Applications/MaxxBar.app`, signs it ad hoc, and recreates the Desktop
 shortcut so it points at the local install instead of an iCloud-hosted build
 artifact from another laptop.
 
@@ -82,10 +84,10 @@ Build and install the privileged helper:
 Scripts/install-sensor-helper.sh
 ```
 
-The helper runs as `com.hector.MenuBarStatsSensorHelper` and writes a local snapshot to:
+The helper runs as `com.hector.MaxxBarSensorHelper` and writes a local snapshot to:
 
 ```text
-/Library/Application Support/MenuBarStats/sensors.json
+/Library/Application Support/MaxxBar/sensors.json
 ```
 
 Remove it with:
@@ -97,10 +99,11 @@ Scripts/uninstall-sensor-helper.sh
 ## Useful Verification Commands
 
 ```sh
-swift run MenuBarStats -- --sample
-swift run MenuBarStats -- --render-popover Artifacts/popover-demo.png
-Dist/MenuBarStats.app/Contents/MacOS/MenuBarStats --verify-popover-action
-Dist/MenuBarStats.app/Contents/MacOS/MenuBarStats --verify-popout-action
+swift run MaxxBar -- --sample
+swift run MaxxBar -- --render-popover Artifacts/maxxbar-ai-popover.png ai
+swift run MaxxBar -- --write-ai-report
+Dist/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
+Dist/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popout-action
 ```
 
 ## Data Notes
@@ -110,8 +113,19 @@ See `Docs/data-audit.md` for implementation notes about source paths, validation
 LLM quota history is stored in:
 
 ```text
-~/Library/Application Support/MenuBarStats/llm-quota-history.json
+~/Library/Application Support/MaxxBar/llm-quota-history.json
 ```
+
+AI activity metadata is stored locally in:
+
+```text
+~/Library/Application Support/MaxxBar/ai-activity.jsonl
+~/Library/Application Support/MaxxBar/maxx-moments.jsonl
+~/Library/Application Support/MaxxBar/ai-usage-insights.html
+```
+
+The AI logs are local-only metadata. They do not store screenshots, OCR output,
+full typed content, or cloud uploads.
 
 Each sample records the sampled time, 5H remaining percentage, weekly remaining
 percentage, and current plan type when the Codex usage API reports one. The LLM

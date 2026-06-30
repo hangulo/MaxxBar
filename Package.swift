@@ -3,25 +3,25 @@
 import PackageDescription
 
 let package = Package(
-    name: "MenuBarStats",
+    name: "MaxxBar",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "MenuBarStats", targets: ["MenuBarStats"]),
-        .executable(name: "MenuBarStatsSensorHelper", targets: ["MenuBarStatsSensorHelper"])
+        .executable(name: "MaxxBar", targets: ["MaxxBar"]),
+        .executable(name: "MaxxBarSensorHelper", targets: ["MaxxBarSensorHelper"])
     ],
     targets: [
         .executableTarget(
-            name: "MenuBarStats",
-            path: "Sources/MenuBarStats",
+            name: "MaxxBar",
+            path: "Sources/MaxxBar",
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"])
             ]
         ),
         .executableTarget(
-            name: "MenuBarStatsSensorHelper",
-            path: "Sources/MenuBarStatsSensorHelper"
+            name: "MaxxBarSensorHelper",
+            path: "Sources/MaxxBarSensorHelper"
         )
     ]
 )
