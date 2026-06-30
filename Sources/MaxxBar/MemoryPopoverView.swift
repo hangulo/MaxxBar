@@ -123,11 +123,7 @@ struct MemoryPanelView: View {
 
             ProcessesView(groupedProcesses: model.snapshot.processes, processRows: model.snapshot.processRows)
 
-            PagingView(snapshot: model.snapshot)
-
             SwapView(snapshot: model.snapshot)
-
-            HistoryView(history: model.history)
 
             ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
