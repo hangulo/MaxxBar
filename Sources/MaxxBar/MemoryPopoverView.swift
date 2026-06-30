@@ -36,6 +36,13 @@ struct MemoryPopoverView: View {
                     aiUsage: model.aiUsage,
                     snapshot: model.llmUsage,
                     quotaHistory: model.llmQuotaHistory,
+                    onOpenAIReport: { model.openAIUsageReport() },
+                    onPopOut: onPopOut,
+                    onQuit: onQuit
+                )
+            case .moments:
+                MaxxMomentsPanelView(
+                    aiUsage: model.aiUsage,
                     onCaptureMaxxMoment: { sentiment, note, includeScreenshot in
                         model.captureMaxxMoment(sentiment: sentiment, note: note, includeScreenshot: includeScreenshot)
                     },
@@ -71,13 +78,14 @@ struct MemoryPopoverView: View {
 enum StatsPanel: String, CaseIterable, Identifiable {
     case runway = "Runway"
     case llmUsage = "Insights"
+    case moments = "Moments"
     case memory = "Memory"
     case cpuGPU = "CPU/GPU"
 
     var id: String { rawValue }
 
     static var visibleCases: [StatsPanel] {
-        [.runway, .llmUsage, .memory]
+        [.runway, .llmUsage, .moments, .memory]
     }
 }
 
@@ -91,7 +99,7 @@ struct PanelSwitch: View {
                     selectedPanel = panel
                 } label: {
                     Text(panel.rawValue)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
                         .foregroundStyle(selectedPanel == panel ? .white : .white.opacity(0.68))
@@ -236,7 +244,6 @@ struct AIUsagePanelView: View {
     let aiUsage: AIUsageSnapshot
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
-    var onCaptureMaxxMoment: ((String, String, Bool) -> Void)?
     var onOpenAIReport: (() -> Void)?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -247,12 +254,31 @@ struct AIUsagePanelView: View {
                 VStack(spacing: 7) {
                     AIUsageOverviewCard(snapshot: aiUsage)
                     AIWorkflowMiniCard(snapshot: aiUsage)
+                    LLMSessionTimelineCard(snapshot: snapshot)
+                }
+            }
+
+            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
+        }
+    }
+}
+
+struct MaxxMomentsPanelView: View {
+    let aiUsage: AIUsageSnapshot
+    var onCaptureMaxxMoment: ((String, String, Bool) -> Void)?
+    var onOpenAIReport: (() -> Void)?
+    var onPopOut: (() -> Void)?
+    var onQuit: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 7) {
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 7) {
                     MaxxMomentCard(
                         snapshot: aiUsage,
                         onCaptureMaxxMoment: onCaptureMaxxMoment,
                         onOpenAIReport: onOpenAIReport
                     )
-                    LLMSessionTimelineCard(snapshot: snapshot)
                 }
             }
 
@@ -318,19 +344,6 @@ struct AIUsageOverviewCard: View {
                 aiMetric("Avg", aiDuration(snapshot.averageSessionSeconds), "session")
             }
 
-            HStack(spacing: 6) {
-                Text(snapshot.activeSurface ?? snapshot.activeSite ?? snapshot.activeApp)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.84))
-                    .lineLimit(1)
-                Spacer()
-                InstantHelpTitle(
-                    "Context \(snapshot.contextConfidence)",
-                    help: contextConfidenceHelp,
-                    font: .system(size: 10.5, weight: .semibold),
-                    color: .white.opacity(0.58)
-                )
-            }
         }
         .sectionStyle()
     }
@@ -372,48 +385,184 @@ struct AIWorkflowMiniCard: View {
                     .monospacedDigit()
             }
 
-            if snapshot.topTools.isEmpty && snapshot.workflowPaths.isEmpty {
-                Text("No local AI samples yet")
+            if snapshot.workflowPaths.isEmpty {
+                Text("No before/after paths yet")
                     .font(.system(size: 12.5, weight: .regular))
                     .foregroundStyle(.white.opacity(0.58))
             } else {
-                HStack(alignment: .top, spacing: 10) {
-                    counterColumn("Tools", snapshot.topTools)
-                    counterColumn("Before", snapshot.topBeforeApps)
-                    counterColumn("After", snapshot.topAfterApps)
-                }
-
-                if let path = snapshot.workflowPaths.first {
-                    Text("\(path.before) -> \(path.surface) -> \(path.after)")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.78))
-                        .lineLimit(2)
-                }
+                MiniSankeyView(paths: Array(snapshot.workflowPaths.prefix(5)))
             }
         }
         .sectionStyle()
     }
+}
 
-    private func counterColumn(_ title: String, _ counters: [AIUsageCounter]) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.44))
-            ForEach(counters.prefix(2)) { counter in
-                HStack(spacing: 4) {
-                    Text(counter.label)
-                        .font(.system(size: 10.5, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineLimit(1)
-                    Spacer(minLength: 2)
-                    Text("\(counter.count)")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.48))
-                        .monospacedDigit()
+struct MiniSankeyNode: Identifiable {
+    var id: String { "\(column)-\(label)" }
+    let column: String
+    let label: String
+    let count: Int
+    let index: Int
+}
+
+struct MiniSankeyView: View {
+    let paths: [AIWorkflowPath]
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                sankeyStageLabel("Before")
+                Spacer()
+                sankeyStageLabel("AI")
+                Spacer()
+                sankeyStageLabel("After")
+            }
+
+            GeometryReader { proxy in
+                let size = proxy.size
+                let beforeNodes = nodes(for: .before)
+                let surfaceNodes = nodes(for: .surface)
+                let afterNodes = nodes(for: .after)
+                let nodeWidth = min(max(size.width * 0.23, 58), 76)
+                let beforeX: CGFloat = nodeWidth / 2
+                let surfaceX: CGFloat = size.width / 2
+                let afterX: CGFloat = size.width - nodeWidth / 2
+
+                ZStack {
+                    Canvas { context, canvasSize in
+                        for path in paths {
+                            let width = linkWidth(for: path.count)
+                            let beforeY = yPosition(for: path.before, in: beforeNodes, height: canvasSize.height)
+                            let surfaceY = yPosition(for: path.surface, in: surfaceNodes, height: canvasSize.height)
+                            let afterY = yPosition(for: path.after, in: afterNodes, height: canvasSize.height)
+
+                            var left = Path()
+                            left.move(to: CGPoint(x: beforeX + nodeWidth / 2, y: beforeY))
+                            left.addCurve(
+                                to: CGPoint(x: surfaceX - nodeWidth / 2, y: surfaceY),
+                                control1: CGPoint(x: beforeX + nodeWidth, y: beforeY),
+                                control2: CGPoint(x: surfaceX - nodeWidth, y: surfaceY)
+                            )
+                            context.stroke(
+                                left,
+                                with: .color(Color.accentBlue.opacity(0.22)),
+                                style: StrokeStyle(lineWidth: width, lineCap: .round)
+                            )
+
+                            var right = Path()
+                            right.move(to: CGPoint(x: surfaceX + nodeWidth / 2, y: surfaceY))
+                            right.addCurve(
+                                to: CGPoint(x: afterX - nodeWidth / 2, y: afterY),
+                                control1: CGPoint(x: surfaceX + nodeWidth, y: surfaceY),
+                                control2: CGPoint(x: afterX - nodeWidth, y: afterY)
+                            )
+                            context.stroke(
+                                right,
+                                with: .color(Color.accentBlue.opacity(0.22)),
+                                style: StrokeStyle(lineWidth: width, lineCap: .round)
+                            )
+                        }
+                    }
+
+                    ForEach(beforeNodes) { node in
+                        nodeView(node)
+                            .frame(width: nodeWidth, height: nodeHeight(for: node.count))
+                            .position(x: beforeX, y: yPosition(for: node.label, in: beforeNodes, height: size.height))
+                    }
+
+                    ForEach(surfaceNodes) { node in
+                        nodeView(node)
+                            .frame(width: nodeWidth, height: nodeHeight(for: node.count))
+                            .position(x: surfaceX, y: yPosition(for: node.label, in: surfaceNodes, height: size.height))
+                    }
+
+                    ForEach(afterNodes) { node in
+                        nodeView(node)
+                            .frame(width: nodeWidth, height: nodeHeight(for: node.count))
+                            .position(x: afterX, y: yPosition(for: node.label, in: afterNodes, height: size.height))
+                    }
                 }
             }
+            .frame(height: 124)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private enum SankeyColumn {
+        case before
+        case surface
+        case after
+    }
+
+    private func sankeyStageLabel(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.42))
+    }
+
+    private func nodeView(_ node: MiniSankeyNode) -> some View {
+        VStack(spacing: 0) {
+            Text(trimmedText(node.label, maxLength: 12))
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.88))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Text("\(node.count)x")
+                .font(.system(size: 7.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.5))
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 4)
+        .background(Color.accentBlue.opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+    }
+
+    private func nodes(for column: SankeyColumn) -> [MiniSankeyNode] {
+        var counts: [String: Int] = [:]
+        for path in paths {
+            let label: String
+            switch column {
+            case .before:
+                label = path.before
+            case .surface:
+                label = path.surface
+            case .after:
+                label = path.after
+            }
+            counts[label, default: 0] += path.count
+        }
+
+        return counts
+            .sorted { lhs, rhs in lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value }
+            .prefix(column == .surface ? 1 : 4)
+            .enumerated()
+            .map { offset, entry in
+                MiniSankeyNode(column: columnName(column), label: entry.key, count: entry.value, index: offset)
+            }
+    }
+
+    private func columnName(_ column: SankeyColumn) -> String {
+        switch column {
+        case .before: return "before"
+        case .surface: return "surface"
+        case .after: return "after"
+        }
+    }
+
+    private func yPosition(for label: String, in nodes: [MiniSankeyNode], height: CGFloat) -> CGFloat {
+        guard let node = nodes.first(where: { $0.label == label }) ?? nodes.first else {
+            return height / 2
+        }
+        let count = max(nodes.count, 1)
+        return height * CGFloat(node.index + 1) / CGFloat(count + 1)
+    }
+
+    private func nodeHeight(for count: Int) -> CGFloat {
+        min(max(18 + CGFloat(count) * 1.8, 20), 38)
+    }
+
+    private func linkWidth(for count: Int) -> CGFloat {
+        let maxCount = max(paths.map(\.count).max() ?? 1, 1)
+        return min(max(3 + 10 * CGFloat(count) / CGFloat(maxCount), 4), 13)
     }
 }
 
@@ -1267,6 +1416,7 @@ struct LLMSessionTimelineView: View {
     let range: LLMQuotaHistoryRange
     var showsHeader = true
     @State private var hoveredSession: LLMUsageSession?
+    @State private var pinnedSession: LLMUsageSession?
 
     private let rowHeight: CGFloat = 34
 
@@ -1346,14 +1496,20 @@ struct LLMSessionTimelineView: View {
                         .onHover { isHovered in
                             hoveredSession = isHovered ? session : (hoveredSession?.id == session.id ? nil : hoveredSession)
                         }
+                        .onTapGesture {
+                            pinnedSession = session
+                        }
 
                         Capsule()
-                            .fill(timelineColor(for: session).opacity(0.9))
+                            .fill(timelineColor(for: session).opacity(isDetailSession(session) ? 1 : 0.9))
                             .frame(width: width, height: thickness)
                             .contentShape(Rectangle())
                             .position(x: startX + width / 2, y: y)
                             .onHover { isHovered in
                                 hoveredSession = isHovered ? session : (hoveredSession?.id == session.id ? nil : hoveredSession)
+                            }
+                            .onTapGesture {
+                                pinnedSession = session
                             }
 
                         if span.clippedStart {
@@ -1371,23 +1527,6 @@ struct LLMSessionTimelineView: View {
                             }
                     }
 
-                    if let hovered = hoveredSessionAnchor(plotX: plotX, proxyWidth: proxy.size.width) {
-                        Color.clear
-                            .frame(width: 1, height: 1)
-                            .position(x: hovered.x, y: hovered.y)
-                            .popover(item: $hoveredSession, arrowEdge: .leading) { session in
-                                LLMSessionHoverCard(
-                                    session: session,
-                                    displayTitle: sessionDisplayTitle(session),
-                                    displayTokens: displayTokens(session),
-                                    promptPreview: sessionPromptPreview(session)
-                                )
-                                .id(session.id)
-                                .frame(width: 280)
-                                .padding(2)
-                                .background(Color.background)
-                            }
-                    }
                 }
             }
             .frame(height: CGFloat(sessions.count) * rowHeight + 18)
@@ -1395,6 +1534,19 @@ struct LLMSessionTimelineView: View {
             HStack(spacing: 10) {
                 timelineLegend(color: .accentBlue, label: "gpt-5.5")
                 timelineLegend(color: timelineReviewColor, label: "review")
+            }
+
+            if let session = detailSession {
+                LLMSessionCompactDetailCard(
+                    session: session,
+                    displayTitle: sessionDisplayTitle(session),
+                    displayTokens: displayTokens(session),
+                    promptPreview: sessionPromptPreview(session)
+                )
+                .id(session.id)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.background.opacity(0.52))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
         }
         .padding(.top, 2)
@@ -1468,14 +1620,20 @@ struct LLMSessionTimelineView: View {
         return parts.joined(separator: " • ")
     }
 
-    private func hoveredSessionAnchor(plotX: CGFloat, proxyWidth: CGFloat) -> (session: LLMUsageSession, x: CGFloat, y: CGFloat)? {
-        guard let hoveredSession,
-              let index = sessions.firstIndex(where: { $0.id == hoveredSession.id }) else {
-            return nil
+    private var detailSession: LLMUsageSession? {
+        if let hoveredSession,
+           sessions.contains(where: { $0.id == hoveredSession.id }) {
+            return hoveredSession
         }
+        if let pinnedSession,
+           sessions.contains(where: { $0.id == pinnedSession.id }) {
+            return pinnedSession
+        }
+        return nil
+    }
 
-        let rowY = CGFloat(index) * rowHeight + 17
-        return (hoveredSession, min(max(plotX + 8, 12), proxyWidth - 12), rowY)
+    private func isDetailSession(_ session: LLMUsageSession) -> Bool {
+        detailSession?.id == session.id
     }
 
     private func sessionDisplayTitle(_ session: LLMUsageSession) -> String {
@@ -1614,6 +1772,59 @@ struct LLMSessionHoverCard: View {
                 .monospacedDigit()
                 .lineLimit(1)
         }
+    }
+}
+
+struct LLMSessionCompactDetailCard: View {
+    let session: LLMUsageSession
+    let displayTitle: String
+    let displayTokens: UInt64
+    let promptPreview: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(displayTitle)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(session.modelName)
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.44))
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 9) {
+                compactMetric(tokenCount(displayTokens))
+                if let turns = session.tokenUsage?.turnCount, turns > 0 {
+                    compactMetric("\(turns)t")
+                }
+                if let usage = session.tokenUsage, usage.inputTokens > 0 {
+                    compactMetric("\(usage.cacheHitPercent)% cache")
+                }
+                if let updatedAt = session.updatedAt {
+                    compactMetric(relativeTime(updatedAt))
+                }
+            }
+
+            if let promptPreview {
+                Text(promptPreview)
+                    .font(.system(size: 9.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+    }
+
+    private func compactMetric(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.52))
+            .monospacedDigit()
+            .lineLimit(1)
     }
 }
 

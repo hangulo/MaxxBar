@@ -18,8 +18,14 @@ instead of leaving most of the chart empty.
 ![Insights panel](Artifacts/screenshot-insights.png)
 
 The Insights panel shows local AI session patterns, before/after context,
-TraceWork-inspired workflow paths, and a Maxx Moment capture flow for saving
-frustration or delight moments with an optional local screenshot and note.
+TraceWork-inspired workflow paths, and recent Codex session timelines.
+
+### Moments
+
+![Moments panel](Artifacts/screenshot-moments.png)
+
+The Moments panel captures frustration or delight moments with an optional local
+screenshot and note, plus recent local Maxx Moment history.
 
 ### Memory
 
@@ -30,7 +36,8 @@ frustration or delight moments with an optional local screenshot and note.
 ![CPU/GPU panel](Artifacts/screenshot-cpugpu.png)
 
 CPU/GPU information remains available in the codebase as advanced machine-load
-context, but the default popover is focused on Runway, Insights, and Memory.
+context, but the default popover is focused on Runway, Insights, Moments, and
+Memory.
 
 ## Current Features
 
@@ -39,7 +46,7 @@ context, but the default popover is focused on Runway, Insights, and Memory.
 - Local AI activity logging for app/site metadata, AI surface detection, session duration estimates, before/after workflow paths, and nearby system-load context.
 - Maxx Moment capture for saving frustration or delight, optional local screenshot, current app/site, detected AI surface, quota/system state, and a user note.
 - Local HTML AI insights report with top tools, likely use cases, before/after apps, workflow paths, and a Sankey-style path visual.
-- Memory popover with pressure, memory breakdown, top processes, paging, swap, history, and lighter-weight numeric values for scanability.
+- Memory popover with pressure, memory breakdown, top processes, swap, and lighter-weight numeric values for scanability.
 - Grouped and raw process memory views with app icons.
 - CPU/GPU panel code with user/system history, per-core efficiency/performance load rings, grouped CPU processes, thermal summary, detailed temperatures, and uptime for advanced/debug builds.
 - Pop-out window mode with resize support and quit control.
@@ -74,6 +81,7 @@ README screenshots can write any panel to a PNG:
 ```sh
 .build/debug/MaxxBar --render-popover Artifacts/screenshot-llm.png runway
 .build/debug/MaxxBar --render-popover Artifacts/screenshot-insights.png insights
+.build/debug/MaxxBar --render-popover Artifacts/screenshot-moments.png moments
 .build/debug/MaxxBar --render-popover Artifacts/screenshot-memory.png memory
 .build/debug/MaxxBar --render-popover Artifacts/screenshot-cpugpu.png cpugpu
 ```
@@ -115,6 +123,7 @@ Scripts/uninstall-sensor-helper.sh
 swift run MaxxBar -- --sample
 swift run MaxxBar -- --render-popover Artifacts/screenshot-llm.png runway
 swift run MaxxBar -- --render-popover Artifacts/screenshot-insights.png insights
+swift run MaxxBar -- --render-popover Artifacts/screenshot-moments.png moments
 swift run MaxxBar -- --write-ai-report
 Dist/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
 Dist/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popout-action

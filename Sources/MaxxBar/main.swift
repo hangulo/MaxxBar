@@ -112,6 +112,8 @@ extension StatsPanel {
             self = .runway
         case "ai", "insights", "maxxinsights", "maxx-insights", "llm", "usage", "llmusage", "llm-usage":
             self = .llmUsage
+        case "moments", "maxxmoment", "maxx-moment", "maxxmoments", "maxx-moments":
+            self = .moments
         default:
             self = .memory
         }
@@ -270,7 +272,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func hoursLeftLabel(_ resetAt: Date?) -> String {
         guard let resetAt else { return "--" }
-        let hours = max(resetAt.timeIntervalSinceNow / 3_600, 0)
+        let seconds = max(resetAt.timeIntervalSinceNow, 0)
+        if seconds < 3_600 {
+            let minutes = max(Int(ceil(seconds / 60)), 0)
+            return "\(minutes)m"
+        }
+
+        let hours = seconds / 3_600
         let rounded = (hours * 2).rounded() / 2
         if rounded.rounded() == rounded {
             return "\(Int(rounded))H"
