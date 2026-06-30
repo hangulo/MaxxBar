@@ -117,23 +117,7 @@ struct MemoryPanelView: View {
 
     var body: some View {
         VStack(spacing: 7) {
-            HStack(spacing: 18) {
-                RingView(
-                    title: "PRESSURE",
-                    percent: model.snapshot.pressurePercent,
-                    segments: [.init(value: Double(model.snapshot.pressurePercent), color: .accentBlue)]
-                )
-
-                RingView(
-                    title: "MEMORY",
-                    percent: model.snapshot.usedPercent,
-                    segments: memorySegments
-                )
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 7)
-            .background(Color.panel)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            MemoryRunwayHeroView(snapshot: model.snapshot)
 
             BreakdownView(snapshot: model.snapshot)
 
@@ -147,17 +131,6 @@ struct MemoryPanelView: View {
 
             ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
-    }
-
-    private var memorySegments: [RingSegment] {
-        let breakdown = model.snapshot.breakdown
-        let total = max(Double(breakdown.total), 1)
-        return [
-            RingSegment(value: Double(breakdown.app) / total * 100, color: .accentBlue),
-            RingSegment(value: Double(breakdown.wired) / total * 100, color: .wiredPink),
-            RingSegment(value: Double(breakdown.compressed) / total * 100, color: .compressedYellow),
-            RingSegment(value: Double(breakdown.free) / total * 100, color: .freeGray)
-        ]
     }
 }
 
@@ -283,7 +256,7 @@ struct AIUsagePanelView: View {
                         onCaptureMaxxMoment: onCaptureMaxxMoment,
                         onOpenAIReport: onOpenAIReport
                     )
-                    DrawdownInsightCard(snapshot: snapshot, quotaHistory: quotaHistory)
+                    LLMSessionTimelineCard(snapshot: snapshot)
                 }
             }
 
@@ -315,6 +288,7 @@ struct LLMRunwayPanelView: View {
                     }
 
                     LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
+                    DrawdownInsightCard(snapshot: snapshot, quotaHistory: quotaHistory)
                     LLMAdvancedUsageCard(snapshot: snapshot, isExpanded: $advancedExpanded)
                 }
             }
@@ -354,10 +328,12 @@ struct AIUsageOverviewCard: View {
                     .foregroundStyle(.white.opacity(0.84))
                     .lineLimit(1)
                 Spacer()
-                Text(snapshot.contextConfidence)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
-                    .monospacedDigit()
+                InstantHelpTitle(
+                    "Context \(snapshot.contextConfidence)",
+                    help: contextConfidenceHelp,
+                    font: .system(size: 10.5, weight: .semibold),
+                    color: .white.opacity(0.58)
+                )
             }
         }
         .sectionStyle()
@@ -460,7 +436,7 @@ struct MaxxMomentCard: View {
                 Button {
                     isExpanded.toggle()
                 } label: {
-                    Label("Maxx Moment", systemImage: "exclamationmark.bubble")
+                    Label("Capture Maxx Moment", systemImage: "exclamationmark.bubble")
                         .font(.system(size: 12, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
@@ -472,14 +448,14 @@ struct MaxxMomentCard: View {
                 .disabled(onCaptureMaxxMoment == nil)
                 .help("Capture a local note about this AI moment, with an optional screenshot")
 
-                IconActionButton(systemName: "chart.bar.xaxis", help: "Open AI usage insights", action: { onOpenAIReport?() })
-                    .disabled(onOpenAIReport == nil)
-
                 Text(momentText)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.48))
                     .monospacedDigit()
                     .frame(width: 62, alignment: .trailing)
+
+                IconActionButton(systemName: "chart.bar.xaxis", help: "Open AI usage insights", action: { onOpenAIReport?() })
+                    .disabled(onOpenAIReport == nil)
             }
 
             if isExpanded {
@@ -522,7 +498,7 @@ struct MaxxMomentCard: View {
                         note = ""
                         isExpanded = false
                     } label: {
-                        Text("Capture")
+                        Text("Save Maxx Moment")
                             .font(.system(size: 11.5, weight: .semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 5)
@@ -725,15 +701,12 @@ struct LLMUsageUnavailableCard: View {
 struct DrawdownInsightCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
-    @State private var range = LLMQuotaHistoryRange.sixHours
     @State private var mode = LLMQuotaDrawdownMode.last
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
                 InstantHelpTitle("DRAWDOWN INSIGHT", help: drawdownInsightHelp)
-                Spacer()
-                LLMQuotaHistoryRangeToggle(selection: $range)
             }
 
             if let insight {
@@ -756,7 +729,7 @@ struct DrawdownInsightCard: View {
     }
 
     private var rangedQuotaHistory: [LLMQuotaHistorySample] {
-        let cutoff = Date().addingTimeInterval(-range.interval)
+        let cutoff = Date().addingTimeInterval(-LLMQuotaHistoryRange.sixHours.interval)
         let samples = effectiveQuotaHistory.filter { $0.sampledAt >= cutoff }
         return samples.isEmpty ? Array(effectiveQuotaHistory.suffix(1)) : samples
     }
@@ -791,12 +764,12 @@ struct LLMLocalUsageCard: View {
         VStack(alignment: .leading, spacing: 7) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    InstantHelpTitle("LOCAL DRAWDOWN", help: localDrawdownHelp)
+                    InstantHelpTitle("LIMIT DRAWDOWN", help: limitDrawdownHelp)
                     Spacer()
                     Button {
                         onSampleQuota?()
                     } label: {
-                        Text("(\(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt)))")
+                        Text("Updated \(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt))")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.52))
                             .monospacedDigit()
@@ -813,10 +786,6 @@ struct LLMLocalUsageCard: View {
             }
 
             LLMQuotaHistoryGraph(samples: rangedQuotaHistory, range: drawdownRange)
-
-            if !sessionTimelineSessions.isEmpty {
-                LLMSessionTimelineView(sessions: sessionTimelineSessions, range: drawdownRange)
-            }
         }
         .sectionStyle()
     }
@@ -845,6 +814,11 @@ struct LLMLocalUsageCard: View {
         let samples = effectiveQuotaHistory.filter { $0.sampledAt >= cutoff }
         return samples.isEmpty ? Array(effectiveQuotaHistory.suffix(1)) : samples
     }
+}
+
+struct LLMSessionTimelineCard: View {
+    let snapshot: LLMUsageSnapshot
+    @State private var range = LLMQuotaHistoryRange.sixHours
 
     private var sessionTimelineSessions: [LLMUsageSession] {
         var seen = Set<String>()
@@ -855,11 +829,11 @@ struct LLMLocalUsageCard: View {
         }
 
         let axisEnd = Date()
-        let axisStart = axisEnd.addingTimeInterval(-drawdownRange.interval)
+        let axisStart = axisEnd.addingTimeInterval(-range.interval)
         return combined
             .filter { session in
                 let end = session.updatedAt ?? session.createdAt ?? axisEnd
-                let start = session.createdAt ?? end.addingTimeInterval(-min(drawdownRange.interval, 3_600))
+                let start = session.createdAt ?? end.addingTimeInterval(-min(range.interval, 3_600))
                 return start <= axisEnd && end >= axisStart
             }
             .sorted { lhs, rhs in
@@ -872,6 +846,25 @@ struct LLMLocalUsageCard: View {
             }
             .prefix(8)
             .map { $0 }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                InstantHelpTitle("SESSION TIMELINE", help: sessionTimelineHelp)
+                Spacer()
+                LLMQuotaHistoryRangeToggle(selection: $range)
+            }
+
+            if sessionTimelineSessions.isEmpty {
+                Text("No local sessions in this window")
+                    .font(.system(size: 12.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.58))
+            } else {
+                LLMSessionTimelineView(sessions: sessionTimelineSessions, range: range, showsHeader: false)
+            }
+        }
+        .sectionStyle()
     }
 }
 
@@ -992,11 +985,7 @@ struct LLMQuotaHistoryGraph: View {
                     sampleDots(for: \.primaryRemainingPercent, color: .accentBlue, label: "5H", in: chartRect)
                 }
             }
-            .frame(height: 88)
-
-            HStack(spacing: 10) {
-                LegendInline(color: .accentBlue, label: "5H left", value: latestValue(\.primaryRemainingPercent))
-            }
+            .frame(height: 44)
         }
     }
 
@@ -1280,23 +1269,26 @@ struct LLMLocalUsageWindowRow: View {
 struct LLMSessionTimelineView: View {
     let sessions: [LLMUsageSession]
     let range: LLMQuotaHistoryRange
+    var showsHeader = true
     @State private var hoveredSessionID: String?
 
     private let rowHeight: CGFloat = 34
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline) {
-                InstantHelpTitle(
-                    "SESSION TIMELINE",
-                    help: sessionTimelineHelp,
-                    font: .system(size: 11.5, weight: .semibold)
-                )
-                Spacer()
-                Text("\(sessions.count) sessions")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.52))
-                    .monospacedDigit()
+            if showsHeader {
+                HStack(alignment: .firstTextBaseline) {
+                    InstantHelpTitle(
+                        "SESSION TIMELINE",
+                        help: sessionTimelineHelp,
+                        font: .system(size: 11.5, weight: .semibold)
+                    )
+                    Spacer()
+                    Text("\(sessions.count) sessions")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                        .monospacedDigit()
+                }
             }
 
             GeometryReader { proxy in
@@ -1383,21 +1375,21 @@ struct LLMSessionTimelineView: View {
                             }
                     }
 
-                    if let hovered = hoveredSession(proxyHeight: proxy.size.height) {
-                        LLMSessionHoverCard(
-                            session: hovered.session,
-                            displayTitle: sessionDisplayTitle(hovered.session),
-                            displayTokens: displayTokens(hovered.session),
-                            promptPreview: sessionPromptPreview(hovered.session)
-                        )
-                        .frame(width: min(proxy.size.width - 24, 268), alignment: .leading)
-                        .offset(
-                            x: min(max(labelWidth + 12, 8), max(proxy.size.width - 280, 8)),
-                            y: hovered.y
-                        )
-                        .zIndex(100)
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
+                    if let hovered = hoveredSessionAnchor(plotX: plotX, proxyWidth: proxy.size.width) {
+                        Color.clear
+                            .frame(width: 1, height: 1)
+                            .position(x: hovered.x, y: hovered.y)
+                            .popover(isPresented: hoverBinding(for: hovered.session.id), arrowEdge: .leading) {
+                                LLMSessionHoverCard(
+                                    session: hovered.session,
+                                    displayTitle: sessionDisplayTitle(hovered.session),
+                                    displayTokens: displayTokens(hovered.session),
+                                    promptPreview: sessionPromptPreview(hovered.session)
+                                )
+                                .frame(width: 280)
+                                .padding(2)
+                                .background(Color.background)
+                            }
                     }
                 }
             }
@@ -1479,17 +1471,27 @@ struct LLMSessionTimelineView: View {
         return parts.joined(separator: " • ")
     }
 
-    private func hoveredSession(proxyHeight: CGFloat) -> (session: LLMUsageSession, y: CGFloat)? {
+    private func hoverBinding(for sessionID: String) -> Binding<Bool> {
+        Binding(
+            get: { hoveredSessionID == sessionID },
+            set: { isPresented in
+                if isPresented {
+                    hoveredSessionID = sessionID
+                } else if hoveredSessionID == sessionID {
+                    hoveredSessionID = nil
+                }
+            }
+        )
+    }
+
+    private func hoveredSessionAnchor(plotX: CGFloat, proxyWidth: CGFloat) -> (session: LLMUsageSession, x: CGFloat, y: CGFloat)? {
         guard let hoveredSessionID,
               let index = sessions.firstIndex(where: { $0.id == hoveredSessionID }) else {
             return nil
         }
 
         let rowY = CGFloat(index) * rowHeight + 17
-        let cardY = rowY < proxyHeight * 0.5
-            ? min(rowY + 8, max(proxyHeight - 118, 8))
-            : max(rowY - 118, 8)
-        return (sessions[index], cardY)
+        return (sessions[index], min(max(plotX + 8, 12), proxyWidth - 12), rowY)
     }
 
     private func sessionDisplayTitle(_ session: LLMUsageSession) -> String {
@@ -2005,48 +2007,147 @@ struct LLMUsageProgress: View {
     }
 }
 
-struct RingSegment: Identifiable {
+struct MemoryRunwayHeroView: View {
+    let snapshot: MemorySnapshot
+
+    var body: some View {
+        VStack(spacing: 10) {
+            MemoryRunwayLane(
+                title: "PRESSURE",
+                value: "\(snapshot.pressurePercent)%",
+                detail: pressureDetail,
+                percent: snapshot.pressurePercent,
+                color: .accentBlue,
+                markers: [50, 80]
+            )
+
+            MemoryRunwayLane(
+                title: "MEMORY",
+                value: "\(snapshot.usedPercent)%",
+                detail: "\(ByteFormat.memory(snapshot.breakdown.app + snapshot.breakdown.wired + snapshot.breakdown.compressed)) used",
+                percent: snapshot.usedPercent,
+                color: .accentBlue,
+                markers: [75, 90],
+                segments: memorySegments
+            )
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var pressureDetail: String {
+        switch snapshot.pressurePercent {
+        case 0..<35:
+            return "Low load"
+        case 35..<70:
+            return "Active load"
+        default:
+            return "High load"
+        }
+    }
+
+    private var memorySegments: [MemoryRunwaySegment] {
+        let breakdown = snapshot.breakdown
+        let total = max(Double(breakdown.total), 1)
+        return [
+            MemoryRunwaySegment(label: "App", value: Double(breakdown.app) / total, color: .accentBlue),
+            MemoryRunwaySegment(label: "Wired", value: Double(breakdown.wired) / total, color: .wiredPink),
+            MemoryRunwaySegment(label: "Compressed", value: Double(breakdown.compressed) / total, color: .compressedYellow),
+            MemoryRunwaySegment(label: "Free", value: Double(breakdown.free) / total, color: .freeGray)
+        ]
+    }
+}
+
+struct MemoryRunwaySegment: Identifiable {
     let id = UUID()
+    let label: String
     let value: Double
     let color: Color
 }
 
-struct RingView: View {
+struct MemoryRunwayLane: View {
     let title: String
+    let value: String
+    let detail: String
     let percent: Int
-    let segments: [RingSegment]
+    let color: Color
+    var markers: [Int] = []
+    var segments: [MemoryRunwaySegment] = []
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.freeGray.opacity(0.72), lineWidth: 8)
-
-            ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
-                Circle()
-                    .trim(from: start(for: index), to: end(for: index))
-                    .stroke(segment.color, style: StrokeStyle(lineWidth: 8, lineCap: .butt))
-                    .rotationEffect(.degrees(-90))
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 9) {
+                Text(value)
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .frame(width: 74, alignment: .leading)
+                Text(title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+                Spacer(minLength: 6)
+                Text(detail)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(color.opacity(0.9))
+                    .lineLimit(1)
             }
 
-            VStack(spacing: 2) {
-                Text("\(percent)%")
-                    .font(.system(size: 27, weight: .regular, design: .rounded))
-                    .monospacedDigit()
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.freeGray.opacity(0.22))
+
+                    if segments.isEmpty {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(color.opacity(0.9))
+                            .frame(width: proxy.size.width * clampedRatio)
+                    } else {
+                        segmentedTrack(width: proxy.size.width)
+                    }
+
+                    ForEach(markers, id: \.self) { marker in
+                        let x = proxy.size.width * CGFloat(marker) / 100
+                        Rectangle()
+                            .fill(Color.background.opacity(0.75))
+                            .frame(width: 1, height: 20)
+                            .position(x: x, y: 7)
+                    }
+                }
+            }
+            .frame(height: 14)
+
+            if !segments.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(segments.prefix(3)) { segment in
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(segment.color)
+                                .frame(width: 5, height: 5)
+                            Text(segment.label)
+                                .font(.system(size: 9.5, weight: .regular))
+                                .foregroundStyle(.white.opacity(0.48))
+                        }
+                    }
+                }
             }
         }
-        .frame(width: 91, height: 91)
     }
 
-    private func start(for index: Int) -> CGFloat {
-        let prior = segments.prefix(index).reduce(0) { $0 + $1.value }
-        return CGFloat(prior / 100)
+    private var clampedRatio: CGFloat {
+        CGFloat(min(max(Double(percent) / 100, 0), 1))
     }
 
-    private func end(for index: Int) -> CGFloat {
-        let end = segments.prefix(index + 1).reduce(0) { $0 + $1.value }
-        return CGFloat(end / 100)
+    private func segmentedTrack(width: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            ForEach(segments) { segment in
+                Rectangle()
+                    .fill(segment.color.opacity(segment.label == "Free" ? 0.48 : 0.88))
+                    .frame(width: max(width * CGFloat(max(segment.value, 0)), 0))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -3255,8 +3356,8 @@ private let codexRunwayHelp = """
 Shows your live Codex quota windows from the usage API. The 5h bar is the short runway you feel during heavy work; the weekly bar shows the longer reset cycle, and reset credits appear when the API reports them.
 """
 
-private let localDrawdownHelp = """
-Shows sampled Codex 5H remaining percentage from MaxxBar's local quota history. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
+private let limitDrawdownHelp = """
+Shows how your Codex 5H limit has been draining based on samples MaxxBar stores locally. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
 """
 
 private let sessionTimelineHelp = """
@@ -3269,6 +3370,10 @@ Summarizes the latest sampled runway drop from the local quota history. It is us
 
 private let maxxInsightsHelp = """
 Summarizes local AI activity MaxxBar has observed today: session count, inferred AI time, average session length, the current detected AI surface, and confidence in the context signal.
+"""
+
+private let contextConfidenceHelp = """
+Context confidence is how much before/after app context MaxxBar has around detected AI use. High means it saw both sides of the workflow often enough to trust the pattern; Medium or Low means the context is sparse or mostly inferred.
 """
 
 private let aiFlowHelp = """
@@ -3312,31 +3417,17 @@ struct InstantHelpTitle: View {
             .foregroundStyle(color)
             .contentShape(Rectangle())
             .onHover { isHovered = $0 }
-            .overlay(alignment: .topLeading) {
-                if isHovered {
-                    Text(help)
-                        .font(.system(size: 11, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .lineSpacing(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(width: 270, alignment: .leading)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Color.background.opacity(0.98))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 4)
-                        .offset(y: 18)
-                        .allowsHitTesting(false)
-                        .zIndex(100)
-                        .transition(.opacity)
-                }
+            .popover(isPresented: $isHovered, arrowEdge: .top) {
+                Text(help)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 270, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.background)
             }
-            .zIndex(isHovered ? 100 : 0)
-            .animation(.easeOut(duration: 0.08), value: isHovered)
     }
 }
 
