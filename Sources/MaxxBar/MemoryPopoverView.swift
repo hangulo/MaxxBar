@@ -123,11 +123,7 @@ struct MemoryPanelView: View {
 
             ProcessesView(groupedProcesses: model.snapshot.processes, processRows: model.snapshot.processRows)
 
-            PagingView(snapshot: model.snapshot)
-
             SwapView(snapshot: model.snapshot)
-
-            HistoryView(history: model.history)
 
             ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
@@ -707,13 +703,13 @@ struct DrawdownInsightCard: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
                 InstantHelpTitle("DRAWDOWN INSIGHT", help: drawdownInsightHelp)
+                Spacer()
+                if insight != nil {
+                    LLMQuotaDrawdownModeToggle(selection: $mode)
+                }
             }
 
             if let insight {
-                HStack {
-                    Spacer()
-                    LLMQuotaDrawdownModeToggle(selection: $mode)
-                }
                 LLMQuotaDrawdownInsightView(insight: insight)
             } else {
                 Text("No local drawdown pattern yet")
@@ -1270,7 +1266,7 @@ struct LLMSessionTimelineView: View {
     let sessions: [LLMUsageSession]
     let range: LLMQuotaHistoryRange
     var showsHeader = true
-    @State private var hoveredSessionID: String?
+    @State private var hoveredSession: LLMUsageSession?
 
     private let rowHeight: CGFloat = 34
 
@@ -1348,7 +1344,7 @@ struct LLMSessionTimelineView: View {
                         .contentShape(Rectangle())
                         .position(x: labelWidth / 2, y: y)
                         .onHover { isHovered in
-                            hoveredSessionID = isHovered ? session.id : (hoveredSessionID == session.id ? nil : hoveredSessionID)
+                            hoveredSession = isHovered ? session : (hoveredSession?.id == session.id ? nil : hoveredSession)
                         }
 
                         Capsule()
@@ -1357,7 +1353,7 @@ struct LLMSessionTimelineView: View {
                             .contentShape(Rectangle())
                             .position(x: startX + width / 2, y: y)
                             .onHover { isHovered in
-                                hoveredSessionID = isHovered ? session.id : (hoveredSessionID == session.id ? nil : hoveredSessionID)
+                                hoveredSession = isHovered ? session : (hoveredSession?.id == session.id ? nil : hoveredSession)
                             }
 
                         if span.clippedStart {
@@ -1379,13 +1375,14 @@ struct LLMSessionTimelineView: View {
                         Color.clear
                             .frame(width: 1, height: 1)
                             .position(x: hovered.x, y: hovered.y)
-                            .popover(isPresented: hoverBinding(for: hovered.session.id), arrowEdge: .leading) {
+                            .popover(item: $hoveredSession, arrowEdge: .leading) { session in
                                 LLMSessionHoverCard(
-                                    session: hovered.session,
-                                    displayTitle: sessionDisplayTitle(hovered.session),
-                                    displayTokens: displayTokens(hovered.session),
-                                    promptPreview: sessionPromptPreview(hovered.session)
+                                    session: session,
+                                    displayTitle: sessionDisplayTitle(session),
+                                    displayTokens: displayTokens(session),
+                                    promptPreview: sessionPromptPreview(session)
                                 )
+                                .id(session.id)
                                 .frame(width: 280)
                                 .padding(2)
                                 .background(Color.background)
@@ -1471,27 +1468,14 @@ struct LLMSessionTimelineView: View {
         return parts.joined(separator: " • ")
     }
 
-    private func hoverBinding(for sessionID: String) -> Binding<Bool> {
-        Binding(
-            get: { hoveredSessionID == sessionID },
-            set: { isPresented in
-                if isPresented {
-                    hoveredSessionID = sessionID
-                } else if hoveredSessionID == sessionID {
-                    hoveredSessionID = nil
-                }
-            }
-        )
-    }
-
     private func hoveredSessionAnchor(plotX: CGFloat, proxyWidth: CGFloat) -> (session: LLMUsageSession, x: CGFloat, y: CGFloat)? {
-        guard let hoveredSessionID,
-              let index = sessions.firstIndex(where: { $0.id == hoveredSessionID }) else {
+        guard let hoveredSession,
+              let index = sessions.firstIndex(where: { $0.id == hoveredSession.id }) else {
             return nil
         }
 
         let rowY = CGFloat(index) * rowHeight + 17
-        return (sessions[index], min(max(plotX + 8, 12), proxyWidth - 12), rowY)
+        return (hoveredSession, min(max(plotX + 8, 12), proxyWidth - 12), rowY)
     }
 
     private func sessionDisplayTitle(_ session: LLMUsageSession) -> String {
@@ -3192,16 +3176,29 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample], mode: L
         )
     ]
 
-    for threshold in stride(from: 90, through: 0, by: -10) where threshold < values[fullIndex].remainingPercent {
+    for threshold in stride(from: 80, through: 0, by: -20) where threshold < values[fullIndex].remainingPercent {
         if let index = firstThresholdCrossing(in: values, threshold: threshold, start: fullIndex, end: segmentEnd) {
-            milestones.append(
+            appendDrawdownMilestone(
                 LLMQuotaMilestone(
                     label: "≤\(threshold)",
                     sampledAt: values[index].sampledAt,
                     remainingPercent: values[index].remainingPercent
-                )
+                ),
+                to: &milestones
             )
         }
+    }
+
+    let latestValue = values[lowIndex]
+    if !latestValue.remainingPercent.isMultiple(of: 20),
+       !milestones.contains(where: { $0.sampledAt == latestValue.sampledAt && $0.remainingPercent == latestValue.remainingPercent }) {
+        milestones.append(
+            LLMQuotaMilestone(
+                label: "\(latestValue.remainingPercent)%",
+                sampledAt: latestValue.sampledAt,
+                remainingPercent: latestValue.remainingPercent
+            )
+        )
     }
 
     if let resetAfterIndex {
@@ -3226,6 +3223,17 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample], mode: L
         endedAt: values[lowIndex].sampledAt,
         milestones: deduplicatedMilestones(milestones)
     )
+}
+
+private func appendDrawdownMilestone(_ milestone: LLMQuotaMilestone, to milestones: inout [LLMQuotaMilestone]) {
+    if let last = milestones.last,
+       last.sampledAt == milestone.sampledAt,
+       last.remainingPercent == milestone.remainingPercent {
+        milestones[milestones.count - 1] = milestone
+        return
+    }
+
+    milestones.append(milestone)
 }
 
 private func firstDropIndex(in values: [LLMQuotaValue], start: Int, end: Int) -> Int? {
