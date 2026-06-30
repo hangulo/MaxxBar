@@ -360,6 +360,7 @@ struct LLMUsageSnapshot: Equatable {
     var planType: String?
     var limits: [LLMUsageLimit]
     var creditsBalance: String?
+    var resetCreditCount: Int?
     var lastUpdated: Date?
     var localFiveHourTokens: UInt64
     var localWeeklyTokens: UInt64
@@ -386,6 +387,16 @@ struct AIWorkflowPath: Identifiable, Equatable {
     let count: Int
 }
 
+struct MaxxMomentSummary: Identifiable, Equatable {
+    var id: String { "\(ts.timeIntervalSince1970)-\(app)-\(note)" }
+    let ts: Date
+    let sentiment: String
+    let app: String
+    let surface: String?
+    let note: String
+    let screenshotPath: String?
+}
+
 struct AIUsageSnapshot: Equatable {
     var sampledAt: Date?
     var activeApp: String
@@ -405,6 +416,7 @@ struct AIUsageSnapshot: Equatable {
     var workflowPaths: [AIWorkflowPath]
     var momentsToday: Int
     var lastMomentAt: Date?
+    var recentMoments: [MaxxMomentSummary]
     var lastError: String?
 }
 
@@ -612,8 +624,15 @@ final class MemoryModel: ObservableObject {
         }
     }
 
-    func captureMaxxMoment() {
-        aiUsage = AIUsageReader.captureMoment(memory: snapshot, cpuGPU: cpuGPU, llmUsage: llmUsage)
+    func captureMaxxMoment(sentiment: String, note: String, includeScreenshot: Bool) {
+        aiUsage = AIUsageReader.captureMoment(
+            memory: snapshot,
+            cpuGPU: cpuGPU,
+            llmUsage: llmUsage,
+            sentiment: sentiment,
+            note: note,
+            includeScreenshot: includeScreenshot
+        )
     }
 
     func openAIUsageReport() {
@@ -1043,6 +1062,7 @@ extension LLMUsageSnapshot {
         planType: nil,
         limits: [],
         creditsBalance: nil,
+        resetCreditCount: nil,
         lastUpdated: nil,
         localFiveHourTokens: 0,
         localWeeklyTokens: 0,
@@ -1065,6 +1085,7 @@ extension LLMUsageSnapshot {
             )
         ],
         creditsBalance: "0",
+        resetCreditCount: 2,
         lastUpdated: Date(),
         localFiveHourTokens: 200_670_848,
         localWeeklyTokens: 216_176_212,
@@ -1173,6 +1194,7 @@ extension AIUsageSnapshot {
         workflowPaths: [],
         momentsToday: 0,
         lastMomentAt: nil,
+        recentMoments: [],
         lastError: nil
     )
 
@@ -1210,6 +1232,24 @@ extension AIUsageSnapshot {
         ],
         momentsToday: 2,
         lastMomentAt: Date().addingTimeInterval(-1_800),
+        recentMoments: [
+            MaxxMomentSummary(
+                ts: Date().addingTimeInterval(-1_800),
+                sentiment: "Frustration",
+                app: "Codex",
+                surface: "Codex web",
+                note: "Missed local app context",
+                screenshotPath: nil
+            ),
+            MaxxMomentSummary(
+                ts: Date().addingTimeInterval(-7_200),
+                sentiment: "Delight",
+                app: "ChatGPT",
+                surface: "ChatGPT web",
+                note: "Found the right framing quickly",
+                screenshotPath: nil
+            )
+        ],
         lastError: nil
     )
 }
@@ -2098,6 +2138,8 @@ enum AIUsageReader {
         var tool: String?
         var surface: String?
         var useCase: String
+        var sentiment: String?
+        var screenshotPath: String?
         var memoryPressurePercent: Int
         var memoryUsedPercent: Int
         var cpuUserPercent: Int
@@ -2114,9 +2156,18 @@ enum AIUsageReader {
         return snapshot(current: record, error: nil)
     }
 
-    static func captureMoment(memory: MemorySnapshot, cpuGPU: CPUGPUSnapshot, llmUsage: LLMUsageSnapshot) -> AIUsageSnapshot {
+    static func captureMoment(
+        memory: MemorySnapshot,
+        cpuGPU: CPUGPUSnapshot,
+        llmUsage: LLMUsageSnapshot,
+        sentiment: String,
+        note: String,
+        includeScreenshot: Bool
+    ) -> AIUsageSnapshot {
         let context = activeContext()
         let record = record(from: context, memory: memory, cpuGPU: cpuGPU, llmUsage: llmUsage)
+        let cleanNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let screenshotPath = includeScreenshot ? captureScreenshot(at: record.ts) : nil
         append(record, to: activityLogURL)
         append(
             MaxxMomentRecord(
@@ -2127,13 +2178,15 @@ enum AIUsageReader {
                 tool: record.tool,
                 surface: record.surface,
                 useCase: record.useCase,
+                sentiment: sentiment,
+                screenshotPath: screenshotPath,
                 memoryPressurePercent: record.memoryPressurePercent,
                 memoryUsedPercent: record.memoryUsedPercent,
                 cpuUserPercent: record.cpuUserPercent,
                 cpuSystemPercent: record.cpuSystemPercent,
                 codexFiveHourRemainingPercent: record.codexFiveHourRemainingPercent,
                 codexWeeklyRemainingPercent: record.codexWeeklyRemainingPercent,
-                note: "AI was wrong"
+                note: cleanNote.isEmpty ? sentiment : cleanNote
             ),
             to: momentsLogURL
         )
@@ -2213,6 +2266,19 @@ enum AIUsageReader {
             workflowPaths: topWorkflowPaths(workflows),
             momentsToday: moments.filter { $0.ts >= startOfDay }.count,
             lastMomentAt: moments.map(\.ts).max(),
+            recentMoments: moments
+                .sorted { $0.ts > $1.ts }
+                .prefix(3)
+                .map {
+                    MaxxMomentSummary(
+                        ts: $0.ts,
+                        sentiment: $0.sentiment ?? "Frustration",
+                        app: $0.app,
+                        surface: $0.surface ?? $0.tool ?? $0.site,
+                        note: $0.note,
+                        screenshotPath: $0.screenshotPath
+                    )
+                },
             lastError: error
         )
     }
@@ -2429,6 +2495,26 @@ enum AIUsageReader {
         readJSONLines(MaxxMomentRecord.self, from: momentsLogURL, days: days)
     }
 
+    private static func captureScreenshot(at date: Date) -> String? {
+        guard let directory = supportDirectoryURL?.appendingPathComponent("maxx-moment-screenshots") else {
+            return nil
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let filename = "maxx-moment-\(Int(date.timeIntervalSince1970)).png"
+            let url = directory.appendingPathComponent(filename)
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            task.arguments = ["-x", url.path]
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0 && FileManager.default.fileExists(atPath: url.path) ? url.path : nil
+        } catch {
+            return nil
+        }
+    }
+
     private static func readJSONLines<T: Decodable>(_ type: T.Type, from url: URL?, days: Int) -> [T] {
         guard let url,
               let data = try? Data(contentsOf: url),
@@ -2531,11 +2617,11 @@ enum AIUsageReader {
         </head>
         <body>
           <h1>MaxxBar AI Usage Insights</h1>
-          <p class="sub">Local-only metadata view. No screenshots, OCR, typed text, or cloud upload.</p>
+          <p class="sub">Local-only metadata view. Screenshots are saved only for Maxx Moments when included; no OCR, typed text, or cloud upload.</p>
           <div class="grid">
             \(card("AI sessions", "\(sessionCount)", "last 7 days"))
             \(card("AI time", duration(totalAISeconds), "sample-inferred"))
-            \(card("Maxx Moments", "\(moments.count)", "AI was wrong captures"))
+            \(card("Maxx Moments", "\(moments.count)", "local captures"))
             \(card("Active", html(latest?.tool ?? latest?.app ?? "Unknown"), html(latest?.surface ?? latest?.site ?? "latest sample")))
           </div>
           <section class="two">
@@ -2672,6 +2758,7 @@ enum LLMUsageReader {
         let rate_limit: RateLimitPayload?
         let additional_rate_limits: [AdditionalRateLimit]?
         let credits: Credits?
+        let rate_limit_reset_credits: RateLimitResetCredits?
     }
 
     private struct AdditionalRateLimit: Decodable {
@@ -2695,6 +2782,10 @@ enum LLMUsageReader {
         let unlimited: Bool?
     }
 
+    private struct RateLimitResetCredits: Decodable {
+        let available_count: Int?
+    }
+
     static func read() -> LLMUsageSnapshot {
         let local = readLocalCodexUsage()
         guard let token = readAccessToken() else {
@@ -2703,6 +2794,7 @@ enum LLMUsageReader {
                 planType: nil,
                 limits: [],
                 creditsBalance: nil,
+                resetCreditCount: nil,
                 lastUpdated: Date(),
                 localFiveHourTokens: local.fiveHourTokens,
                 localWeeklyTokens: local.weeklyTokens,
@@ -2750,6 +2842,7 @@ enum LLMUsageReader {
                 planType: response.plan_type,
                 limits: limits(from: response),
                 creditsBalance: response.credits?.unlimited == true ? "Unlimited" : response.credits?.balance,
+                resetCreditCount: response.rate_limit_reset_credits?.available_count,
                 lastUpdated: Date(),
                 localFiveHourTokens: local.fiveHourTokens,
                 localWeeklyTokens: local.weeklyTokens,
@@ -2918,7 +3011,7 @@ enum LLMUsageReader {
     private static func sessions(databasePath: String, mode: SessionQueryMode) -> [LLMUsageSession] {
         let whereClause = mode == .highestWeekly
             ? "where tokens_used > 0 and coalesce(updated_at_ms, updated_at * 1000) >= (strftime('%s','now')-7*24*3600)*1000"
-            : "where tokens_used > 0"
+            : "where coalesce(updated_at_ms, updated_at * 1000) > 0"
         let orderClause = mode == .highestWeekly
             ? "order by tokens_used desc, coalesce(updated_at_ms, updated_at * 1000) desc"
             : "order by coalesce(updated_at_ms, updated_at * 1000) desc"
@@ -2936,7 +3029,7 @@ enum LLMUsageReader {
         from threads
         \(whereClause)
         \(orderClause)
-        limit 15;
+        limit 30;
         """
 
         return sqliteRows(databasePath: databasePath, query: query).compactMap { row in
@@ -3092,6 +3185,7 @@ enum LLMUsageReader {
             planType: nil,
             limits: [],
             creditsBalance: nil,
+            resetCreditCount: nil,
             lastUpdated: Date(),
             localFiveHourTokens: local.fiveHourTokens,
             localWeeklyTokens: local.weeklyTokens,
