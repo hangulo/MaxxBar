@@ -53,6 +53,7 @@ enum MaxxBarLauncher {
             print("llmPlan=\(llmUsage.planType ?? "-")")
             print("llmEmail=\(llmUsage.email ?? "-")")
             print("llmLimits=\(llmUsage.limits.map { limit in "\(limit.name):\(limit.primary?.remainingPercent ?? -1)%/\(limit.secondary?.remainingPercent ?? -1)%" }.joined(separator: ","))")
+            print("llmResetCredits=\(llmUsage.resetCreditCount.map(String.init) ?? "-")")
             print("llmLocalFiveHourTokens=\(llmUsage.localFiveHourTokens)")
             print("llmLocalWeeklyTokens=\(llmUsage.localWeeklyTokens)")
             print("llmError=\(llmUsage.error ?? "-")")

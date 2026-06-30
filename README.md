@@ -1,35 +1,45 @@
 # MaxxBar
 
-A macOS menu bar companion for AI runway, AI session patterns, and machine load. MaxxBar keeps the useful Codex quota, token, memory, and CPU/GPU foundations from Menu Bar Stats, then adds local AI usage context: what AI tool is active, how often AI sessions happen, what apps/sites come before and after, and when you capture a Maxx Moment because AI was wrong.
+A macOS menu bar companion for AI runway and local AI usage insight. MaxxBar keeps the useful Codex quota, token, memory, and machine-load foundations from Menu Bar Stats, then makes the main product about how much AI runway is left, what local sessions are driving it, and what work tends to happen before and after AI use.
 
 ## Screenshots
 
-### AI Usage
+### Runway
 
-![AI usage panel](Artifacts/maxxbar-ai-popover.png)
+![Runway panel](Artifacts/screenshot-llm.png)
 
-The AI panel shows live Codex 5H and weekly limits, local token estimates,
-persisted drawdown, AI session summaries, before/after app context, and a
-one-click Maxx Moment capture for times when AI was wrong.
+The Runway panel shows live Codex 5H and weekly limits, reset credits when the
+usage API reports them, local token estimates, persisted drawdown, and recent
+session timelines. Sparse drawdown history zooms to the samples MaxxBar has
+instead of leaving most of the chart empty.
+
+### Insights
+
+The Insights panel shows local AI session patterns, before/after context,
+TraceWork-inspired workflow paths, and a Maxx Moment capture flow for saving
+frustration or delight moments with an optional local screenshot and note.
 
 ### Memory
 
 ![Memory panel](Artifacts/screenshot-memory.png)
 
-### CPU/GPU
+### Advanced Machine Context
 
 ![CPU/GPU panel](Artifacts/screenshot-cpugpu.png)
 
+CPU/GPU information remains available in the codebase as advanced machine-load
+context, but the default popover is focused on Runway, Insights, and Memory.
+
 ## Current Features
 
-- Two-line menu bar status for AI runway and memory pressure.
-- AI usage panel with Codex limits, persistent local quota history, drawdown milestones, cache-token detail, token/session totals, top token users, and context actions for local Codex sessions.
+- Two-line menu bar status for AI runway and weekly reset day.
+- Runway-first popover with Codex limits, reset credits, persistent local quota history, drawdown milestones, cache-token detail, token/session totals, and recent local session timelines.
 - Local AI activity logging for app/site metadata, AI surface detection, session duration estimates, before/after workflow paths, and nearby system-load context.
-- Maxx Moment capture for saving the current local context when AI was wrong.
+- Maxx Moment capture for saving frustration or delight, optional local screenshot, current app/site, detected AI surface, quota/system state, and a user note.
 - Local HTML AI insights report with top tools, likely use cases, before/after apps, workflow paths, and a Sankey-style path visual.
 - Memory popover with pressure, memory breakdown, top processes, paging, swap, history, and lighter-weight numeric values for scanability.
 - Grouped and raw process memory views with app icons.
-- CPU/GPU panel with user/system history, per-core efficiency/performance load rings, grouped CPU processes, thermal summary, detailed temperatures, and uptime.
+- CPU/GPU panel code with user/system history, per-core efficiency/performance load rings, grouped CPU processes, thermal summary, detailed temperatures, and uptime for advanced/debug builds.
 - Pop-out window mode with resize support and quit control.
 
 ## Known Limits
@@ -60,7 +70,8 @@ The app bundle is written to `Dist/MaxxBar.app`. The renderer used for the
 README screenshots can write any panel to a PNG:
 
 ```sh
-.build/debug/MaxxBar --render-popover Artifacts/screenshot-llm.png llm
+.build/debug/MaxxBar --render-popover Artifacts/screenshot-llm.png runway
+.build/debug/MaxxBar --render-popover Artifacts/screenshot-insights.png insights
 .build/debug/MaxxBar --render-popover Artifacts/screenshot-memory.png memory
 .build/debug/MaxxBar --render-popover Artifacts/screenshot-cpugpu.png cpugpu
 ```
@@ -100,7 +111,8 @@ Scripts/uninstall-sensor-helper.sh
 
 ```sh
 swift run MaxxBar -- --sample
-swift run MaxxBar -- --render-popover Artifacts/maxxbar-ai-popover.png ai
+swift run MaxxBar -- --render-popover Artifacts/screenshot-llm.png runway
+swift run MaxxBar -- --render-popover Artifacts/screenshot-insights.png insights
 swift run MaxxBar -- --write-ai-report
 Dist/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
 Dist/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popout-action
@@ -121,11 +133,13 @@ AI activity metadata is stored locally in:
 ```text
 ~/Library/Application Support/MaxxBar/ai-activity.jsonl
 ~/Library/Application Support/MaxxBar/maxx-moments.jsonl
+~/Library/Application Support/MaxxBar/maxx-moment-screenshots/
 ~/Library/Application Support/MaxxBar/ai-usage-insights.html
 ```
 
-The AI logs are local-only metadata. They do not store screenshots, OCR output,
-full typed content, or cloud uploads.
+The AI logs are local-only metadata. Screenshots are stored only when included
+in a Maxx Moment. MaxxBar does not store OCR output, full typed content, or
+cloud uploads.
 
 Each sample records the sampled time, 5H remaining percentage, weekly remaining
 percentage, and current plan type when the Codex usage API reports one. The LLM

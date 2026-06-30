@@ -36,7 +36,9 @@ struct MemoryPopoverView: View {
                     aiUsage: model.aiUsage,
                     snapshot: model.llmUsage,
                     quotaHistory: model.llmQuotaHistory,
-                    onCaptureMaxxMoment: { model.captureMaxxMoment() },
+                    onCaptureMaxxMoment: { sentiment, note, includeScreenshot in
+                        model.captureMaxxMoment(sentiment: sentiment, note: note, includeScreenshot: includeScreenshot)
+                    },
                     onOpenAIReport: { model.openAIUsageReport() },
                     onPopOut: onPopOut,
                     onQuit: onQuit
@@ -265,7 +267,7 @@ struct AIUsagePanelView: View {
     let aiUsage: AIUsageSnapshot
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
-    var onCaptureMaxxMoment: (() -> Void)?
+    var onCaptureMaxxMoment: ((String, String, Bool) -> Void)?
     var onOpenAIReport: (() -> Void)?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -305,7 +307,8 @@ struct LLMRunwayPanelView: View {
                     if let codexLimit {
                         LLMUsageLimitCard(
                             limit: codexLimit,
-                            title: "CODEX RUNWAY (\(planName(snapshot.planType)))"
+                            title: "CODEX RUNWAY (\(planName(snapshot.planType)))",
+                            resetCreditCount: snapshot.resetCreditCount
                         )
                     } else {
                         LLMUsageUnavailableCard(message: snapshot.error ?? "Codex usage unavailable")
@@ -332,8 +335,7 @@ struct AIUsageOverviewCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
-                Text("MAXX INSIGHTS")
-                    .sectionTitle()
+                InstantHelpTitle("MAXX INSIGHTS", help: maxxInsightsHelp)
                 Spacer()
                 Text(snapshot.activeTool ?? "Watching")
                     .font(.system(size: 11, weight: .semibold))
@@ -390,8 +392,7 @@ struct AIWorkflowMiniCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("AI FLOW")
-                    .sectionTitle()
+                InstantHelpTitle("AI FLOW", help: aiFlowHelp)
                 Spacer()
                 Text("\(snapshot.sessionsSevenDays) 7d")
                     .font(.system(size: 11, weight: .semibold))
@@ -446,36 +447,146 @@ struct AIWorkflowMiniCard: View {
 
 struct MaxxMomentCard: View {
     let snapshot: AIUsageSnapshot
-    var onCaptureMaxxMoment: (() -> Void)?
+    var onCaptureMaxxMoment: ((String, String, Bool) -> Void)?
     var onOpenAIReport: (() -> Void)?
+    @State private var isExpanded = false
+    @State private var selectedSentiment = "Frustration"
+    @State private var includeScreenshot = true
+    @State private var note = ""
 
     var body: some View {
-        HStack(spacing: 8) {
-            Button {
-                onCaptureMaxxMoment?()
-            } label: {
-                Label("Maxx Moment", systemImage: "exclamationmark.bubble")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    Label("Maxx Moment", systemImage: "exclamationmark.bubble")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(Color.accentBlue.opacity(0.78))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .disabled(onCaptureMaxxMoment == nil)
+                .help("Capture a local note about this AI moment, with an optional screenshot")
+
+                IconActionButton(systemName: "chart.bar.xaxis", help: "Open AI usage insights", action: { onOpenAIReport?() })
+                    .disabled(onOpenAIReport == nil)
+
+                Text(momentText)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.48))
+                    .monospacedDigit()
+                    .frame(width: 62, alignment: .trailing)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white)
-            .background(Color.accentBlue.opacity(0.78))
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .disabled(onCaptureMaxxMoment == nil)
-            .help("Capture this moment as AI was wrong")
 
-            IconActionButton(systemName: "chart.bar.xaxis", help: "Open AI usage insights", action: { onOpenAIReport?() })
-                .disabled(onOpenAIReport == nil)
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 6) {
+                        MaxxMomentSentimentButton(
+                            title: "Frustration",
+                            systemImage: "exclamationmark.triangle",
+                            isSelected: selectedSentiment == "Frustration"
+                        ) {
+                            selectedSentiment = "Frustration"
+                        }
+                        MaxxMomentSentimentButton(
+                            title: "Delight",
+                            systemImage: "sparkles",
+                            isSelected: selectedSentiment == "Delight"
+                        ) {
+                            selectedSentiment = "Delight"
+                        }
+                    }
 
-            Text(momentText)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.48))
-                .monospacedDigit()
-                .frame(width: 62, alignment: .trailing)
+                    Toggle(isOn: $includeScreenshot) {
+                        Text("Include screenshot")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.74))
+                    }
+                    .toggleStyle(.checkbox)
+                    .help("When enabled, MaxxBar saves one local screenshot for this Maxx Moment. Nothing is uploaded.")
+
+                    TextField("Add context...", text: $note)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11.5, weight: .regular))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color.background.opacity(0.42))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                    Button {
+                        onCaptureMaxxMoment?(selectedSentiment, note, includeScreenshot)
+                        note = ""
+                        isExpanded = false
+                    } label: {
+                        Text("Capture")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(Color.accentBlue.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .padding(.top, 1)
+            }
+
+            if !snapshot.recentMoments.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(snapshot.recentMoments.prefix(3)) { moment in
+                        recentMomentRow(moment)
+                    }
+                }
+                .padding(.top, 1)
+            }
         }
         .sectionStyle()
+    }
+
+    private func recentMomentRow(_ moment: MaxxMomentSummary) -> some View {
+        HStack(spacing: 5) {
+            Text(moment.sentiment)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(moment.sentiment == "Delight" ? Color.green.opacity(0.88) : Color.accentBlue)
+                .frame(width: 58, alignment: .leading)
+            Text(moment.note)
+                .font(.system(size: 10.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.66))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            if moment.screenshotPath != nil {
+                Image(systemName: "camera")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
+            Text(relativeTime(moment.ts))
+                .font(.system(size: 9.5, weight: .regular))
+                .foregroundStyle(.white.opacity(0.42))
+                .monospacedDigit()
+        }
+        .help(maxxMomentTooltip(moment))
+    }
+
+    private func maxxMomentTooltip(_ moment: MaxxMomentSummary) -> String {
+        var lines = [
+            "\(moment.sentiment) Maxx Moment",
+            "Captured: \(absoluteTime(moment.ts))",
+            "App: \(moment.app)"
+        ]
+        if let surface = moment.surface {
+            lines.append("Surface: \(surface)")
+        }
+        if !moment.note.isEmpty {
+            lines.append("Note: \(moment.note)")
+        }
+        if let screenshotPath = moment.screenshotPath {
+            lines.append("Screenshot: \(screenshotPath)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private var momentText: String {
@@ -483,6 +594,26 @@ struct MaxxMomentCard: View {
             return relativeTime(lastMomentAt)
         }
         return "\(snapshot.momentsToday) today"
+    }
+}
+
+struct MaxxMomentSentimentButton: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10.5, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? .white : .white.opacity(0.62))
+        .background(isSelected ? Color.panelLift : Color.background.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
@@ -554,11 +685,21 @@ struct LLMUsageSummaryCard: View {
 struct LLMUsageLimitCard: View {
     let limit: LLMUsageLimit
     var title: String?
+    var resetCreditCount: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(title ?? limit.name.uppercased())
-                .sectionTitle()
+            HStack(alignment: .firstTextBaseline) {
+                InstantHelpTitle(title ?? limit.name.uppercased(), help: codexRunwayHelp)
+                Spacer()
+                if let resetCreditCount {
+                    Text("\(resetCreditCount) resets")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .monospacedDigit()
+                        .help("Available Codex reset credits reported by the live usage API.")
+                }
+            }
             LLMUsageProgress(window: limit.primary)
             LLMUsageProgress(window: limit.secondary)
         }
@@ -590,8 +731,7 @@ struct DrawdownInsightCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                Text("DRAWDOWN INSIGHT")
-                    .sectionTitle()
+                InstantHelpTitle("DRAWDOWN INSIGHT", help: drawdownInsightHelp)
                 Spacer()
                 LLMQuotaHistoryRangeToggle(selection: $range)
             }
@@ -645,15 +785,13 @@ struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
-    @State private var localWindowsExpanded = false
     @State private var drawdownRange = LLMQuotaHistoryRange.sixHours
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("LOCAL DRAWDOWN")
-                        .sectionTitle()
+                    InstantHelpTitle("LOCAL DRAWDOWN", help: localDrawdownHelp)
                     Spacer()
                     Button {
                         onSampleQuota?()
@@ -679,35 +817,8 @@ struct LLMLocalUsageCard: View {
             if !sessionTimelineSessions.isEmpty {
                 LLMSessionTimelineView(sessions: sessionTimelineSessions, range: drawdownRange)
             }
-
-            if !snapshot.localWindows.isEmpty {
-                DisclosureGroup(isExpanded: $localWindowsExpanded) {
-                    VStack(spacing: 7) {
-                        ForEach(snapshot.localWindows) { window in
-                            LLMLocalUsageWindowRow(window: window, maxTokens: maxTokens)
-                        }
-                    }
-                    .padding(.top, 4)
-                } label: {
-                    HStack {
-                        Text("LOCAL TOKENS")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
-                        Spacer()
-                        Text("\(tokenCount(snapshot.localWeeklyTokens)) • \(snapshot.localWeeklyThreads) sessions")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
-                            .monospacedDigit()
-                    }
-                }
-                .accentColor(.accentBlue)
-            }
         }
         .sectionStyle()
-    }
-
-    private var maxTokens: UInt64 {
-        max(snapshot.localWindows.map(\.tokens).max() ?? 0, 1)
     }
 
     private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
@@ -752,12 +863,12 @@ struct LLMLocalUsageCard: View {
                 return start <= axisEnd && end >= axisStart
             }
             .sorted { lhs, rhs in
-                let lhsStart = lhs.createdAt ?? lhs.updatedAt ?? .distantPast
-                let rhsStart = rhs.createdAt ?? rhs.updatedAt ?? .distantPast
-                if lhsStart == rhsStart {
+                let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
+                let rhsDate = rhs.updatedAt ?? rhs.createdAt ?? .distantPast
+                if lhsDate == rhsDate {
                     return lhs.tokens > rhs.tokens
                 }
-                return lhsStart < rhsStart
+                return lhsDate > rhsDate
             }
             .prefix(8)
             .map { $0 }
@@ -993,8 +1104,27 @@ struct LLMQuotaHistoryGraph: View {
     }
 
     private func dateBounds() -> (start: Date, end: Date) {
+        let sampleDates = samples
+            .compactMap { sample in
+                sample.primaryRemainingPercent == nil ? nil : sample.sampledAt
+            }
+            .sorted()
         let end = Date()
-        return (end.addingTimeInterval(-range.interval), end)
+        let fullStart = end.addingTimeInterval(-range.interval)
+        guard let firstSample = sampleDates.first,
+              let lastSample = sampleDates.last else {
+            return (fullStart, end)
+        }
+
+        let sampleSpan = max(lastSample.timeIntervalSince(firstSample), 60)
+        guard sampleSpan < range.interval * 0.5 else {
+            return (fullStart, end)
+        }
+
+        let padding = max(sampleSpan * 0.18, min(15 * 60, range.interval * 0.08))
+        let start = max(firstSample.addingTimeInterval(-padding), fullStart)
+        let paddedEnd = min(lastSample.addingTimeInterval(padding), end)
+        return (start, max(paddedEnd, start.addingTimeInterval(5 * 60)))
     }
 
     private func xPosition(for date: Date, start: Date, duration: TimeInterval, in rect: CGRect) -> CGFloat {
@@ -1156,9 +1286,11 @@ struct LLMSessionTimelineView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
-                Text("SESSION TIMELINE")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color.accentBlue)
+                InstantHelpTitle(
+                    "SESSION TIMELINE",
+                    help: sessionTimelineHelp,
+                    font: .system(size: 11.5, weight: .semibold)
+                )
                 Spacer()
                 Text("\(sessions.count) sessions")
                     .font(.system(size: 10.5, weight: .semibold))
@@ -1221,11 +1353,13 @@ struct LLMSessionTimelineView: View {
                         }
                         .frame(width: labelWidth, alignment: .leading)
                         .position(x: labelWidth / 2, y: y)
+                        .help(sessionTooltip(session))
 
                         Capsule()
                             .fill(timelineColor(for: session).opacity(0.9))
                             .frame(width: width, height: thickness)
                             .position(x: startX + width / 2, y: y)
+                            .help(sessionTooltip(session))
 
                         if span.clippedStart {
                             Text("←")
@@ -1320,6 +1454,41 @@ struct LLMSessionTimelineView: View {
         }
         return parts.joined(separator: " • ")
     }
+
+    private func sessionTooltip(_ session: LLMUsageSession) -> String {
+        var lines = [
+            session.title,
+            "Project: \(session.projectName)",
+            "Model: \(session.modelName)",
+            "Tokens shown: \(tokenCount(displayTokens(session)))"
+        ]
+        if let createdAt = session.createdAt {
+            lines.append("Started: \(absoluteTime(createdAt))")
+        }
+        if let updatedAt = session.updatedAt {
+            lines.append("Updated: \(absoluteTime(updatedAt))")
+        }
+        if let usage = session.tokenUsage {
+            lines.append("Turns: \(usage.turnCount)")
+            lines.append("Input: \(tokenCount(usage.inputTokens))")
+            lines.append("Cached input: \(tokenCount(usage.cachedInputTokens))")
+            lines.append("Output: \(tokenCount(usage.outputTokens))")
+            if usage.reasoningOutputTokens > 0 {
+                lines.append("Reasoning output: \(tokenCount(usage.reasoningOutputTokens))")
+            }
+            if usage.inputTokens > 0 {
+                lines.append("Cache hit: \(usage.cacheHitPercent)%")
+            }
+            lines.append("Estimated cost: \(dollarEstimate(usage.estimatedCost(for: session.modelName)))")
+        }
+        if !session.preview.isEmpty {
+            lines.append("Preview: \(session.preview)")
+        }
+        if !session.rolloutPath.isEmpty {
+            lines.append("Trace: \(session.rolloutPath)")
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 struct LLMAdvancedUsageCard: View {
@@ -1332,8 +1501,7 @@ struct LLMAdvancedUsageCard: View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("TOP TOKEN USERS")
-                        .sectionTitle()
+                    InstantHelpTitle("TOP TOKEN USERS", help: topTokenUsersHelp)
                     Spacer()
                     LLMSessionModeToggle(selection: $sessionMode)
                 }
@@ -1354,9 +1522,12 @@ struct LLMAdvancedUsageCard: View {
                         .padding(.top, 4)
                 } label: {
                     HStack {
-                        Text("AVAILABLE DETAIL")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
+                        InstantHelpTitle(
+                            "AVAILABLE DETAIL",
+                            help: availableDetailHelp,
+                            font: .system(size: 11.5, weight: .semibold),
+                            color: .white.opacity(0.62)
+                        )
                         Spacer()
                         Text("\(snapshot.limits.count) limit groups")
                             .font(.system(size: 11.5, weight: .semibold))
@@ -1369,8 +1540,7 @@ struct LLMAdvancedUsageCard: View {
             .padding(.top, 6)
         } label: {
             HStack {
-                Text("ADVANCED")
-                    .sectionTitle()
+                InstantHelpTitle("ADVANCED", help: advancedHelp)
                 Spacer()
                 Text("\(snapshot.recentSessions.count) sessions")
                     .font(.system(size: 12, weight: .semibold))
@@ -2933,6 +3103,95 @@ private func exactClockTime(_ value: Date) -> String {
 private func localDrawdownUpdatedAt(_ value: Date?) -> String {
     guard let value else { return "not sampled" }
     return exactClockTime(value)
+}
+
+private let codexRunwayHelp = """
+Shows your live Codex quota windows from the usage API. The 5h bar is the short runway you feel during heavy work; the weekly bar shows the longer reset cycle, and reset credits appear when the API reports them.
+"""
+
+private let localDrawdownHelp = """
+Shows sampled Codex 5H remaining percentage from MaxxBar's local quota history. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
+"""
+
+private let sessionTimelineHelp = """
+Shows recent local Codex sessions in the selected drawdown window, newest first. Bar position is the session time range, thickness roughly follows token volume, and the tooltip gives the full session detail.
+"""
+
+private let drawdownInsightHelp = """
+Summarizes the latest sampled runway drop from the local quota history. It is useful for seeing how quickly the 5H window moved, but exact crossing times are bounded by how often MaxxBar sampled the API.
+"""
+
+private let maxxInsightsHelp = """
+Summarizes local AI activity MaxxBar has observed today: session count, inferred AI time, average session length, the current detected AI surface, and confidence in the context signal.
+"""
+
+private let aiFlowHelp = """
+Shows lightweight before -> AI -> after patterns from local app and site metadata. It helps answer which tools you use, what usually leads into AI, and where work tends to go afterward.
+"""
+
+private let topTokenUsersHelp = """
+Lists the local Codex sessions with the most token usage. Use this when runway drops faster than expected and you want to see which recent session likely drove the drawdown.
+"""
+
+private let availableDetailHelp = """
+Shows raw limit groups returned by the Codex usage API. This is mostly diagnostic detail for checking additional model-specific limits beyond the main Codex runway.
+"""
+
+private let advancedHelp = """
+Advanced keeps deeper local token/session diagnostics out of the main Runway view. Open it when you need session-level token users, cache estimates, or raw API limit detail.
+"""
+
+struct InstantHelpTitle: View {
+    let title: String
+    let help: String
+    var font: Font = .system(size: 13.5, weight: .medium)
+    var color: Color = .accentBlue
+    @State private var isHovered = false
+
+    init(
+        _ title: String,
+        help: String,
+        font: Font = .system(size: 13.5, weight: .medium),
+        color: Color = .accentBlue
+    ) {
+        self.title = title
+        self.help = help
+        self.font = font
+        self.color = color
+    }
+
+    var body: some View {
+        Text(title)
+            .font(font)
+            .foregroundStyle(color)
+            .contentShape(Rectangle())
+            .onHover { isHovered = $0 }
+            .overlay(alignment: .topLeading) {
+                if isHovered {
+                    Text(help)
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(width: 270, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.background.opacity(0.98))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 4)
+                        .offset(y: 18)
+                        .allowsHitTesting(false)
+                        .zIndex(100)
+                        .transition(.opacity)
+                }
+            }
+            .zIndex(isHovered ? 100 : 0)
+            .animation(.easeOut(duration: 0.08), value: isHovered)
+    }
 }
 
 extension View {
