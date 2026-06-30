@@ -258,11 +258,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first,
               let fiveHourRemaining = codexLimit.primary?.remainingPercent,
               let weeklyRemaining = codexLimit.secondary?.remainingPercent else {
-            return ("-- Week", "- -")
+            return ("-- Day", "- -")
         }
 
         return (
-            "\(hoursLeftLabel(codexLimit.primary?.resetAt)) Week",
+            "\(hoursLeftLabel(codexLimit.primary?.resetAt)) \(weekdayLabel(codexLimit.secondary?.resetAt))",
             "\(fiveHourRemaining)% \(weeklyRemaining)%"
         )
     }
@@ -275,6 +275,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "\(Int(rounded))H"
         }
         return String(format: "%.1fH", rounded)
+    }
+
+    private func weekdayLabel(_ resetAt: Date?) -> String {
+        guard let resetAt else { return "Day" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE"
+        return formatter.string(from: resetAt)
     }
 
     private func statusTitleForDebug() -> String {
