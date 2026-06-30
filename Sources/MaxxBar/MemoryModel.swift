@@ -2786,6 +2786,11 @@ enum LLMUsageReader {
         let available_count: Int?
     }
 
+    private struct SessionIndexEntry: Decodable {
+        let id: String
+        let thread_name: String?
+    }
+
     static func read() -> LLMUsageSnapshot {
         let local = readLocalCodexUsage()
         guard let token = readAccessToken() else {
@@ -3009,6 +3014,7 @@ enum LLMUsageReader {
     }
 
     private static func sessions(databasePath: String, mode: SessionQueryMode) -> [LLMUsageSession] {
+        let indexTitles = sessionIndexTitles()
         let whereClause = mode == .highestWeekly
             ? "where tokens_used > 0 and coalesce(updated_at_ms, updated_at * 1000) >= (strftime('%s','now')-7*24*3600)*1000"
             : "where coalesce(updated_at_ms, updated_at * 1000) > 0"
@@ -3034,7 +3040,7 @@ enum LLMUsageReader {
 
         return sqliteRows(databasePath: databasePath, query: query).compactMap { row in
             guard row.count >= 9 else { return nil }
-            let title = compactText(row[1], fallback: "Untitled")
+            let title = sessionTitle(id: row[0], sqliteTitle: row[1], indexTitles: indexTitles)
             let tokens = UInt64(row[2]) ?? 0
             let createdAt = TimeInterval(row[3]).map { Date(timeIntervalSince1970: $0 / 1000) }
             let updatedAt = TimeInterval(row[4]).map { Date(timeIntervalSince1970: $0 / 1000) }
@@ -3055,6 +3061,35 @@ enum LLMUsageReader {
                 updatedAt: updatedAt
             )
         }
+    }
+
+    private static func sessionTitle(id: String, sqliteTitle: String, indexTitles: [String: String]) -> String {
+        if let indexTitle = indexTitles[id],
+           !indexTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return indexTitle
+        }
+        return compactText(sqliteTitle, fallback: "Untitled")
+    }
+
+    private static func sessionIndexTitles() -> [String: String] {
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/session_index.jsonl")
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8) else {
+            return [:]
+        }
+
+        let decoder = JSONDecoder()
+        var titles: [String: String] = [:]
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let data = String(line).data(using: .utf8),
+                  let entry = try? decoder.decode(SessionIndexEntry.self, from: data),
+                  let title = entry.thread_name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else {
+                continue
+            }
+            titles[entry.id] = title
+        }
+        return titles
     }
 
     private static func tokenUsageSummary(from rolloutPath: String) -> LLMTokenUsageSummary? {

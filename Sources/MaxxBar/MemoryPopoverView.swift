@@ -335,8 +335,7 @@ struct AIUsageOverviewCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
-                Text("MAXX INSIGHTS")
-                    .sectionTitle()
+                InstantHelpTitle("MAXX INSIGHTS", help: maxxInsightsHelp)
                 Spacer()
                 Text(snapshot.activeTool ?? "Watching")
                     .font(.system(size: 11, weight: .semibold))
@@ -393,8 +392,7 @@ struct AIWorkflowMiniCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("AI FLOW")
-                    .sectionTitle()
+                InstantHelpTitle("AI FLOW", help: aiFlowHelp)
                 Spacer()
                 Text("\(snapshot.sessionsSevenDays) 7d")
                     .font(.system(size: 11, weight: .semibold))
@@ -692,8 +690,7 @@ struct LLMUsageLimitCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                Text(title ?? limit.name.uppercased())
-                    .sectionTitle()
+                InstantHelpTitle(title ?? limit.name.uppercased(), help: codexRunwayHelp)
                 Spacer()
                 if let resetCreditCount {
                     Text("\(resetCreditCount) resets")
@@ -734,9 +731,7 @@ struct DrawdownInsightCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                Text("DRAWDOWN INSIGHT")
-                    .sectionTitle()
-                    .help(drawdownInsightHelp)
+                InstantHelpTitle("DRAWDOWN INSIGHT", help: drawdownInsightHelp)
                 Spacer()
                 LLMQuotaHistoryRangeToggle(selection: $range)
             }
@@ -790,16 +785,13 @@ struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
-    @State private var localWindowsExpanded = false
     @State private var drawdownRange = LLMQuotaHistoryRange.sixHours
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("LOCAL DRAWDOWN")
-                        .sectionTitle()
-                        .help(localDrawdownHelp)
+                    InstantHelpTitle("LOCAL DRAWDOWN", help: localDrawdownHelp)
                     Spacer()
                     Button {
                         onSampleQuota?()
@@ -825,36 +817,8 @@ struct LLMLocalUsageCard: View {
             if !sessionTimelineSessions.isEmpty {
                 LLMSessionTimelineView(sessions: sessionTimelineSessions, range: drawdownRange)
             }
-
-            if !snapshot.localWindows.isEmpty {
-                DisclosureGroup(isExpanded: $localWindowsExpanded) {
-                    VStack(spacing: 7) {
-                        ForEach(snapshot.localWindows) { window in
-                            LLMLocalUsageWindowRow(window: window, maxTokens: maxTokens)
-                        }
-                    }
-                    .padding(.top, 4)
-                } label: {
-                    HStack {
-                        Text("LOCAL TOKENS")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
-                            .help(localTokensHelp)
-                        Spacer()
-                        Text("\(tokenCount(snapshot.localWeeklyTokens)) • \(snapshot.localWeeklyThreads) sessions")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
-                            .monospacedDigit()
-                    }
-                }
-                .accentColor(.accentBlue)
-            }
         }
         .sectionStyle()
-    }
-
-    private var maxTokens: UInt64 {
-        max(snapshot.localWindows.map(\.tokens).max() ?? 0, 1)
     }
 
     private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
@@ -1322,10 +1286,11 @@ struct LLMSessionTimelineView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
-                Text("SESSION TIMELINE")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color.accentBlue)
-                    .help(sessionTimelineHelp)
+                InstantHelpTitle(
+                    "SESSION TIMELINE",
+                    help: sessionTimelineHelp,
+                    font: .system(size: 11.5, weight: .semibold)
+                )
                 Spacer()
                 Text("\(sessions.count) sessions")
                     .font(.system(size: 10.5, weight: .semibold))
@@ -1536,8 +1501,7 @@ struct LLMAdvancedUsageCard: View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("TOP TOKEN USERS")
-                        .sectionTitle()
+                    InstantHelpTitle("TOP TOKEN USERS", help: topTokenUsersHelp)
                     Spacer()
                     LLMSessionModeToggle(selection: $sessionMode)
                 }
@@ -1558,9 +1522,12 @@ struct LLMAdvancedUsageCard: View {
                         .padding(.top, 4)
                 } label: {
                     HStack {
-                        Text("AVAILABLE DETAIL")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
+                        InstantHelpTitle(
+                            "AVAILABLE DETAIL",
+                            help: availableDetailHelp,
+                            font: .system(size: 11.5, weight: .semibold),
+                            color: .white.opacity(0.62)
+                        )
                         Spacer()
                         Text("\(snapshot.limits.count) limit groups")
                             .font(.system(size: 11.5, weight: .semibold))
@@ -1573,8 +1540,7 @@ struct LLMAdvancedUsageCard: View {
             .padding(.top, 6)
         } label: {
             HStack {
-                Text("ADVANCED")
-                    .sectionTitle()
+                InstantHelpTitle("ADVANCED", help: advancedHelp)
                 Spacer()
                 Text("\(snapshot.recentSessions.count) sessions")
                     .font(.system(size: 12, weight: .semibold))
@@ -3139,6 +3105,10 @@ private func localDrawdownUpdatedAt(_ value: Date?) -> String {
     return exactClockTime(value)
 }
 
+private let codexRunwayHelp = """
+Shows your live Codex quota windows from the usage API. The 5h bar is the short runway you feel during heavy work; the weekly bar shows the longer reset cycle, and reset credits appear when the API reports them.
+"""
+
 private let localDrawdownHelp = """
 Shows sampled Codex 5H remaining percentage from MaxxBar's local quota history. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
 """
@@ -3147,13 +3117,82 @@ private let sessionTimelineHelp = """
 Shows recent local Codex sessions in the selected drawdown window, newest first. Bar position is the session time range, thickness roughly follows token volume, and the tooltip gives the full session detail.
 """
 
-private let localTokensHelp = """
-Local Tokens are estimates from Codex's local thread metadata, not official billing. They help explain what may be driving runway drawdown by showing token volume, session counts, cache hits, output tokens, and rough cost estimates for recent windows.
-"""
-
 private let drawdownInsightHelp = """
 Summarizes the latest sampled runway drop from the local quota history. It is useful for seeing how quickly the 5H window moved, but exact crossing times are bounded by how often MaxxBar sampled the API.
 """
+
+private let maxxInsightsHelp = """
+Summarizes local AI activity MaxxBar has observed today: session count, inferred AI time, average session length, the current detected AI surface, and confidence in the context signal.
+"""
+
+private let aiFlowHelp = """
+Shows lightweight before -> AI -> after patterns from local app and site metadata. It helps answer which tools you use, what usually leads into AI, and where work tends to go afterward.
+"""
+
+private let topTokenUsersHelp = """
+Lists the local Codex sessions with the most token usage. Use this when runway drops faster than expected and you want to see which recent session likely drove the drawdown.
+"""
+
+private let availableDetailHelp = """
+Shows raw limit groups returned by the Codex usage API. This is mostly diagnostic detail for checking additional model-specific limits beyond the main Codex runway.
+"""
+
+private let advancedHelp = """
+Advanced keeps deeper local token/session diagnostics out of the main Runway view. Open it when you need session-level token users, cache estimates, or raw API limit detail.
+"""
+
+struct InstantHelpTitle: View {
+    let title: String
+    let help: String
+    var font: Font = .system(size: 13.5, weight: .medium)
+    var color: Color = .accentBlue
+    @State private var isHovered = false
+
+    init(
+        _ title: String,
+        help: String,
+        font: Font = .system(size: 13.5, weight: .medium),
+        color: Color = .accentBlue
+    ) {
+        self.title = title
+        self.help = help
+        self.font = font
+        self.color = color
+    }
+
+    var body: some View {
+        Text(title)
+            .font(font)
+            .foregroundStyle(color)
+            .contentShape(Rectangle())
+            .onHover { isHovered = $0 }
+            .overlay(alignment: .topLeading) {
+                if isHovered {
+                    Text(help)
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(width: 270, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.background.opacity(0.98))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 4)
+                        .offset(y: 18)
+                        .allowsHitTesting(false)
+                        .zIndex(100)
+                        .transition(.opacity)
+                }
+            }
+            .zIndex(isHovered ? 100 : 0)
+            .animation(.easeOut(duration: 0.08), value: isHovered)
+    }
+}
 
 extension View {
     func sectionStyle() -> some View {
