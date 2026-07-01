@@ -368,6 +368,7 @@ final class StatusTitleView: NSView {
     private var bottomItems = ["-", "-"]
     private let amberUsageColor = NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.18, alpha: 1.0)
     private let lowUsageColor = NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.62, alpha: 1.0)
+    private let criticalUnderlineColor = NSColor(calibratedRed: 1.0, green: 0.16, blue: 0.1, alpha: 1.0)
 
     override var isFlipped: Bool { true }
 
@@ -408,7 +409,7 @@ final class StatusTitleView: NSView {
                     .foregroundColor: itemColor
                 ]
             )
-            drawCentered(
+            let bottomRect = drawCentered(
                 bottomItems.indices.contains(index) ? bottomItems[index] : "",
                 x: x,
                 y: bottomY,
@@ -418,6 +419,9 @@ final class StatusTitleView: NSView {
                     .foregroundColor: itemColor
                 ]
             )
+            if shouldUnderlineColumn(at: index) {
+                drawUnderline(under: bottomRect)
+            }
         }
     }
 
@@ -437,15 +441,39 @@ final class StatusTitleView: NSView {
         return nil
     }
 
+    private func shouldUnderlineColumn(at index: Int) -> Bool {
+        guard index < 2,
+              bottomItems.indices.contains(index),
+              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")) else {
+            return false
+        }
+
+        return percent < 15
+    }
+
+    private func drawUnderline(under rect: NSRect) {
+        guard !rect.isEmpty else { return }
+        criticalUnderlineColor.setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = 1.4
+        let y = rect.maxY - 1
+        path.move(to: NSPoint(x: rect.minX, y: y))
+        path.line(to: NSPoint(x: rect.maxX, y: y))
+        path.stroke()
+    }
+
+    @discardableResult
     private func drawCentered(
         _ text: String,
         x: CGFloat,
         y: CGFloat,
         width: CGFloat,
         attributes: [NSAttributedString.Key: Any]
-    ) {
+    ) -> NSRect {
+        guard !text.isEmpty else { return .zero }
         let size = text.size(withAttributes: attributes)
         let rect = NSRect(x: x + (width - size.width) / 2, y: y, width: size.width, height: size.height)
         text.draw(in: rect, withAttributes: attributes)
+        return rect
     }
 }
