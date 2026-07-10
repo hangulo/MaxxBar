@@ -1,6 +1,6 @@
 # MaxxBar
 
-MaxxBar is a macOS menu bar companion for Codex runway, local AI usage insight, and machine context. It keeps the useful quota, token, memory, and process foundations from Menu Bar Stats, then points the product at a sharper question: how much AI runway is left, what local sessions are driving it, and where AI output is moving in your work.
+MaxxBar is a macOS menu bar companion for Codex runway, local AI usage insight, and machine context. It brings quota, token, memory, and workflow signals into one quiet daily surface, then points the product at a sharper question: how much AI runway is left, what local sessions are driving it, and where AI output is moving in your work.
 
 Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongoing release history.
 
