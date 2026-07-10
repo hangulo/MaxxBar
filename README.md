@@ -41,11 +41,14 @@ Memory.
 
 ## Current Features
 
-- Two-line menu bar status for AI runway and weekly reset day.
+- Two-line menu bar status for AI runway, weekly reset day, and meaningful AI insight events captured today.
 - Runway-first popover with Codex limits, reset credits, persistent local quota history, drawdown milestones, cache-token detail, token/session totals, and recent local session timelines.
 - Local AI activity logging for app/site metadata, AI surface detection, session duration estimates, before/after workflow paths, and nearby system-load context.
 - Maxx Moment capture for saving frustration or delight, optional local screenshot, current app/site, detected AI surface, quota/system state, and a user note.
 - Local HTML AI insights report with top tools, likely use cases, before/after apps, workflow paths, and a Sankey-style path visual.
+- Separate MaxxBar Hub with Tracework-aligned visual language and full Overview, AI Insights, Runway, Sessions, and Advanced destinations. The Hub is a superset of the dropdown, including live limits, drawdown history, session timeline, expandable session diagnostics, local usage windows, cost estimates, daily/weekly patterns, and confirmed AI output destinations.
+- Metadata-only Cmd+C/Cmd+V flow tracking that records source and destination context without reading or storing clipboard contents or typed text.
+- Start Deep Trace handoff that opens the Tracework Hub on demand while MaxxBar remains the always-on app.
 - Memory popover with pressure, memory breakdown, top processes, swap, and lighter-weight numeric values for scanability.
 - Grouped and raw process memory views with app icons.
 - CPU/GPU panel code with user/system history, per-core efficiency/performance load rings, grouped CPU processes, thermal summary, detailed temperatures, and uptime for advanced/debug builds.
@@ -143,14 +146,16 @@ AI activity metadata is stored locally in:
 
 ```text
 ~/Library/Application Support/MaxxBar/ai-activity.jsonl
+~/Library/Application Support/MaxxBar/ai-transfers.jsonl
 ~/Library/Application Support/MaxxBar/maxx-moments.jsonl
 ~/Library/Application Support/MaxxBar/maxx-moment-screenshots/
-~/Library/Application Support/MaxxBar/ai-usage-insights.html
+~/Library/Application Support/MaxxBar/maxxbar-hub.html
 ```
 
-The AI logs are local-only metadata. Screenshots are stored only when included
-in a Maxx Moment. MaxxBar does not store OCR output, full typed content, or
-cloud uploads.
+The AI logs are local-only metadata. Copy/paste events include app/site/title
+context and a static `no_clipboard_content` privacy marker, never clipboard
+contents. Screenshots are stored only when included in a Maxx Moment. MaxxBar
+does not store OCR output, typed text, or cloud uploads.
 
 Each sample records the sampled time, 5H remaining percentage, weekly remaining
 percentage, and current plan type when the Codex usage API reports one. The LLM

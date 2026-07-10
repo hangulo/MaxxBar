@@ -5,6 +5,7 @@ struct MemoryPopoverView: View {
     @ObservedObject var model: MemoryModel
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onStartDeepTrace: (() -> Void)?
     var fixedSize: Bool
     @State private var selectedPanel = StatsPanel.runway
 
@@ -12,12 +13,14 @@ struct MemoryPopoverView: View {
         model: MemoryModel,
         onPopOut: (() -> Void)? = nil,
         onQuit: (() -> Void)? = nil,
+        onStartDeepTrace: (() -> Void)? = nil,
         selectedPanel: StatsPanel = .runway,
         fixedSize: Bool = true
     ) {
         self.model = model
         self.onPopOut = onPopOut
         self.onQuit = onQuit
+        self.onStartDeepTrace = onStartDeepTrace
         self.fixedSize = fixedSize
         _selectedPanel = State(initialValue: selectedPanel)
     }
@@ -37,6 +40,7 @@ struct MemoryPopoverView: View {
                     snapshot: model.llmUsage,
                     quotaHistory: model.llmQuotaHistory,
                     onOpenAIReport: { model.openAIUsageReport() },
+                    onStartDeepTrace: onStartDeepTrace,
                     onPopOut: onPopOut,
                     onQuit: onQuit
                 )
@@ -59,6 +63,13 @@ struct MemoryPopoverView: View {
                     onQuit: onQuit
                 )
             }
+
+            ActionBarView(
+                onOpenHub: { model.openAIUsageReport() },
+                onStartDeepTrace: onStartDeepTrace,
+                onPopOut: onPopOut,
+                onQuit: onQuit
+            )
         }
         .padding(8)
         .frame(
@@ -133,7 +144,6 @@ struct MemoryPanelView: View {
 
             SwapView(snapshot: model.snapshot)
 
-            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 }
@@ -157,7 +167,6 @@ struct SensorsPanelView: View {
 
             MetricCard(title: "TEMPERATURE", rows: temperatureRows)
 
-            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 
@@ -186,7 +195,6 @@ struct CPUGPUPanelView: View {
             SensorSummaryRingsView(snapshot: sensors)
             MetricCard(title: "TEMPERATURE", rows: temperatureRows)
             MetricCard(title: "UPTIME", rows: [MetricRow(label: "", value: snapshot.uptime)])
-            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 
@@ -235,7 +243,6 @@ struct NetworkPanelView: View {
                 rows: [MetricRow(label: snapshot.pingTarget, value: snapshot.pingMilliseconds.map { "\($0)ms" } ?? "-")]
             )
             NetworkTotalsView(snapshot: snapshot)
-            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 }
@@ -245,6 +252,7 @@ struct AIUsagePanelView: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onOpenAIReport: (() -> Void)?
+    var onStartDeepTrace: (() -> Void)?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -253,12 +261,12 @@ struct AIUsagePanelView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 7) {
                     AIUsageOverviewCard(snapshot: aiUsage)
+                    AITransferCard(snapshot: aiUsage)
                     AIWorkflowMiniCard(snapshot: aiUsage)
                     LLMSessionTimelineCard(snapshot: snapshot)
                 }
             }
 
-            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 }
@@ -282,7 +290,6 @@ struct MaxxMomentsPanelView: View {
                 }
             }
 
-            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 }
@@ -303,7 +310,8 @@ struct LLMRunwayPanelView: View {
                         LLMUsageLimitCard(
                             limit: codexLimit,
                             title: "CODEX RUNWAY (\(planName(snapshot.planType)))",
-                            resetCreditCount: snapshot.resetCreditCount
+                            resetCreditCount: snapshot.resetCreditCount,
+                            resetCreditExpirations: snapshot.resetCreditExpirations
                         )
                     } else {
                         LLMUsageUnavailableCard(message: snapshot.error ?? "Codex usage unavailable")
@@ -315,7 +323,6 @@ struct LLMRunwayPanelView: View {
                 }
             }
 
-            ActionBarView(onPopOut: onPopOut, onQuit: onQuit)
         }
     }
 
@@ -368,6 +375,90 @@ struct AIUsageOverviewCard: View {
         .padding(.vertical, 6)
         .background(Color.background.opacity(0.35))
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+struct AITransferCard: View {
+    let snapshot: AIUsageSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                InstantHelpTitle("AI OUTPUT DESTINATIONS", help: "Tracks Cmd+C and Cmd+V as context metadata only. MaxxBar never reads or stores clipboard contents.")
+                Spacer()
+                Text("\(snapshot.pasteEventsToday) today")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.48))
+                    .monospacedDigit()
+            }
+
+            if snapshot.transferFlows.isEmpty {
+                Text("Copy from an AI surface and paste into a work app to reveal output flows.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.55))
+            } else {
+                ForEach(snapshot.transferFlows.prefix(3)) { flow in
+                    HStack(spacing: 5) {
+                        Text(trimmedText(flow.source, maxLength: 13))
+                        Image(systemName: "arrow.right")
+                            .foregroundStyle(Color.accentBlue)
+                        Text(trimmedText(flow.destination, maxLength: 13))
+                        Spacer(minLength: 3)
+                        Text("\(flow.count)x")
+                            .foregroundStyle(Color.accentBlue)
+                            .monospacedDigit()
+                    }
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .help("\(flow.useCase) · \(flow.confidence) confidence")
+                }
+            }
+
+            HStack(spacing: 6) {
+                transferMetric("Copy", "\(snapshot.copyEventsToday)")
+                transferMetric("Paste", "\(snapshot.pasteEventsToday)")
+                transferMetric("Insights", "\(snapshot.insightEventsToday)")
+            }
+
+            if let copiedFrom = snapshot.topCopiedFrom.first?.label {
+                contextRow("From", copiedFrom)
+            }
+            if let pastedInto = snapshot.topPastedInto.first?.label {
+                contextRow("To", pastedInto)
+            }
+        }
+        .sectionStyle()
+    }
+
+    private func transferMetric(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.42))
+            Text(value)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.82))
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(Color.background.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func contextRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.42))
+                .frame(width: 28, alignment: .leading)
+            Text(value)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -562,7 +653,7 @@ struct MiniSankeyView: View {
 
     private func linkWidth(for count: Int) -> CGFloat {
         let maxCount = max(paths.map(\.count).max() ?? 1, 1)
-        return min(max(3 + 10 * CGFloat(count) / CGFloat(maxCount), 4), 13)
+        return min(max(0.8 + 1.2 * CGFloat(count) / CGFloat(maxCount), 1), 2)
     }
 }
 
@@ -807,6 +898,8 @@ struct LLMUsageLimitCard: View {
     let limit: LLMUsageLimit
     var title: String?
     var resetCreditCount: Int? = nil
+    var resetCreditExpirations: [LLMResetCreditExpiration] = []
+    @State private var resetDetailsPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -818,13 +911,58 @@ struct LLMUsageLimitCard: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.58))
                         .monospacedDigit()
-                        .help("Available Codex reset credits reported by the live usage API.")
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.panelLift.opacity(0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            resetDetailsPresented.toggle()
+                        }
+                        .popover(isPresented: $resetDetailsPresented, arrowEdge: .top) {
+                            ResetCreditDetailsPopover(count: resetCreditCount, expirations: resetCreditExpirations)
+                        }
                 }
             }
             LLMUsageProgress(window: limit.primary)
             LLMUsageProgress(window: limit.secondary)
         }
         .sectionStyle()
+    }
+}
+
+struct ResetCreditDetailsPopover: View {
+    let count: Int
+    let expirations: [LLMResetCreditExpiration]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(count) reset \(count == 1 ? "credit" : "credits")")
+                .font(.system(size: 14, weight: .semibold))
+
+            if expirations.isEmpty {
+                Text("Codex reports the available count, but not per-credit expiration dates.")
+                    .font(.system(size: 12.5, weight: .regular))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("The 5h and weekly reset times are already shown on the runway bars.")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(Color.black.opacity(0.58))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(expirations) { expiration in
+                        Text(resetCreditExpirationLine(expiration))
+                            .font(.system(size: 12.5, weight: .regular))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .foregroundStyle(Color.black.opacity(0.86))
+        .padding(12)
+        .frame(width: 260, alignment: .leading)
+        .background(Color.white)
     }
 }
 
@@ -2275,8 +2413,8 @@ struct MemoryRunwayLane: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 9) {
                 Text(value)
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 22, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.9))
                     .monospacedDigit()
                     .frame(width: 74, alignment: .leading)
                 Text(title)
@@ -2305,13 +2443,14 @@ struct MemoryRunwayLane: View {
                     ForEach(markers, id: \.self) { marker in
                         let x = proxy.size.width * CGFloat(marker) / 100
                         Rectangle()
-                            .fill(Color.background.opacity(0.75))
-                            .frame(width: 1, height: 20)
-                            .position(x: x, y: 7)
+                            .fill(Color.background.opacity(0.58))
+                            .frame(width: 1, height: 12)
+                            .position(x: x, y: 6)
                     }
                 }
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .frame(height: 14)
+            .frame(height: 12)
 
             if !segments.isEmpty {
                 HStack(spacing: 8) {
@@ -2342,6 +2481,7 @@ struct MemoryRunwayLane: View {
                     .frame(width: max(width * CGFloat(max(segment.value, 0)), 0))
             }
         }
+        .frame(width: width, alignment: .leading)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
@@ -2966,12 +3106,24 @@ struct HistoryView: View {
 }
 
 struct ActionBarView: View {
+    var onOpenHub: (() -> Void)?
+    var onStartDeepTrace: (() -> Void)?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 9) {
+            VersionIndicatorView()
+
             Spacer()
+
+            if let onOpenHub {
+                IconActionButton(systemName: "rectangle.3.group", help: "Open MaxxBar Hub", action: onOpenHub)
+            }
+
+            if let onStartDeepTrace {
+                IconActionButton(systemName: "record.circle", help: "Start Deep Trace", action: onStartDeepTrace)
+            }
 
             if let onPopOut {
                 IconActionButton(systemName: "rectangle.on.rectangle", help: "Open as window", action: onPopOut)
@@ -2987,6 +3139,32 @@ struct ActionBarView: View {
         .padding(.vertical, 4)
         .background(Color.panel)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+struct VersionIndicatorView: View {
+    private var label: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let components = version.split(separator: ".")
+        let compact = components.prefix(2).joined(separator: ".")
+        return "v\(compact.isEmpty ? version : compact)"
+    }
+
+    private var fullLabel: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let build = info?["CFBundleVersion"] as? String
+        return build.flatMap { $0.isEmpty ? nil : "MaxxBar v\(version) · \($0)" } ?? "MaxxBar v\(version)"
+    }
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.44))
+            .monospacedDigit()
+            .lineLimit(1)
+            .help(fullLabel)
     }
 }
 
@@ -3526,6 +3704,18 @@ private func resetLabel(_ value: Date?) -> String {
     let formatter = RelativeDateTimeFormatter()
     formatter.unitsStyle = .short
     return "Resets \(formatter.localizedString(for: value, relativeTo: Date()))"
+}
+
+private func resetCreditExpirationLine(_ expiration: LLMResetCreditExpiration) -> String {
+    let dateFormatter = DateFormatter()
+    dateFormatter.dateStyle = .medium
+    dateFormatter.timeStyle = .short
+    let relativeFormatter = RelativeDateTimeFormatter()
+    relativeFormatter.unitsStyle = .full
+    let date = dateFormatter.string(from: expiration.expiresAt)
+    let relative = relativeFormatter.localizedString(for: expiration.expiresAt, relativeTo: Date())
+    let creditLabel = expiration.count == 1 ? "credit" : "credits"
+    return "\(expiration.count) \(creditLabel) expire \(date) (\(relative))"
 }
 
 private func relativeTime(_ value: Date?) -> String {

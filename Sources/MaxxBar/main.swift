@@ -130,6 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var detachedWindow: NSWindow?
     private var timer: Timer?
+    private let clipboardFlowMonitor = ClipboardFlowMonitor()
     private var currentPopoverPanel: StatsPanel = .runway
 
     init(shouldVerifyPopoverAction: Bool = false, shouldVerifyPopOutAction: Bool = false) {
@@ -140,13 +141,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         model.seedInitialMemorySnapshot()
+        startClipboardFlowMonitor()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.length = 68
+        item.length = 104
         if let button = item.button {
             button.title = ""
+            button.toolTip = statusToolTip()
             let titleView = StatusTitleView()
             titleView.translatesAutoresizingMaskIntoConstraints = false
             button.addSubview(titleView)
@@ -172,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.startClipboardFlowMonitor()
                 if self.isDetailedUIVisible {
                     self.refreshInBackground()
                 } else {
@@ -195,10 +199,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func startClipboardFlowMonitor() {
+        clipboardFlowMonitor.start { [weak self] eventType in
+            self?.model.recordClipboardEvent(eventType)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        clipboardFlowMonitor.stop()
+    }
+
     private func refreshInBackground() {
         model.refreshInBackground { [weak self] in
             guard let self else { return }
             self.statusTitleView?.setLines(self.statusTextLines())
+            self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
 
@@ -206,6 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.refreshStatusInBackground { [weak self] in
             guard let self else { return }
             self.statusTitleView?.setLines(self.statusTextLines())
+            self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
 
@@ -213,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.refreshLLMUsageInBackground(force: force) { [weak self] in
             guard let self else { return }
             self.statusTitleView?.setLines(self.statusTextLines())
+            self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
 
@@ -252,6 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model: model,
                 onPopOut: { [weak self] in self?.showDetachedWindow() },
                 onQuit: { NSApp.terminate(nil) },
+                onStartDeepTrace: { [weak self] in self?.model.startDeepTrace() },
                 selectedPanel: selectedPanel
             )
         )
@@ -265,9 +283,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return (
-            "\(hoursLeftLabel(codexLimit.primary?.resetAt)) \(weekdayLabel(codexLimit.secondary?.resetAt))",
-            "\(fiveHourRemaining)% \(weeklyRemaining)%"
+            "\(hoursLeftLabel(codexLimit.primary?.resetAt)) \(weekdayLabel(codexLimit.secondary?.resetAt)) AI",
+            "\(fiveHourRemaining)% \(weeklyRemaining)% \(model.aiUsage.sessionsToday)|\(aiTimeLabel(model.aiUsage.timeTodaySeconds))"
         )
+    }
+
+    private func aiTimeLabel(_ seconds: TimeInterval) -> String {
+        let minutes = max(Int(seconds / 60), 0)
+        if minutes >= 60 {
+            let hours = minutes / 60
+            let remainder = minutes % 60
+            return remainder == 0 ? "\(hours)h" : "\(hours)h\(remainder)"
+        }
+        return "\(minutes)m"
+    }
+
+    private func statusToolTip() -> String {
+        let usage = model.aiUsage
+        return """
+        Codex 5h remaining · weekly remaining
+        AI today: \(usage.sessionsToday) sessions · \(aiTimeLabel(usage.timeTodaySeconds)) inferred time
+        \(usage.copyEventsToday) copy · \(usage.pasteEventsToday) paste · \(usage.momentsToday) moments · \(usage.insightEventsToday) insight events
+        """
     }
 
     private func hoursLeftLabel(_ resetAt: Date?) -> String {
