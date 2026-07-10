@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MaxxBar"
 CONFIGURATION="${CONFIGURATION:-debug}"
 APP_DIR="${APP_DIR:-$ROOT_DIR/Dist.noindex/$APP_NAME.app}"
+APP_VERSION="${APP_VERSION:-0.1.0}"
+BUILD_VERSION="${BUILD_VERSION:-$(date +%m%d.%H%M)}"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -30,7 +32,7 @@ if [ -x "$BUILD_DIR/MaxxBarSensorHelper" ]; then
     cp "$BUILD_DIR/MaxxBarSensorHelper" "$RESOURCES_DIR/MaxxBarSensorHelper"
 fi
 
-cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
+cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -50,15 +52,17 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$BUILD_VERSION</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>MaxxBar observes Command-C and Command-V shortcuts to record source and destination metadata. It never reads or stores clipboard contents or typed text.</string>
 </dict>
 </plist>
 PLIST

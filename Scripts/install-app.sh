@@ -19,9 +19,15 @@ ditto "$STAGING_APP" "$INSTALL_APP"
 xattr -cr "$INSTALL_APP" 2>/dev/null || true
 codesign --force --sign - "$INSTALL_APP" >/dev/null 2>&1 || true
 
+if [ -e "$DESKTOP_LINK" ] && [ ! -L "$DESKTOP_LINK" ]; then
+    echo "Desktop path exists and is not a shortcut: $DESKTOP_LINK" >&2
+    exit 1
+fi
+
 if [ -L "$DESKTOP_LINK" ]; then
     rm -f "$DESKTOP_LINK"
 fi
+ln -s "$INSTALL_APP" "$DESKTOP_LINK"
 
 codesign --verify --deep --strict "$INSTALL_APP"
 echo "$INSTALL_APP"
