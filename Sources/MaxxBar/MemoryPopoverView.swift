@@ -96,7 +96,7 @@ enum StatsPanel: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static var visibleCases: [StatsPanel] {
-        [.runway, .llmUsage, .moments, .memory]
+        [.runway, .llmUsage, .memory, .moments]
     }
 }
 
@@ -3159,12 +3159,13 @@ struct VersionIndicatorView: View {
     }
 
     var body: some View {
-        Text(label)
-            .font(.system(size: 10.5, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.44))
-            .monospacedDigit()
-            .lineLimit(1)
-            .help(fullLabel)
+        ImmediateHelpPopover(help: fullLabel) {
+            Text(label)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.44))
+                .monospacedDigit()
+                .lineLimit(1)
+        }
     }
 }
 
@@ -3189,16 +3190,17 @@ struct IconActionButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.white.opacity(0.85))
-            .frame(width: 23, height: 20)
-                .background(Color.panelLift.opacity(0.92))
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        ImmediateHelpPopover(help: help) {
+            Button(action: action) {
+                Image(systemName: systemName)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 23, height: 20)
+                    .background(Color.panelLift.opacity(0.92))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
-        .help(help)
     }
 }
 
@@ -3806,18 +3808,23 @@ struct InstantHelpTitle: View {
     let help: String
     var font: Font = .system(size: 13.5, weight: .medium)
     var color: Color = .accentBlue
-    @State private var isHovered = false
+    var hoverDelay: TimeInterval = 0.65
+    @State private var isHoverPresented = false
+    @State private var isPinned = false
+    @State private var pendingHelpTask: DispatchWorkItem?
 
     init(
         _ title: String,
         help: String,
         font: Font = .system(size: 13.5, weight: .medium),
-        color: Color = .accentBlue
+        color: Color = .accentBlue,
+        hoverDelay: TimeInterval = 0.65
     ) {
         self.title = title
         self.help = help
         self.font = font
         self.color = color
+        self.hoverDelay = hoverDelay
     }
 
     var body: some View {
@@ -3825,18 +3832,71 @@ struct InstantHelpTitle: View {
             .font(font)
             .foregroundStyle(color)
             .contentShape(Rectangle())
-            .onHover { isHovered = $0 }
-            .popover(isPresented: $isHovered, arrowEdge: .top) {
-                Text(help)
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(width: 270, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(Color.background)
+            .onHover(perform: handleHover)
+            .onTapGesture {
+                pendingHelpTask?.cancel()
+                isHoverPresented = false
+                isPinned.toggle()
             }
+            .popover(
+                isPresented: Binding(
+                    get: { isHoverPresented || isPinned },
+                    set: { newValue in
+                        if !newValue {
+                            isHoverPresented = false
+                            isPinned = false
+                        }
+                    }
+                ),
+                arrowEdge: .top
+            ) {
+                HelpPopoverText(help: help)
+            }
+    }
+
+    private func handleHover(_ isHovered: Bool) {
+        pendingHelpTask?.cancel()
+        if isHovered {
+            let task = DispatchWorkItem {
+                isHoverPresented = true
+            }
+            pendingHelpTask = task
+            DispatchQueue.main.asyncAfter(deadline: .now() + hoverDelay, execute: task)
+        } else {
+            isHoverPresented = false
+        }
+    }
+}
+
+struct ImmediateHelpPopover<Content: View>: View {
+    let help: String
+    @ViewBuilder var content: Content
+    @State private var isPresented = false
+
+    var body: some View {
+        content
+            .contentShape(Rectangle())
+            .onHover { isPresented = $0 }
+            .popover(isPresented: $isPresented, arrowEdge: .top) {
+                HelpPopoverText(help: help, width: 210)
+            }
+    }
+}
+
+struct HelpPopoverText: View {
+    let help: String
+    var width: CGFloat = 270
+
+    var body: some View {
+        Text(help)
+            .font(.system(size: 11, weight: .regular))
+            .foregroundStyle(.white.opacity(0.92))
+            .lineSpacing(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: width, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color.background)
     }
 }
 
