@@ -4,23 +4,23 @@ Audit time: May 28, 2026, around 20:35 Pacific.
 
 ## Summary
 
-The memory totals and memory process list are broadly aligned with Activity Monitor and iStat Menus. CPU total user/system percentages are also coming from a valid macOS source, but per-process CPU can be displayed on two different scales. GPU, CPU die temperature, fan speed, and per-process network data are not available from the public APIs currently used by this app, so the UI should not present those as iStat-equivalent.
+The memory totals and memory process list are broadly aligned with Activity Monitor. CPU total user/system percentages also come from a valid macOS source, but per-process CPU can be displayed on two different scales. GPU, CPU die temperature, fan speed, and per-process network data are not available from the public APIs currently used by this app.
 
 ## Live Comparison
 
 | Area | App source | Reference checked | Result |
 | --- | --- | --- | --- |
-| Memory pressure | `memory_pressure -Q` equivalent | iStat history `memory.pressure` around 23% | Good match |
-| App/wired/compressed/free memory | `host_statistics64` plus physical memory | Activity Monitor memory tab and iStat history | Good match within sampling/rounding |
-| Swap | `sysctl vm.swapusage` | Activity Monitor and iStat `swap` history | Good match |
+| Memory pressure | `memory_pressure -Q` equivalent | Activity Monitor memory pressure | Good match |
+| App/wired/compressed/free memory | `host_statistics64` plus physical memory | Activity Monitor memory tab | Good match within sampling/rounding |
+| Swap | `sysctl vm.swapusage` | Activity Monitor swap usage | Good match |
 | Memory processes | `ps rss` grouped by app bundle | Activity Monitor/top process rows | Good match for Activity Monitor-style footprint rows |
-| CPU user/system | `host_statistics(HOST_CPU_LOAD_INFO)` deltas | Activity Monitor CPU total and iStat CPU history | Valid, but timing/smoothing differs |
-| CPU processes | `ps %CPU`, grouped by app bundle | Activity Monitor and iStat process display | Valid source, now exposes both raw and normalized scales |
-| CPU frequency | `sysctl hw.cpufrequency` | iStat CPU/GPU menu | Often unavailable on Apple Silicon, not iStat-equivalent |
-| CPU/GPU temperature | none/public API unavailable | iStat sensors | Requires helper/private telemetry |
-| GPU usage/memory/FPS | none/public API unavailable | iStat GPU history | Requires helper/private telemetry |
+| CPU user/system | `host_statistics(HOST_CPU_LOAD_INFO)` deltas | Activity Monitor CPU total | Valid, but timing/smoothing differs |
+| CPU processes | `ps %CPU`, grouped by app bundle | Activity Monitor process display | Valid source, now exposes both raw and normalized scales |
+| CPU frequency | `sysctl hw.cpufrequency` | System telemetry | Often unavailable on Apple Silicon |
+| CPU/GPU temperature | none/public API unavailable | Native helper | Requires helper/private telemetry |
+| GPU usage/memory/FPS | none/public API unavailable | Native helper | Requires helper/private telemetry |
 | Network throughput | `getifaddrs` interface counters | Activity Monitor data/sec | Interface total only, not per-process |
-| Per-process network | not implemented | iStat/network process view | Gap; needs `nettop`, NStat, or another collector |
+| Per-process network | not implemented | Activity Monitor network view | Gap; needs `nettop`, NStat, or another collector |
 
 ## CPU Scale Finding
 
@@ -33,7 +33,13 @@ cpuProcesses=Codex=2.6%,WindowServer=1.3%,MaxxBar=1.3%,Google Chrome=0.9%,Activi
 cpuProcessesRaw=Codex=35.8%,WindowServer=18.3%,MaxxBar=17.7%,Google Chrome=12.0%,Activity Monitor=9.0%
 ```
 
-Both process lists come from the same `ps %CPU` sample. The `cpuProcesses` values divide raw CPU by the 14 logical CPUs on this Mac, which is closer to an iStat-style share of the whole machine. The `cpuProcessesRaw` values are closer to Activity Monitor's process scale, where grouped helper processes can add up to large numbers and individual processes can exceed 100% on multicore systems.
+Both process lists come from the same `ps %CPU` sample. The `cpuProcesses` values divide raw CPU by the 14 logical CPUs to show a share of the whole machine. The `cpuProcessesRaw` values are closer to Activity Monitor's process scale, where grouped helper processes can add up to large numbers and individual processes can exceed 100% on multicore systems.
+
+## LLM Usage Sources
+
+Codex sessions are read from `~/.codex/state_5.sqlite` and their local rollout files. Claude sessions are read from JSONL transcripts under `~/.claude/projects` and `~/Library/Application Support/Claude/local-agent-mode-sessions`. Claude assistant records are deduplicated by request ID before input, cache creation/read, and output tokens are totaled, because one response can be written as multiple transcript records.
+
+Live Codex limits come from the existing Codex bearer credential and ChatGPT usage endpoint. Live Claude limits come from an existing Claude Code OAuth credential and Anthropic's OAuth usage endpoint. Neither credential is persisted by MaxxBar. Claude Desktop/Cowork can produce local transcripts without exposing a Claude Code OAuth credential, so session capture and live-limit availability are reported independently.
 
 ## LLM Quota History
 
@@ -53,19 +59,9 @@ The history file is a sampled log, not a continuous event stream. Threshold and
 exhaustion times are therefore observed sample times; the true crossing may have
 happened between samples.
 
-## iStat Data Available Locally
-
-iStat Menus stores history in:
-
-```text
-/Users/hector/Library/Application Support/iStat Menus 7/history/history.db
-```
-
-Recent 5-second rows showed CPU user/system, memory pressure, memory categories, and GPU processor/memory history. Sensor and network keys are stored but not directly labelable from the public schema seen here.
-
 ## Remaining Accuracy Gaps
 
-1. Add a privileged/helper telemetry path if CPU die temperature, fan RPM, CPU frequency, and GPU utilization need to match iStat.
+1. Extend the privileged/helper telemetry path if CPU die temperature, fan RPM, CPU frequency, and GPU utilization need broader coverage.
 2. Add true per-process network attribution before showing a process network list.
-3. Keep CPU process scale visible in the UI because iStat-style percentages and Activity Monitor-style raw percentages are both defensible but answer different questions.
+3. Keep CPU process scale visible in the UI because whole-machine share and Activity Monitor-style raw percentages answer different questions.
 4. Public IP and ping should either be implemented with explicit network calls or left as unavailable.

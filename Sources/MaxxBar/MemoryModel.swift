@@ -146,6 +146,18 @@ struct LLMUsageLimit: Identifiable, Equatable {
     var name: String
     var primary: LLMUsageWindow?
     var secondary: LLMUsageWindow?
+
+    var windows: [LLMUsageWindow] {
+        [primary, secondary].compactMap { $0 }
+    }
+
+    var shortWindow: LLMUsageWindow? {
+        windows.first { $0.windowSeconds < 604_800 }
+    }
+
+    var weeklyWindow: LLMUsageWindow? {
+        windows.first { $0.windowSeconds >= 604_800 }
+    }
 }
 
 struct LLMResetCreditExpiration: Identifiable, Equatable {
@@ -163,6 +175,7 @@ struct LLMLocalUsageWindow: Identifiable, Equatable {
 
 struct LLMUsageSession: Identifiable, Equatable {
     var id: String
+    var provider: String = "Codex"
     var title: String
     var projectName: String
     var modelName: String
@@ -174,7 +187,7 @@ struct LLMUsageSession: Identifiable, Equatable {
     var updatedAt: Date?
 
     var detail: String {
-        "\(projectName) • \(modelName)"
+        "\(provider) • \(projectName) • \(modelName)"
     }
 }
 
@@ -217,6 +230,11 @@ struct LLMTokenPricing: Equatable {
     static let gpt53Codex = LLMTokenPricing(label: "gpt-5.3-codex API", freshInputDollarsPerMillion: 1.75, cachedInputDollarsPerMillion: 0.175, outputDollarsPerMillion: 14.0)
     static let gpt51Codex = LLMTokenPricing(label: "gpt-5.1-codex API", freshInputDollarsPerMillion: 1.25, cachedInputDollarsPerMillion: 0.125, outputDollarsPerMillion: 10.0)
     static let codexMini = LLMTokenPricing(label: "codex-mini API", freshInputDollarsPerMillion: 1.5, cachedInputDollarsPerMillion: 0.375, outputDollarsPerMillion: 6.0)
+    static let claudeFable5 = LLMTokenPricing(label: "Claude Fable 5 API", freshInputDollarsPerMillion: 10.0, cachedInputDollarsPerMillion: 1.0, outputDollarsPerMillion: 50.0)
+    static let claudeOpus = LLMTokenPricing(label: "Claude Opus API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 25.0)
+    static let claudeSonnet5 = LLMTokenPricing(label: "Claude Sonnet 5 API (intro)", freshInputDollarsPerMillion: 2.0, cachedInputDollarsPerMillion: 0.2, outputDollarsPerMillion: 10.0)
+    static let claudeSonnet = LLMTokenPricing(label: "Claude Sonnet API", freshInputDollarsPerMillion: 3.0, cachedInputDollarsPerMillion: 0.3, outputDollarsPerMillion: 15.0)
+    static let claudeHaiku = LLMTokenPricing(label: "Claude Haiku API", freshInputDollarsPerMillion: 1.0, cachedInputDollarsPerMillion: 0.1, outputDollarsPerMillion: 5.0)
 
     var label: String
     var freshInputDollarsPerMillion: Double
@@ -225,6 +243,21 @@ struct LLMTokenPricing: Equatable {
 
     static func rates(for modelName: String) -> LLMTokenPricing {
         let model = modelName.lowercased()
+        if model.contains("fable") || model.contains("mythos") {
+            return .claudeFable5
+        }
+        if model.contains("opus") {
+            return .claudeOpus
+        }
+        if model.contains("sonnet-5") || model.contains("sonnet 5") {
+            return .claudeSonnet5
+        }
+        if model.contains("sonnet") {
+            return .claudeSonnet
+        }
+        if model.contains("haiku") {
+            return .claudeHaiku
+        }
         if model.hasPrefix("codex-mini") {
             return .codexMini
         }
@@ -348,8 +381,8 @@ private struct LLMQuotaActivitySignature: Equatable {
     var latestSessionUpdateSecond: Int?
 
     init(usage: LLMUsageSnapshot, limit: LLMUsageLimit) {
-        self.primaryRemainingPercent = limit.primary?.remainingPercent
-        self.weeklyRemainingPercent = limit.secondary?.remainingPercent
+        self.primaryRemainingPercent = limit.shortWindow?.remainingPercent
+        self.weeklyRemainingPercent = limit.weeklyWindow?.remainingPercent
         self.planType = usage.planType
         self.localFiveHourTokens = usage.localFiveHourTokens
         self.localWeeklyTokens = usage.localWeeklyTokens
@@ -377,6 +410,7 @@ struct LLMUsageSnapshot: Equatable {
     var recentSessions: [LLMUsageSession]
     var topWeeklySessions: [LLMUsageSession]
     var error: String?
+    var providerErrors: [String: String] = [:]
 }
 
 struct AIUsageCounter: Identifiable, Equatable {
@@ -401,6 +435,26 @@ struct AITransferFlow: Identifiable, Equatable {
     let useCase: String
     let count: Int
     let confidence: String
+}
+
+struct AIProviderUsageSummary: Identifiable, Equatable {
+    var id: String { provider }
+    let provider: String
+    let sessionsToday: Int
+    let sessionsSevenDays: Int
+    let timeTodaySeconds: TimeInterval
+    let timeSevenDaysSeconds: TimeInterval
+    let averageSessionSeconds: TimeInterval
+    let contextConfidence: String
+    let topTools: [AIUsageCounter]
+    let topBeforeApps: [AIUsageCounter]
+    let topAfterApps: [AIUsageCounter]
+    let workflowPaths: [AIWorkflowPath]
+    let copyEventsToday: Int
+    let pasteEventsToday: Int
+    let topCopiedFrom: [AIUsageCounter]
+    let topPastedInto: [AIUsageCounter]
+    let transferFlows: [AITransferFlow]
 }
 
 struct MaxxMomentSummary: Identifiable, Equatable {
@@ -439,9 +493,10 @@ struct AIUsageSnapshot: Equatable {
     var lastMomentAt: Date?
     var recentMoments: [MaxxMomentSummary]
     var lastError: String?
+    var providerSummaries: [AIProviderUsageSummary] = []
 
     var insightEventsToday: Int {
-        sessionsToday + copyEventsToday + pasteEventsToday + momentsToday
+        sessionsToday + copyEventsToday + pasteEventsToday
     }
 }
 
@@ -478,6 +533,7 @@ final class MemoryModel: ObservableObject {
     private var isRefreshing = false
     private var isRefreshingStatus = false
     private var isRefreshingLLMUsage = false
+    private var isGeneratingAIReport = false
     private static let llmQuotaHistoryLimit = 4_320
 
     init() {
@@ -661,8 +717,19 @@ final class MemoryModel: ObservableObject {
     }
 
     func openAIUsageReport() {
-        guard let url = AIUsageReader.writeReport() else { return }
+        guard let url = AIUsageReader.prepareReportForOpening() else { return }
         NSWorkspace.shared.open(url)
+        guard !isGeneratingAIReport else { return }
+        isGeneratingAIReport = true
+        Task.detached(priority: .utility) {
+            let refreshedURL = AIUsageReader.writeReport()
+            _ = await MainActor.run {
+                self.isGeneratingAIReport = false
+                if let refreshedURL {
+                    NSWorkspace.shared.open(refreshedURL)
+                }
+            }
+        }
     }
 
     func recordClipboardEvent(_ eventType: String) {
@@ -745,8 +812,8 @@ final class MemoryModel: ObservableObject {
         llmQuotaHistory.append(
             LLMQuotaHistorySample(
                 sampledAt: now,
-                primaryRemainingPercent: limit.primary?.remainingPercent,
-                weeklyRemainingPercent: limit.secondary?.remainingPercent,
+                primaryRemainingPercent: limit.shortWindow?.remainingPercent,
+                weeklyRemainingPercent: limit.weeklyWindow?.remainingPercent,
                 planType: llmUsage.planType
             )
         )
@@ -1040,7 +1107,7 @@ extension NetworkSnapshot {
         publicIP: nil,
         ipAddresses: [],
         ethernetConnected: false,
-        pingTarget: "istatmenus.app",
+        pingTarget: "example.com",
         pingMilliseconds: nil,
         uploadBytesPerSecond: 0,
         downloadBytesPerSecond: 0,
@@ -1063,7 +1130,7 @@ extension NetworkSnapshot {
             publicIP: "11.22.33.44",
             ipAddresses: ["192.168.6.36"],
             ethernetConnected: false,
-            pingTarget: "istatmenus.app",
+            pingTarget: "example.com",
             pingMilliseconds: 22,
             uploadBytesPerSecond: 467_000,
             downloadBytesPerSecond: 496_000,
@@ -1200,7 +1267,7 @@ extension LLMUsageSnapshot {
                 title: "CPU/GPU panel",
                 projectName: "MaxxBar",
                 modelName: "GPT-5 Codex",
-                preview: "Compared CPU and GPU data with iStat style panels.",
+                preview: "Compared CPU and GPU data with system monitoring panels.",
                 rolloutPath: "",
                 tokens: 58_700_000,
                 tokenUsage: LLMTokenUsageSummary(inputTokens: 47_000_000, cachedInputTokens: 30_000_000, outputTokens: 7_400_000, reasoningOutputTokens: 4_300_000, totalTokens: 58_700_000, turnCount: 19),
@@ -1684,15 +1751,11 @@ enum SensorReader {
     static func read() -> SensorSnapshot {
         let battery = readBatteryTelemetry()
         let native = NativeSensorCache.read()
-        let iStat = IStatSensorHistory.read()
-        let batteryTemperature = battery.temperatureCelsius ?? native?.temperature(label: "Battery") ?? iStat.temperature(label: "Battery")
-        let nativeFans = native?.fanReadings ?? []
-        let fanReadings = nativeFans.isEmpty ? iStat.fanReadings : nativeFans
+        let batteryTemperature = battery.temperatureCelsius ?? native?.temperature(label: "Battery")
+        let fanReadings = native?.fanReadings ?? []
         let maxFanRPM = fanReadings.map(\.rpm).max()
         let fanPercent = maxFanRPM.map { $0 > 0 ? 100 : 0 }
-        let preferredTemperatures = native?.temperatureReadings.isEmpty == false
-            ? native?.temperatureReadings ?? []
-            : iStat.temperatureReadings
+        let preferredTemperatures = native?.temperatureReadings ?? []
         let temperatureReadings = preferredTemperatures.isEmpty
             ? batteryTemperature.map { [TemperatureReading(label: "Battery", celsius: $0)] } ?? []
             : preferredTemperatures.map { reading in
@@ -1702,8 +1765,8 @@ enum SensorReader {
             }
 
         return SensorSnapshot(
-            cpuTemperature: native?.cpuTemperatureCelsius ?? iStat.temperature(label: "CPU Performance Cores") ?? iStat.temperature(label: "CPU Efficiency Cores"),
-            gpuTemperature: native?.gpuTemperatureCelsius ?? iStat.temperature(label: "Graphics"),
+            cpuTemperature: native?.cpuTemperatureCelsius,
+            gpuTemperature: native?.gpuTemperatureCelsius,
             batteryTemperature: batteryTemperature,
             fanPercent: fanPercent,
             fanRPM: maxFanRPM,
@@ -1839,90 +1902,6 @@ private struct NativeSensorCache: Codable {
     }
 }
 
-private struct IStatSensorHistory {
-    let temperatureReadings: [TemperatureReading]
-    let fanReadings: [FanReading]
-
-    func temperature(label: String) -> Double? {
-        temperatureReadings.first { $0.label == label }?.celsius
-    }
-
-    static func read() -> IStatSensorHistory {
-        let path = NSString(string: "~/Library/Application Support/iStat Menus 7/history/history.db").expandingTildeInPath
-        guard FileManager.default.fileExists(atPath: path) else {
-            return IStatSensorHistory(temperatureReadings: [], fanReadings: [])
-        }
-
-        let query = """
-        with latest as (select max(time) t from sensors where interval=5)
-        select key, value from sensors, latest where time=t and interval=5 order by key;
-        """
-        let values = sqliteValues(databasePath: path, query: query)
-
-        let temperatureMap: [(Int, String)] = [
-            (24, "Airflow"),
-            (7, "Battery"),
-            (18, "CPU Efficiency Cores"),
-            (19, "CPU Performance Cores"),
-            (30, "Graphics"),
-            (8, "Palm Rest"),
-            (50, "SSD"),
-            (9, "Wi-Fi")
-        ]
-        let temperatures = temperatureMap.compactMap { key, label -> TemperatureReading? in
-            guard let value = values[key], value > 0, value < 130 else { return nil }
-            return TemperatureReading(label: label, celsius: value)
-        }
-
-        let fanMap: [(Int, String)] = [
-            (48, "Left Fan"),
-            (49, "Right Fan")
-        ]
-        let fans = fanMap.compactMap { key, label -> FanReading? in
-            guard let value = values[key], value >= 0, value < 10_000 else { return nil }
-            return FanReading(label: label, rpm: Int(value.rounded()))
-        }
-
-        return IStatSensorHistory(temperatureReadings: temperatures, fanReadings: fans)
-    }
-
-    private static func sqliteValues(databasePath: String, query: String) -> [Int: Double] {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        task.arguments = [databasePath, query]
-
-        let output = Pipe()
-        task.standardOutput = output
-        task.standardError = Pipe()
-
-        do {
-            try task.run()
-        } catch {
-            return [:]
-        }
-
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        guard task.terminationStatus == 0,
-              let text = String(data: data, encoding: .utf8) else {
-            return [:]
-        }
-
-        var values: [Int: Double] = [:]
-        for line in text.split(separator: "\n") {
-            let parts = line.split(separator: "|")
-            guard parts.count == 2,
-                  let key = Int(parts[0]),
-                  let value = Double(parts[1]) else {
-                continue
-            }
-            values[key] = value
-        }
-
-        return values
-    }
-}
-
 enum NetworkReader {
     struct NetworkCounters: Equatable {
         let interfaceName: String
@@ -1966,7 +1945,7 @@ enum NetworkReader {
             publicIP: nil,
             ipAddresses: sortedAddresses(primary.addresses),
             ethernetConnected: ethernetConnected(in: interfaces),
-            pingTarget: "istatmenus.app",
+            pingTarget: "example.com",
             pingMilliseconds: nil,
             uploadBytesPerSecond: rates.upload,
             downloadBytesPerSecond: rates.download,
@@ -2344,6 +2323,67 @@ enum AIUsageReader {
         }
     }
 
+    static func prepareReportForOpening() -> URL? {
+        guard let url = reportURL else { return nil }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try openingPlaceholderHTML(for: url).write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    private static func openingPlaceholderHTML(for url: URL) -> String {
+        let modifiedAt = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
+        let context: String
+        if let modifiedAt {
+            context = "Last generated \(relativeReportAge(modifiedAt)) ago. MaxxBar is collecting current Codex and Claude usage, local sessions, and transfer flows now."
+        } else {
+            context = "No local Hub has been generated yet. MaxxBar is collecting current Codex and Claude usage, local sessions, and transfer flows now."
+        }
+        return """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta http-equiv="refresh" content="3">
+          <title>Refreshing MaxxBar Hub</title>
+          <style>
+            :root{color-scheme:dark;--bg:#111316;--panel:#202634;--text:#f4f7fb;--muted:#a7b0bd;--blue:#0080ff;--line:#343c48}
+            body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
+            main{width:min(560px,calc(100vw - 36px));background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px}
+            .brand{display:flex;align-items:center;gap:12px;margin-bottom:18px;font-weight:800}.brand img{width:40px;height:40px;border-radius:10px}
+            h1{margin:0 0 8px;font-size:24px}p{margin:0 0 14px;color:var(--muted)}.bar{height:7px;background:#151923;border-radius:999px;overflow:hidden;margin-top:18px}
+            .bar span{display:block;height:100%;width:42%;background:var(--blue);border-radius:999px;animation:load 1.35s ease-in-out infinite alternate}@keyframes load{to{transform:translateX(140%)}}
+            small{display:block;margin-top:14px;color:var(--muted)}
+          </style>
+        </head>
+        <body>
+          <main>
+            <div class="brand"><img src="maxxbar-hub-icon.png" alt="">MaxxBar</div>
+            <h1>Refreshing the Hub</h1>
+            <p>\(html(context))</p>
+            <p>This page opens immediately so the menu bar does not wait on live usage data. It will refresh automatically as soon as the full Hub is ready.</p>
+            <div class="bar"><span></span></div>
+            <small>Reading local metadata only. Clipboard contents and typed text are not stored.</small>
+          </main>
+        </body>
+        </html>
+        """
+    }
+
+    private static func relativeReportAge(_ date: Date) -> String {
+        let seconds = max(Int(Date().timeIntervalSince(date)), 0)
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 48 { return "\(hours)h" }
+        return "\(hours / 24)d"
+    }
+
     private static func record(
         from context: ActiveContext,
         memory: MemorySnapshot,
@@ -2365,8 +2405,8 @@ enum AIUsageReader {
             memoryUsedPercent: memory.usedPercent,
             cpuUserPercent: cpuGPU.cpuUserPercent,
             cpuSystemPercent: cpuGPU.cpuSystemPercent,
-            codexFiveHourRemainingPercent: codexLimit?.primary?.remainingPercent,
-            codexWeeklyRemainingPercent: codexLimit?.secondary?.remainingPercent
+            codexFiveHourRemainingPercent: codexLimit?.shortWindow?.remainingPercent,
+            codexWeeklyRemainingPercent: codexLimit?.weeklyWindow?.remainingPercent
         )
     }
 
@@ -2399,7 +2439,7 @@ enum AIUsageReader {
             timeSevenDaysSeconds: inferredAISeconds(aiRecords),
             averageSessionSeconds: sevenDaySessions.isEmpty ? 0 : inferredAISeconds(aiRecords) / Double(sevenDaySessions.count),
             contextConfidence: confidence,
-            topTools: counters(aiRecords.compactMap(\.tool), limit: 4),
+            topTools: counters(aiRecords.compactMap(canonicalTool), limit: 4),
             topBeforeApps: counters(workflows.map(\.before), limit: 4),
             topAfterApps: counters(workflows.map(\.after), limit: 4),
             workflowPaths: topWorkflowPaths(workflows),
@@ -2423,8 +2463,79 @@ enum AIUsageReader {
                         screenshotPath: $0.screenshotPath
                     )
                 },
-            lastError: error
+            lastError: error,
+            providerSummaries: ["Codex", "Claude"].map {
+                providerSummary(
+                    provider: $0,
+                    records: records,
+                    workflows: workflows,
+                    transfers: transfers,
+                    startOfDay: startOfDay
+                )
+            }
         )
+    }
+
+    private static func providerSummary(
+        provider: String,
+        records: [AIActivityRecord],
+        workflows: [AIWorkflowPath],
+        transfers: [AITransferRecord],
+        startOfDay: Date
+    ) -> AIProviderUsageSummary {
+        let providerRecords = records.filter { providerMatches(provider, record: $0) }
+        let todayRecords = providerRecords.filter { $0.ts >= startOfDay }
+        let providerSessions = sessions(from: providerRecords)
+        let todaySessions = sessions(from: todayRecords)
+        let providerWorkflows = workflows.filter { providerMatches(provider, tool: nil, surface: $0.surface) }
+        let providerTransfers = transfers.filter { providerMatches(provider, transfer: $0) }
+        let todayTransfers = providerTransfers.filter { $0.ts >= startOfDay }
+        let sevenDayTime = inferredAISeconds(providerRecords)
+
+        return AIProviderUsageSummary(
+            provider: provider,
+            sessionsToday: todaySessions.count,
+            sessionsSevenDays: providerSessions.count,
+            timeTodaySeconds: inferredAISeconds(todayRecords),
+            timeSevenDaysSeconds: sevenDayTime,
+            averageSessionSeconds: providerSessions.isEmpty ? 0 : sevenDayTime / Double(providerSessions.count),
+            contextConfidence: contextConfidence(workflows: providerWorkflows, aiRecords: providerRecords),
+            topTools: counters(providerRecords.compactMap(canonicalTool), limit: 4),
+            topBeforeApps: counters(providerWorkflows.map(\.before), limit: 4),
+            topAfterApps: counters(providerWorkflows.map(\.after), limit: 4),
+            workflowPaths: topWorkflowPaths(providerWorkflows),
+            copyEventsToday: todayTransfers.filter { $0.eventType == "copy" }.count,
+            pasteEventsToday: todayTransfers.filter { $0.eventType == "paste" }.count,
+            topCopiedFrom: counters(providerTransfers.filter { $0.eventType == "copy" }.map(transferSourceLabel), limit: 4),
+            topPastedInto: counters(providerTransfers.filter { $0.eventType == "paste" }.map(transferDestinationLabel), limit: 4),
+            transferFlows: topTransferFlows(providerTransfers)
+        )
+    }
+
+    private static func providerMatches(_ provider: String, tool: String?, surface: String?) -> Bool {
+        let value = [tool, surface].compactMap { $0?.lowercased() }.joined(separator: " ")
+        if provider == "Claude" {
+            return value.contains("claude")
+        }
+        return value.contains("codex")
+    }
+
+    private static func providerMatches(_ provider: String, record: AIActivityRecord) -> Bool {
+        if provider == "Codex", record.bundleID.caseInsensitiveCompare("com.openai.codex") == .orderedSame {
+            return true
+        }
+        return providerMatches(provider, tool: record.tool, surface: record.surface)
+    }
+
+    private static func providerMatches(_ provider: String, transfer: AITransferRecord) -> Bool {
+        if provider == "Codex", transfer.sourceBundleID?.caseInsensitiveCompare("com.openai.codex") == .orderedSame {
+            return true
+        }
+        return providerMatches(provider, tool: transfer.sourceTool, surface: transfer.sourceSurface)
+    }
+
+    private static func canonicalTool(_ record: AIActivityRecord) -> String? {
+        record.bundleID.caseInsensitiveCompare("com.openai.codex") == .orderedSame ? "Codex" : record.tool
     }
 
     private static func activeContext() -> ActiveContext {
@@ -2433,7 +2544,7 @@ enum AIUsageReader {
         let bundleID = app?.bundleIdentifier ?? ""
         let browser = browserContext(appName: appName, bundleID: bundleID)
         let site = browser.url.flatMap(AITaxonomy.siteLabel)
-        let toolInfo = AITaxonomy.tool(appName: appName, url: browser.url)
+        let toolInfo = AITaxonomy.tool(appName: appName, bundleID: bundleID, url: browser.url)
         let useCase = AITaxonomy.useCase(before: appName, surface: toolInfo.surface, after: site)
         return ActiveContext(
             app: site ?? appName,
@@ -2516,7 +2627,9 @@ enum AIUsageReader {
         for run in aiRuns(in: sorted) {
             let before = nearestNonAI(in: sorted, from: run.start, step: -1, within: 600) ?? "Start"
             let after = nearestNonAI(in: sorted, from: run.end, step: 1, within: 600) ?? "End"
-            let surface = sorted[run.start].surface ?? sorted[run.start].tool ?? "AI"
+            let surface = sorted[run.start].bundleID.caseInsensitiveCompare("com.openai.codex") == .orderedSame
+                ? "Codex client"
+                : (sorted[run.start].surface ?? sorted[run.start].tool ?? "AI")
             let useCase = useCase(before: before, surface: surface, after: after)
             let key = "\(before)|\(surface)|\(after)|\(useCase)"
             var current = counts[key] ?? (before, surface, after, useCase, 0)
@@ -2756,24 +2869,26 @@ enum AIUsageReader {
         let aiRecords = records.filter { $0.tool != nil }
         let startOfDay = Calendar.current.startOfDay(for: Date())
         let todayAIRecords = aiRecords.filter { $0.ts >= startOfDay }
-        let workflows = topWorkflowPaths(workflowCounters(from: records))
-        let transferFlows = topTransferFlows(transfers)
-        let topTools = counters(aiRecords.compactMap(\.tool), limit: 8)
-        let todayTools = counters(todayAIRecords.compactMap(\.tool), limit: 8)
-        let before = counters(workflows.map(\.before), limit: 8)
-        let after = counters(workflows.map(\.after), limit: 8)
+        let topTools = counters(aiRecords.compactMap(canonicalTool), limit: 8)
+        let todayTools = counters(todayAIRecords.compactMap(canonicalTool), limit: 8)
         let useCases = counters(aiRecords.map(\.useCase), limit: 8)
         let outputDestinations = counters(transfers.filter { $0.eventType == "paste" && $0.sourceTool != nil }.map(transferDestinationLabel), limit: 8)
         let totalAISeconds = inferredAISeconds(aiRecords)
         let sessionCount = sessions(from: records).count
         let todaySessionCount = sessions(from: todayAIRecords).count
-        let todayMomentCount = moments.filter { $0.ts >= startOfDay }.count
         let todayTransferEventCount = transfers.filter { $0.ts >= startOfDay }.count
-        let insightEventCount = todaySessionCount + todayMomentCount + todayTransferEventCount
+        let insightEventCount = todaySessionCount + todayTransferEventCount
         let latest = records.sorted { $0.ts < $1.ts }.last
         let codexLimit = llmUsage.limits.first(where: { $0.name == "Codex" }) ?? llmUsage.limits.first
-        let remaining = codexLimit?.primary?.remainingPercent
+        let remaining = codexLimit?.shortWindow?.remainingPercent ?? codexLimit?.weeklyWindow?.remainingPercent
         let runwayLabel = remaining.map { $0 <= 10 ? "Critical" : ($0 <= 25 ? "Watch" : "Healthy") } ?? "Unavailable"
+        let runwayValue = llmUsage.limits
+            .filter { $0.name == "Codex" || $0.name == "Claude" }
+            .compactMap { limit -> String? in
+                guard let value = limit.shortWindow?.remainingPercent ?? limit.weeklyWindow?.remainingPercent else { return nil }
+                return "\(limit.name) \(value)%"
+            }
+            .joined(separator: " · ")
 
         return """
         <!doctype html>
@@ -2784,72 +2899,103 @@ enum AIUsageReader {
           <title>MaxxBar Hub</title>
           <link rel="icon" type="image/png" href="maxxbar-hub-icon.png">
           <style>
-            :root{color-scheme:dark;--bg:#111315;--panel:#181b1e;--panel2:#21252a;--text:#f0f2f5;--muted:#b8bec7;--line:#2d3135;--line2:#3a3f46;--accent:#c8f060;--top:rgba(17,19,21,.92)}
-            :root[data-theme=light]{color-scheme:light;--bg:#faf8f3;--panel:#fff;--panel2:#f3f0e9;--text:#20231f;--muted:#646a61;--line:#ddd9cf;--line2:#cbc6ba;--accent:#6c850d;--top:rgba(250,248,243,.92)}
+            :root{color-scheme:dark;--bg:#111315;--panel:#181b1e;--panel2:#21252a;--text:#f0f2f5;--muted:#b8bec7;--line:#2d3135;--line2:#3a3f46;--accent:#0080ff;--top:rgba(17,19,21,.92)}
+            :root[data-theme=light]{color-scheme:light;--bg:#faf8f3;--panel:#fff;--panel2:#f3f0e9;--text:#20231f;--muted:#646a61;--line:#ddd9cf;--line2:#cbc6ba;--accent:#0078f0;--top:rgba(250,248,243,.92)}
             *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;line-height:1.45}
             .topline{position:sticky;top:0;z-index:10;min-height:64px;display:flex;align-items:center;gap:18px;padding:0 30px;background:var(--top);border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}.brand{display:flex;align-items:center;gap:10px;font-weight:750}.brand-logo{width:38px;height:38px;display:block;border-radius:10px;object-fit:cover}.tabs{display:flex;gap:4px}.tabs a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:7px;font-size:12px;font-weight:700}.tabs a:hover{background:var(--panel2);color:var(--text)}.spacer{flex:1}.theme{border:1px solid var(--line2);background:var(--panel2);color:var(--text);border-radius:8px;padding:7px 10px;cursor:pointer}.content{max-width:1280px;margin:auto;padding:28px 30px 48px}
-            h1{margin:0 0 4px;font-size:30px}h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 12px;color:var(--accent)}
-            .sub{color:var(--muted);margin:0 0 22px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.card span{display:block;color:var(--muted);font-size:12px}.card strong{display:block;font-size:24px;margin-top:4px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}.list div{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid var(--line)}.list div:last-child{border-bottom:0}.list span{color:var(--muted);font-variant-numeric:tabular-nums}.paths div,.ai-path-top div{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}.paths em,.ai-path-top em{font:700 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;font-style:normal;color:var(--muted)}.paths span,.ai-path-top span{color:var(--accent);font-weight:900}.ai-path-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.ai-path-head h2{margin:0 0 6px}.ai-path-head p{margin:0;color:var(--muted)}.ai-path-head strong{font:800 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:rgba(200,240,96,.10);border-radius:999px;padding:7px 10px;white-space:nowrap}.ai-sankey-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel2);padding:10px}.ai-sankey{display:block;min-width:860px;width:100%;height:auto}.ai-sankey-stage{fill:var(--muted);font:800 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase}.ai-sankey-link{fill:none;stroke:var(--accent);stroke-linecap:round;opacity:.18}.ai-sankey-link:hover{opacity:.38}.ai-sankey-node{fill:var(--accent);opacity:.58}.ai-sankey-icon text{font:800 7px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0}.ai-sankey-label{fill:var(--text);font:600 12px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.ai-sankey-count{fill:var(--muted);font:650 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.ai-path-top{display:grid;gap:2px;margin-top:12px}.footer{margin-top:20px;color:var(--muted);font-size:12px}.flows{display:grid;gap:8px}.flow{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr) auto;gap:8px;align-items:center;padding:10px;background:var(--panel2);border-radius:7px}.arrow{color:var(--accent);font-weight:900}.badge{font:750 10px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent)}@media(max-width:760px){.topline{padding:12px 18px;flex-wrap:wrap}.tabs{order:3;width:100%;overflow:auto}.content{padding:22px 18px}.grid,.two{grid-template-columns:1fr 1fr}.flow{grid-template-columns:1fr 20px 1fr}.flow .badge{grid-column:1/-1}}
-            .tabs button{border:0;background:transparent;color:var(--muted);padding:8px 11px;border-radius:7px;font:700 12px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;cursor:pointer;white-space:nowrap}.tabs button:hover{background:var(--panel2);color:var(--text)}.tabs button.active{background:var(--accent);color:#15170f}.hub-page{display:none}.hub-page.active{display:block}.page-head{margin:0 0 22px;padding-bottom:18px;border-bottom:1px solid var(--line)}.page-head h1{font-size:32px;margin:0 0 6px}.page-head p{margin:0;color:var(--muted);max-width:760px}.page-kicker{display:block;color:var(--accent);font:800 11px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase;margin-bottom:7px}.panel{margin-bottom:18px}.meter{height:8px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:7px 0 4px}.meter span{display:block;height:100%;background:var(--accent);border-radius:99px}.metric-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(160px,2fr) auto;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}.metric-row:last-child{border-bottom:0}.metric-row small,.detail-grid dt{color:var(--muted)}.metric-row strong,.num{font-variant-numeric:tabular-nums}.timeline{display:grid;gap:8px}.timeline-row{display:grid;grid-template-columns:minmax(150px,240px) 1fr auto;gap:12px;align-items:center}.timeline-label strong,.timeline-label small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.timeline-label small{color:var(--muted)}.timeline-track{position:relative;height:18px;background:var(--panel2);border-radius:5px;overflow:hidden}.timeline-bar{position:absolute;top:3px;height:12px;min-width:3px;background:var(--accent);border-radius:4px}.session-list{display:grid;gap:9px}.session{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}.session summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;padding:14px;cursor:pointer;list-style:none}.session summary::-webkit-details-marker{display:none}.session summary strong,.session summary small{display:block}.session summary small{color:var(--muted);margin-top:3px}.session[open] summary{border-bottom:1px solid var(--line)}.session-body{padding:14px}.detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 18px;margin:0}.detail-grid div{padding:7px 0;border-bottom:1px solid var(--line)}.detail-grid dt{font-size:11px}.detail-grid dd{margin:3px 0 0;font-weight:650;word-break:break-word}.preview{margin:14px 0 0;padding:12px;background:var(--panel2);border-radius:7px;color:var(--muted);white-space:pre-wrap}.data-table{width:100%;border-collapse:collapse}.data-table th,.data-table td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line)}.data-table th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}.data-table td.num,.data-table th.num{text-align:right}.quota-chart{width:100%;height:auto;display:block;background:var(--panel2);border-radius:8px}.quota-primary{fill:none;stroke:var(--accent);stroke-width:3}.quota-weekly{fill:none;stroke:#8bb4ff;stroke-width:2}.chart-grid{stroke:var(--line);stroke-width:1}.legend{display:flex;gap:16px;color:var(--muted);font-size:12px;margin-top:8px}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}.moments{display:grid;gap:8px}.moment{display:grid;grid-template-columns:auto 1fr auto;gap:10px;padding:10px;background:var(--panel2);border-radius:7px}.moment span{color:var(--muted)}
-            @media(max-width:760px){.detail-grid{grid-template-columns:1fr 1fr}.timeline-row{grid-template-columns:110px 1fr}.timeline-row>.num{display:none}.metric-row{grid-template-columns:1fr auto}.metric-row>.meter-wrap{grid-column:1/-1;grid-row:2}.tabs button{padding:7px 9px}}
+            h1{margin:0 0 4px;font-size:30px}h2{font-size:15px;text-transform:uppercase;letter-spacing:0;margin:0 0 12px;color:var(--accent)}
+            .sub{color:var(--muted);margin:0 0 22px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.card span{display:block;color:var(--muted);font-size:12px}.card strong{display:block;font-size:24px;margin-top:4px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}.list div{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid var(--line)}.list div:last-child{border-bottom:0}.list span{color:var(--muted);font-variant-numeric:tabular-nums}.paths div,.ai-path-top div{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}.paths em,.ai-path-top em{font:700 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;font-style:normal;color:var(--muted)}.paths span,.ai-path-top span{color:var(--accent);font-weight:900}.ai-path-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.ai-path-head h2{margin:0 0 6px}.ai-path-head p{margin:0;color:var(--muted)}.ai-path-head strong{font:800 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:rgba(0,128,255,.10);border-radius:999px;padding:7px 10px;white-space:nowrap}.ai-sankey-wrap{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel2);padding:10px}.ai-sankey{display:block;width:100%;height:auto}.ai-sankey-stage{fill:var(--muted);font:800 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0;text-transform:uppercase}.ai-sankey-link{fill:none;stroke:var(--accent);stroke-linecap:round;opacity:.18}.ai-sankey-link:hover{opacity:.38}.ai-sankey-node{fill:var(--accent);opacity:.68}.ai-sankey-icon text{font:800 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.ai-sankey-label{fill:var(--text);font:700 12px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.ai-sankey-count{fill:var(--muted);font:700 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.ai-path-top{display:grid;gap:2px;margin-top:12px}.footer{margin-top:20px;color:var(--muted);font-size:12px}.flows{display:grid;gap:8px}.flow{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr) auto;gap:8px;align-items:center;padding:10px;background:var(--panel2);border-radius:7px}.arrow{color:var(--accent);font-weight:900}.badge{font:750 10px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent)}@media(max-width:760px){.topline{padding:12px 18px;flex-wrap:wrap}.tabs{order:3;width:100%;overflow:auto}.content{padding:22px 18px}.grid,.two{grid-template-columns:1fr 1fr}.flow{grid-template-columns:1fr 20px 1fr}.flow .badge{grid-column:1/-1}}
+            .tabs button{border:0;background:transparent;color:var(--muted);padding:8px 11px;border-radius:7px;font:700 12px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;cursor:pointer;white-space:nowrap}.tabs button:hover{background:var(--panel2);color:var(--text)}.tabs button.active{background:var(--accent);color:white}.hub-page{display:none}.hub-page.active{display:block}.page-head{margin:0 0 22px;padding-bottom:18px;border-bottom:1px solid var(--line)}.page-head h1{font-size:32px;margin:0 0 6px}.page-head p{margin:0;color:var(--muted);max-width:760px}.page-kicker{display:block;color:var(--accent);font:800 11px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0;text-transform:uppercase;margin-bottom:7px}.panel{margin-bottom:18px}.meter{height:8px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:7px 0 4px}.meter span{display:block;height:100%;background:var(--accent);border-radius:99px}.metric-row{display:grid;grid-template-columns:minmax(190px,1fr) minmax(160px,2fr) auto;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}.metric-row:last-child{border-bottom:0}.metric-row small,.detail-grid dt{color:var(--muted)}.metric-row strong,.num{font-variant-numeric:tabular-nums}.metric-row .window-label strong,.metric-row .window-label small{display:block}.metric-row .window-label small{margin-top:2px}.timeline{display:grid;gap:9px}.timeline-session{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}.timeline-session summary{list-style:none;cursor:pointer}.timeline-session summary::-webkit-details-marker{display:none}.timeline-session[open] summary{border-bottom:1px solid var(--line)}.timeline-row{display:grid;grid-template-columns:minmax(150px,240px) 1fr auto;gap:12px;align-items:center;padding:12px 14px}.timeline-label strong,.timeline-label small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.timeline-label small{color:var(--muted)}.timeline-track{position:relative;height:18px;background:var(--panel2);border-radius:5px;overflow:hidden}.timeline-bar{position:absolute;top:3px;height:12px;min-width:3px;background:var(--accent);border-radius:4px}.session-list{display:grid;gap:9px}.session{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}.session summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;padding:14px;cursor:pointer;list-style:none}.session summary::-webkit-details-marker{display:none}.session summary strong,.session summary small{display:block}.session summary small{color:var(--muted);margin-top:3px}.session[open] summary{border-bottom:1px solid var(--line)}.session-body{padding:14px}.detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 18px;margin:0}.detail-grid div{padding:7px 0;border-bottom:1px solid var(--line)}.detail-grid dt{font-size:11px}.detail-grid dd{margin:3px 0 0;font-weight:650;word-break:break-word}.preview{margin:14px 0 0;padding:12px;background:var(--panel2);border-radius:7px;color:var(--muted);white-space:pre-wrap}.data-table{width:100%;border-collapse:collapse}.data-table th,.data-table td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line)}.data-table th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0}.data-table td.num,.data-table th.num{text-align:right}.quota-chart{width:100%;height:auto;display:block;background:var(--panel2);border-radius:8px}.quota-primary{fill:none;stroke:var(--accent);stroke-width:3}.quota-weekly{fill:none;stroke:#8bb4ff;stroke-width:2}.chart-grid{stroke:var(--line);stroke-width:1}.legend{display:flex;gap:16px;color:var(--muted);font-size:12px;margin-top:8px}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
+            .content{padding:18px 24px 34px}.page-head{margin-bottom:12px;padding-bottom:10px}.page-head h1{font-size:28px;margin-bottom:4px}.page-kicker{margin-bottom:4px}.grid{gap:8px;margin-bottom:10px}.card,.panel{padding:10px 12px}.two{gap:8px;margin-bottom:10px;align-items:start}.list div{padding:5px 0}.panel{margin-bottom:10px}.sub{margin-bottom:10px}.footer{margin-top:14px}.scope-toggle{display:inline-flex;gap:3px;padding:3px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;margin:0 0 10px}.scope-toggle button{border:0;background:transparent;color:var(--muted);padding:5px 12px;border-radius:6px;font:750 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;cursor:pointer}.scope-toggle button.active{background:var(--accent);color:white}.insight-scope{display:none}.insight-scope.active{display:block}
+            @media(max-width:760px){.content{padding:16px 14px}.grid,.two{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr 1fr}.timeline-row{grid-template-columns:110px 1fr}.timeline-row>.num{display:none}.metric-row{grid-template-columns:1fr auto}.metric-row>.meter-wrap{grid-column:1/-1;grid-row:2}.tabs button{padding:7px 9px}}
           </style>
         </head>
         <body>
-          <header class="topline"><div class="brand"><img class="brand-logo" src="maxxbar-hub-icon.png" alt="">MaxxBar</div><nav class="tabs"><button data-page="overview" onclick="showPage('overview')">Overview</button><button data-page="insights" onclick="showPage('insights')">AI Insights</button><button data-page="runway" onclick="showPage('runway')">Runway</button><button data-page="sessions" onclick="showPage('sessions')">Sessions</button><button data-page="advanced" onclick="showPage('advanced')">Advanced</button></nav><span class="spacer"></span><button class="theme" onclick="toggleTheme()">Light / Dark</button></header>
+          <header class="topline"><div class="brand"><img class="brand-logo" src="maxxbar-hub-icon.png" alt="">MaxxBar</div><nav class="tabs"><button data-page="overview" onclick="showPage('overview')">Overview</button><button data-page="insights" onclick="showPage('insights')">AI Insights</button><button data-page="runway" onclick="showPage('runway')">Runway</button><button data-page="sessions" onclick="showPage('sessions')">Sessions</button></nav><span class="spacer"></span><button class="theme" onclick="toggleTheme()">Light / Dark</button></header>
           <main class="content">
           <section id="page-overview" class="hub-page">
-            \(pageHeading("Overview", "The complete daily picture: current AI work, runway, patterns, transfers, and recent moments."))
+            \(pageHeading("Overview", "The complete daily picture: current AI work, runway, patterns, transfers, and recent sessions."))
             <div class="grid">
               \(card("AI sessions today", "\(todaySessionCount)", "\(sessionCount) in 7 days"))
               \(card("AI time", duration(totalAISeconds), "sample-inferred · 7 days"))
               \(card("AI transfers", "\(transfers.filter { $0.eventType == "paste" && $0.sourceTool != nil }.count)", "confirmed destinations"))
-              \(card("Insight events today", "\(insightEventCount)", "sessions · copy/paste · moments"))
+              \(card("Insight events today", "\(insightEventCount)", "sessions · copy/paste"))
               \(card("Active", html(latest?.tool ?? latest?.app ?? "Unknown"), html(latest?.surface ?? latest?.site ?? "latest sample")))
-              \(card("Codex runway", remaining.map { "\($0)%" } ?? "—", runwayLabel))
+              \(card("AI runway", runwayValue.isEmpty ? "—" : html(runwayValue), runwayLabel))
             </div>
             \(panel("Pattern Summary", patternSummary(todayTools: todayTools, weeklyTools: topTools, useCases: useCases, destinations: outputDestinations)))
             <div class="two">\(panel("Today’s AI Tools", list(todayTools)))\(panel("7-day AI Tools", list(topTools)))</div>
-            \(panel("Recent Maxx Moments", momentRows(moments)))
           </section>
 
           <section id="page-insights" class="hub-page">
             \(pageHeading("AI Insights", "How AI enters your work, which tools you use, and where generated output goes afterward."))
-            \(panel("AI Output Destinations", transferRows(transferFlows)))
-            <div class="two">\(panel("Likely Use Cases · 7 days", list(useCases)))\(panel("Where AI Output Went", list(outputDestinations)))</div>
-            <div class="two">\(panel("Before AI", list(before)))\(panel("After AI", list(after)))</div>
-            \(pathVisual(workflows))
-            \(panel("Workflow Paths", pathRows(workflows)))
+            <div class="scope-toggle"><button data-insight-filter="all" onclick="showInsightScope('all')">All</button><button data-insight-filter="codex" onclick="showInsightScope('codex')">Codex</button><button data-insight-filter="claude" onclick="showInsightScope('claude')">Claude</button></div>
+            <div class="insight-scope" data-insight-scope="all">\(insightPanels(records: records, transfers: transfers, provider: nil, startOfDay: startOfDay))</div>
+            <div class="insight-scope" data-insight-scope="codex">\(insightPanels(records: records, transfers: transfers, provider: "Codex", startOfDay: startOfDay))</div>
+            <div class="insight-scope" data-insight-scope="claude">\(insightPanels(records: records, transfers: transfers, provider: "Claude", startOfDay: startOfDay))</div>
           </section>
 
           <section id="page-runway" class="hub-page">
-            \(pageHeading("Runway", "Live Codex limits, historical drawdown, local usage windows, and the same session timeline available in the menu bar."))
+            \(pageHeading("Runway", "Live Codex and Claude limits, Codex drawdown history, combined local usage windows, and the same session timeline available in the menu bar."))
             \(limitPanels(llmUsage))
             \(panel("Limit Drawdown · 7 days", quotaChart(quotaHistory, fallback: llmUsage)))
             \(panel("Session Timeline · 24 hours", sessionTimeline(llmUsage)))
           </section>
 
           <section id="page-sessions" class="hub-page">
-            \(pageHeading("Sessions", "All locally discovered Codex sessions. Expand any row for the complete token, cache, cost, timing, model, project, and preview detail."))
+            \(pageHeading("Sessions", "All locally discovered Codex and Claude sessions. Expand any row for token, cache, cost, timing, provider, model, project, and preview detail."))
             \(sessionAccordions(llmUsage))
           </section>
 
-          <section id="page-advanced" class="hub-page">
-            \(pageHeading("Advanced", "The full diagnostic layer from the dropdown, expanded with complete local windows, cost estimates, limit groups, and data availability."))
-            \(advancedSummary(llmUsage))
-            \(panel("Local Usage Windows", localWindowTable(llmUsage.localWindows)))
-            \(panel("Token and Cost Estimates", costEstimateTable(llmUsage.costEstimates)))
-            \(panel("Available Detail", availableDetail(llmUsage)))
-          </section>
-
-          <div class="footer">Activity: \(html(activityLogURL?.path ?? "-"))<br>Transfers: \(html(transfersLogURL?.path ?? "-"))<br>Moments: \(html(momentsLogURL?.path ?? "-"))</div>
+          <div class="footer">Activity: \(html(activityLogURL?.path ?? "-"))<br>Transfers: \(html(transfersLogURL?.path ?? "-"))</div>
           </main>
           <script>
           function toggleTheme(){var r=document.documentElement;r.dataset.theme=r.dataset.theme==='light'?'dark':'light';localStorage.setItem('maxxbar:hub:theme',r.dataset.theme)}
           function showPage(name){var page=document.getElementById('page-'+name);if(!page)name='overview';document.querySelectorAll('.hub-page').forEach(function(el){el.classList.toggle('active',el.id==='page-'+name)});document.querySelectorAll('[data-page]').forEach(function(el){el.classList.toggle('active',el.dataset.page===name)});history.replaceState(null,'','#'+name);window.scrollTo(0,0)}
-          document.documentElement.dataset.theme=localStorage.getItem('maxxbar:hub:theme')||'dark';showPage((location.hash||'#overview').slice(1));
+          function showInsightScope(name){if(!document.querySelector('[data-insight-scope="'+name+'"]'))name='all';document.querySelectorAll('[data-insight-scope]').forEach(function(el){el.classList.toggle('active',el.dataset.insightScope===name)});document.querySelectorAll('[data-insight-filter]').forEach(function(el){el.classList.toggle('active',el.dataset.insightFilter===name)});localStorage.setItem('maxxbar:hub:insight-scope',name)}
+          document.documentElement.dataset.theme=localStorage.getItem('maxxbar:hub:theme')||'dark';showInsightScope(localStorage.getItem('maxxbar:hub:insight-scope')||'all');showPage((location.hash||'#overview').slice(1));
           </script>
         </body>
         </html>
+        """
+    }
+
+    private static func insightPanels(
+        records: [AIActivityRecord],
+        transfers: [AITransferRecord],
+        provider: String?,
+        startOfDay: Date
+    ) -> String {
+        let providerRecords = records.filter { record in
+            record.tool != nil && (provider == nil || providerMatches(provider!, record: record))
+        }
+        let providerTransfers = transfers.filter { transfer in
+            provider == nil || providerMatches(provider!, transfer: transfer)
+        }
+        let allWorkflows = topWorkflowPaths(workflowCounters(from: records))
+        let workflows = provider.map { selected in
+            allWorkflows.filter { providerMatches(selected, tool: nil, surface: $0.surface) }
+        } ?? allWorkflows
+        let todayRecords = providerRecords.filter { $0.ts >= startOfDay }
+        let todayTools = counters(todayRecords.compactMap(canonicalTool), limit: 8)
+        let weeklyTools = counters(providerRecords.compactMap(canonicalTool), limit: 8)
+        let useCases = counters(providerRecords.map(\.useCase), limit: 8)
+        let flows = topTransferFlows(providerTransfers)
+        let destinations = counters(
+            providerTransfers
+                .filter { $0.eventType == "paste" && $0.sourceTool != nil }
+                .map(transferDestinationLabel),
+            limit: 8
+        )
+        let before = counters(workflows.map(\.before), limit: 8)
+        let after = counters(workflows.map(\.after), limit: 8)
+
+        return """
+        <div class="two">\(panel("Today’s AI Tools", list(todayTools)))\(panel("7-day AI Tools", list(weeklyTools)))</div>
+        \(panel("AI Output Destinations", transferRows(flows)))
+        <div class="two">\(panel("Likely Use Cases · 7 days", list(useCases)))\(panel("Where AI Output Went", list(destinations)))</div>
+        <div class="two">\(panel("Before AI", list(before)))\(panel("After AI", list(after)))</div>
+        \(pathVisual(workflows))
         """
     }
 
@@ -2874,7 +3020,12 @@ enum AIUsageReader {
     }
 
     private static func transferRows(_ flows: [AITransferFlow]) -> String {
-        guard !flows.isEmpty else { return "<p class=\"sub\">No AI copy/paste destinations yet. Grant Input Monitoring, then copy from an AI surface and paste into a work app.</p>" }
+        guard !flows.isEmpty else {
+            let message = CGPreflightListenEventAccess()
+                ? "Input Monitoring is enabled. No new AI-to-work-app copy/paste pairs have been captured on this Mac yet."
+                : "No AI copy/paste destinations yet. Grant Input Monitoring, then copy from an AI surface and paste into a work app."
+            return "<p class=\"sub\">\(html(message))</p>"
+        }
         return "<div class=\"flows\">" + flows.map {
             "<div class=\"flow\"><strong>\(html($0.source))</strong><span class=\"arrow\">→</span><strong>\(html($0.destination))</strong><span class=\"badge\">\(html($0.useCase)) · \($0.count)x · \(html($0.confidence))</span></div>"
         }.joined() + "</div>"
@@ -2889,10 +3040,10 @@ enum AIUsageReader {
     }
 
     private static func sessionRows(_ sessions: [LLMUsageSession]) -> String {
-        guard !sessions.isEmpty else { return "<p class=\"sub\">No recent local Codex sessions found.</p>" }
+        guard !sessions.isEmpty else { return "<p class=\"sub\">No recent local Codex or Claude sessions found.</p>" }
         return "<div class=\"list\">" + sessions.prefix(8).map {
             let title = $0.title.isEmpty ? ($0.projectName.isEmpty ? "Untitled session" : $0.projectName) : $0.title
-            return "<div><strong>\(html(short(title)))</strong><span>\(html($0.projectName)) · \(compactTokenCount($0.tokens)) tokens</span></div>"
+            return "<div><strong>\(html(short(title)))</strong><span>\(html($0.provider)) · \(html($0.projectName)) · \(compactTokenCount($0.tokens)) tokens</span></div>"
         }.joined() + "</div>"
     }
 
@@ -2918,26 +3069,30 @@ enum AIUsageReader {
     private static func limitPanels(_ snapshot: LLMUsageSnapshot) -> String {
         guard !snapshot.limits.isEmpty else { return panel("Live Limits", "<p class=\"sub\">\(html(snapshot.error ?? "Codex usage unavailable"))</p>") }
         let limits = snapshot.limits.map { limit in
-            let rows = [limit.primary, limit.secondary].compactMap { $0 }.map(usageWindowRow).joined()
+            let rows = [limit.shortWindow, limit.weeklyWindow].compactMap { $0 }.map(usageWindowRow).joined()
             return panel(limit.name + " Limits", rows)
         }.joined()
         let credits = snapshot.resetCreditCount.map { count in
             let expirations = snapshot.resetCreditExpirations.map { "\($0.count) · \(hubDate($0.expiresAt))" }.joined(separator: " · ")
             return card("Reset credits", "\(count)", expirations.isEmpty ? "expiration detail unavailable" : expirations)
         } ?? ""
-        return "<div class=\"grid\">\(card("Plan", html(snapshot.planType ?? "Unknown"), html(snapshot.email ?? "local account")))\(card("Last updated", html(snapshot.lastUpdated.map(hubDate) ?? "—"), "live usage API"))\(credits)</div>\(limits)"
+        let statuses = snapshot.providerErrors.isEmpty ? "" : panel(
+            "Provider Status",
+            "<div class=\"list\">" + snapshot.providerErrors.sorted { $0.key < $1.key }.map { "<div><strong>\(html($0.key))</strong><span>\(html($0.value))</span></div>" }.joined() + "</div>"
+        )
+        return "<div class=\"grid\">\(card("Plan", html(snapshot.planType ?? "Unknown"), html(snapshot.email ?? "local account")))\(card("Last updated", html(snapshot.lastUpdated.map(hubDate) ?? "—"), "live usage API"))\(credits)</div>\(limits)\(statuses)"
     }
 
     private static func usageWindowRow(_ window: LLMUsageWindow) -> String {
         let remaining = min(max(window.remainingPercent, 0), 100)
         let reset = window.resetAt.map { "Resets \(hubDate($0))" } ?? "Reset unavailable"
-        return "<div class=\"metric-row\"><div><strong>\(html(window.label))</strong><small>\(html(reset))</small></div><div class=\"meter-wrap\"><div class=\"meter\"><span style=\"width:\(remaining)%\"></span></div><small>\(window.usedPercent)% used</small></div><strong class=\"num\">\(remaining)% left</strong></div>"
+        return "<div class=\"metric-row\"><div class=\"window-label\"><strong>\(html(window.label))</strong><small>\(html(reset))</small></div><div class=\"meter-wrap\"><div class=\"meter\"><span style=\"width:\(remaining)%\"></span></div><small>\(window.usedPercent)% used</small></div><strong class=\"num\">\(remaining)% left</strong></div>"
     }
 
     private static func quotaChart(_ history: [LLMQuotaHistorySample], fallback snapshot: LLMUsageSnapshot) -> String {
         var samples = Array(history.suffix(200))
         if samples.isEmpty, let limit = snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first {
-            samples = [LLMQuotaHistorySample(sampledAt: snapshot.lastUpdated ?? Date(), primaryRemainingPercent: limit.primary?.remainingPercent, weeklyRemainingPercent: limit.secondary?.remainingPercent, planType: snapshot.planType)]
+            samples = [LLMQuotaHistorySample(sampledAt: snapshot.lastUpdated ?? Date(), primaryRemainingPercent: limit.shortWindow?.remainingPercent, weeklyRemainingPercent: limit.weeklyWindow?.remainingPercent, planType: snapshot.planType)]
         }
         guard let first = samples.first, let last = samples.last else { return "<p class=\"sub\">No quota history captured yet.</p>" }
         let span = max(last.sampledAt.timeIntervalSince(first.sampledAt), 1)
@@ -2969,31 +3124,43 @@ enum AIUsageReader {
             let left = max(0, clippedStart.timeIntervalSince(start) / 86_400 * 100)
             let width = max(0.35, clippedEnd.timeIntervalSince(clippedStart) / 86_400 * 100)
             let tokens = session.tokenUsage?.totalTokens ?? session.tokens
-            return "<div class=\"timeline-row\"><div class=\"timeline-label\"><strong>\(html(short(cleanSessionTitle(session.title))))</strong><small>\(html(session.projectName)) · \(compactTokenCount(tokens))</small></div><div class=\"timeline-track\"><span class=\"timeline-bar\" style=\"left:\(String(format: "%.2f", left))%;width:\(String(format: "%.2f", width))%\"></span></div><span class=\"num\">\(html(hubDate(clippedEnd)))</span></div>"
+            return """
+            <details class="timeline-session">
+              <summary class="timeline-row"><div class="timeline-label"><strong>\(html(short(cleanSessionTitle(session.title))))</strong><small>\(html(session.provider)) · \(html(session.projectName)) · \(compactTokenCount(tokens)) · click for detail</small></div><div class="timeline-track"><span class="timeline-bar" style="left:\(String(format: "%.2f", left))%;width:\(String(format: "%.2f", width))%"></span></div><span class="num">\(html(hubDate(clippedEnd)))</span></summary>
+              \(sessionDetailBody(session))
+            </details>
+            """
         }.joined() + "</div>"
     }
 
     private static func sessionAccordions(_ snapshot: LLMUsageSnapshot) -> String {
         let sessions = allSessions(snapshot)
-        guard !sessions.isEmpty else { return "<p class=\"sub\">No local Codex sessions found.</p>" }
+        guard !sessions.isEmpty else { return "<p class=\"sub\">No local Codex or Claude sessions found.</p>" }
         return "<div class=\"session-list\">" + sessions.map { session in
-            let usage = session.tokenUsage
-            let tokens = usage?.totalTokens ?? session.tokens
-            let preview = sanitizedSessionPreview(session.preview)
-            let contextLink = session.rolloutPath.isEmpty ? "" : "<div><dt>Context</dt><dd><a href=\"\(html(URL(fileURLWithPath: session.rolloutPath).absoluteString))\">Open local file</a></dd></div>"
+            let tokens = session.tokenUsage?.totalTokens ?? session.tokens
             return """
             <details class="session">
-              <summary><div><strong>\(html(cleanSessionTitle(session.title)))</strong><small>\(html(session.projectName)) · \(html(session.modelName)) · \(html(session.updatedAt.map(hubDate) ?? "time unavailable"))</small></div><strong class="num">\(compactTokenCount(tokens))</strong></summary>
-              <div class="session-body"><dl class="detail-grid">
-                <div><dt>Project</dt><dd>\(html(session.projectName))</dd></div><div><dt>Model</dt><dd>\(html(session.modelName))</dd></div><div><dt>Session ID</dt><dd>\(html(session.id))</dd></div>
-                <div><dt>Total tokens</dt><dd>\(compactTokenCount(tokens))</dd></div><div><dt>Input</dt><dd>\(compactTokenCount(usage?.inputTokens ?? 0))</dd></div><div><dt>Cached input</dt><dd>\(compactTokenCount(usage?.cachedInputTokens ?? 0))</dd></div>
-                <div><dt>Fresh input</dt><dd>\(compactTokenCount(usage?.nonCachedInputTokens ?? 0))</dd></div><div><dt>Output</dt><dd>\(compactTokenCount(usage?.outputTokens ?? 0))</dd></div><div><dt>Reasoning</dt><dd>\(compactTokenCount(usage?.reasoningOutputTokens ?? 0))</dd></div>
-                <div><dt>Cache hit</dt><dd>\(usage.map { "\($0.cacheHitPercent)%" } ?? "—")</dd></div><div><dt>Turns</dt><dd>\(usage.map { "\($0.turnCount)" } ?? "—")</dd></div><div><dt>API estimate</dt><dd>\(usage.map { hubDollars($0.estimatedCost(for: session.modelName)) } ?? "—")</dd></div>
-                <div><dt>Estimated rate</dt><dd>\(html(usage?.pricingLabel(for: session.modelName) ?? "—"))</dd></div><div><dt>Started</dt><dd>\(html(session.createdAt.map(hubDate) ?? "—"))</dd></div><div><dt>Updated</dt><dd>\(html(session.updatedAt.map(hubDate) ?? "—"))</dd></div>\(contextLink)
-              </dl>\(preview.map { "<p class=\"preview\">\(html($0))</p>" } ?? "")</div>
+              <summary><div><strong>\(html(cleanSessionTitle(session.title)))</strong><small>\(html(session.provider)) · \(html(session.projectName)) · \(html(session.modelName)) · \(html(session.updatedAt.map(hubDate) ?? "time unavailable"))</small></div><strong class="num">\(compactTokenCount(tokens))</strong></summary>
+              \(sessionDetailBody(session))
             </details>
             """
         }.joined() + "</div>"
+    }
+
+    private static func sessionDetailBody(_ session: LLMUsageSession) -> String {
+        let usage = session.tokenUsage
+        let tokens = usage?.totalTokens ?? session.tokens
+        let preview = sanitizedSessionPreview(session.preview)
+        let contextLink = session.rolloutPath.isEmpty ? "" : "<div><dt>Context</dt><dd><a href=\"\(html(URL(fileURLWithPath: session.rolloutPath).absoluteString))\">Open local file</a></dd></div>"
+        return """
+        <div class="session-body"><dl class="detail-grid">
+          <div><dt>Provider</dt><dd>\(html(session.provider))</dd></div><div><dt>Project</dt><dd>\(html(session.projectName))</dd></div><div><dt>Model</dt><dd>\(html(session.modelName))</dd></div><div><dt>Session ID</dt><dd>\(html(session.id))</dd></div>
+          <div><dt>Total tokens</dt><dd>\(compactTokenCount(tokens))</dd></div><div><dt>Input</dt><dd>\(compactTokenCount(usage?.inputTokens ?? 0))</dd></div><div><dt>Cached input</dt><dd>\(compactTokenCount(usage?.cachedInputTokens ?? 0))</dd></div>
+          <div><dt>Fresh input</dt><dd>\(compactTokenCount(usage?.nonCachedInputTokens ?? 0))</dd></div><div><dt>Output</dt><dd>\(compactTokenCount(usage?.outputTokens ?? 0))</dd></div><div><dt>Reasoning</dt><dd>\(compactTokenCount(usage?.reasoningOutputTokens ?? 0))</dd></div>
+          <div><dt>Cache hit</dt><dd>\(usage.map { "\($0.cacheHitPercent)%" } ?? "—")</dd></div><div><dt>Turns</dt><dd>\(usage.map { "\($0.turnCount)" } ?? "—")</dd></div><div><dt>API estimate</dt><dd>\(usage.map { hubDollars($0.estimatedCost(for: session.modelName)) } ?? "—")</dd></div>
+          <div><dt>Estimated rate</dt><dd>\(html(usage?.pricingLabel(for: session.modelName) ?? "—"))</dd></div><div><dt>Started</dt><dd>\(html(session.createdAt.map(hubDate) ?? "—"))</dd></div><div><dt>Updated</dt><dd>\(html(session.updatedAt.map(hubDate) ?? "—"))</dd></div>\(contextLink)
+        </dl>\(preview.map { "<p class=\"preview\">\(html($0))</p>" } ?? "")</div>
+        """
     }
 
     private static func advancedSummary(_ snapshot: LLMUsageSnapshot) -> String {
@@ -3027,7 +3194,7 @@ enum AIUsageReader {
     private static func allSessions(_ snapshot: LLMUsageSnapshot) -> [LLMUsageSession] {
         var seen = Set<String>()
         return (snapshot.recentSessions + snapshot.topWeeklySessions)
-            .filter { seen.insert($0.id).inserted }
+            .filter { seen.insert("\($0.provider):\($0.id)").inserted }
             .sorted { ($0.updatedAt ?? $0.createdAt ?? .distantPast) > ($1.updatedAt ?? $1.createdAt ?? .distantPast) }
     }
 
@@ -3103,7 +3270,27 @@ enum AIUsageReader {
             "\(Int((Double(count) / Double(total) * 100).rounded()))%"
         }
 
-        func icon(for label: String) -> (String, String) {
+        func faviconDomain(for label: String) -> String? {
+            let lower = label.lowercased()
+            if lower.contains(".") && !lower.contains(" ") {
+                return lower
+            }
+            if lower.contains("gmail") {
+                return "mail.google.com"
+            }
+            if lower.contains("chatgpt") || lower.contains("openai") {
+                return "chatgpt.com"
+            }
+            if lower.contains("github") {
+                return "github.com"
+            }
+            if lower.contains("etrade") {
+                return "etrade.com"
+            }
+            return nil
+        }
+
+        func icon(for label: String) -> (initials: String, color: String, href: String?) {
             let lower = label.lowercased()
             let color: String
             if lower.contains("gmail") { color = "#ea4335" }
@@ -3118,16 +3305,17 @@ enum AIUsageReader {
                 .compactMap { $0.first }
                 .map { String($0).uppercased() }
                 .joined()
-            return (initials.isEmpty ? "AI" : initials, color)
+            let href = faviconDomain(for: label).map { "https://www.google.com/s2/favicons?domain=\($0)&sz=64" }
+            return (initials.isEmpty ? "AI" : initials, color, href)
         }
 
         let stages = [
-            Stage(title: "Before", counts: beforeCounts, x: 24),
-            Stage(title: "AI surface", counts: surfaceCounts, x: 382),
-            Stage(title: "After", counts: afterCounts, x: 740)
+            Stage(title: "Before", counts: beforeCounts, x: 26),
+            Stage(title: "AI surface", counts: surfaceCounts, x: 372),
+            Stage(title: "After", counts: afterCounts, x: 718)
         ]
 
-        let nodeWidth = 132.0
+        let nodeWidth = 120.0
         let top = 58.0
         let availableHeight = 252.0
         var positions: [String: NodePosition] = [:]
@@ -3146,13 +3334,26 @@ enum AIUsageReader {
                 let count = stage.counts[label] ?? 0
                 let height = max(20.0, rawHeights[index] * scale)
                 positions["\(stage.title)|\(label)"] = NodePosition(x: stage.x, y: y, height: height)
-                let (iconText, iconColor) = icon(for: label)
+                let iconData = icon(for: label)
                 let iconX = stage.x + nodeWidth + 8
                 let iconY = y + 4
                 let labelX = iconX + 26
+                let iconMarkup: String
+                if let href = iconData.href {
+                    iconMarkup = """
+                    <rect width="18" height="18" rx="5" fill="\(iconData.color)" opacity=".18"></rect>
+                    <image href="\(html(href))" x="2" y="2" width="14" height="14" preserveAspectRatio="xMidYMid meet"></image>
+                    <text x="9" y="12.5" text-anchor="middle" fill="\(iconData.color)" opacity=".28">\(html(iconData.initials))</text>
+                    """
+                } else {
+                    iconMarkup = """
+                    <rect width="18" height="18" rx="5" fill="\(iconData.color)" opacity=".22"></rect>
+                    <text x="9" y="12.5" text-anchor="middle" fill="\(iconData.color)">\(html(iconData.initials))</text>
+                    """
+                }
                 stageMarkup += """
                 <rect class="ai-sankey-node" x="\(format(stage.x))" y="\(format(y))" width="\(format(nodeWidth))" height="\(format(height))" rx="4"><title>\(html(label)) · \(count)x · \(percent(count))</title></rect>
-                <g class="ai-sankey-icon" transform="translate(\(format(iconX)),\(format(iconY)))"><rect width="18" height="18" rx="5" fill="\(iconColor)" opacity=".2"></rect><text x="9" y="12.5" text-anchor="middle" fill="\(iconColor)">\(html(iconText))</text></g>
+                <g class="ai-sankey-icon" transform="translate(\(format(iconX)),\(format(iconY)))">\(iconMarkup)</g>
                 <text class="ai-sankey-label" x="\(format(labelX))" y="\(format(y + 12))">\(html(short(label)))</text>
                 <text class="ai-sankey-count" x="\(format(labelX))" y="\(format(y + 28))">\(count) (\(percent(count)))</text>
                 """
@@ -3173,7 +3374,7 @@ enum AIUsageReader {
                 let ex = end.x
                 let ey = end.y + end.height / 2
                 let width = max(3.0, min(30.0, Double(link.count) / Double(total) * 36.0))
-                return #"<path class="ai-sankey-link" d="M \#(format(sx)) \#(format(sy)) C \#(format(sx + 95)) \#(format(sy)), \#(format(ex - 95)) \#(format(ey)), \#(format(ex)) \#(format(ey))" stroke-width="\#(format(width))"><title>\#(html(link.source)) → \#(html(link.target)) · \#(link.count)x · \#(percent(link.count))</title></path>"#
+                return #"<path class="ai-sankey-link" d="M \#(format(sx)) \#(format(sy)) C \#(format(sx + 82)) \#(format(sy)), \#(format(ex - 82)) \#(format(ey)), \#(format(ex)) \#(format(ey))" stroke-width="\#(format(width))"><title>\#(html(link.source)) → \#(html(link.target)) · \#(link.count)x · \#(percent(link.count))</title></path>"#
             }.joined()
         }
 
@@ -3193,10 +3394,10 @@ enum AIUsageReader {
               <h2>AI Paths</h2>
               <p>Most common before → AI surface → after workflows.</p>
             </div>
-            <strong>\(total) moments</strong>
+            <strong>\(total) paths</strong>
           </div>
           <div class="ai-sankey-wrap">
-            <svg class="ai-sankey" viewBox="0 0 980 340" role="img" aria-label="Before AI after path flow">
+            <svg class="ai-sankey" viewBox="0 0 940 340" role="img" aria-label="Before AI after path flow">
               \(links)
               \(stageMarkup)
             </svg>
@@ -3279,6 +3480,18 @@ enum LLMUsageReader {
         let additional_rate_limits: [AdditionalRateLimit]?
         let credits: Credits?
         let rate_limit_reset_credits: RateLimitResetCredits?
+    }
+
+    private struct ClaudeUsageResponse: Decodable {
+        let five_hour: ClaudeUsageWindowPayload?
+        let seven_day: ClaudeUsageWindowPayload?
+        let seven_day_opus: ClaudeUsageWindowPayload?
+        let seven_day_sonnet: ClaudeUsageWindowPayload?
+    }
+
+    private struct ClaudeUsageWindowPayload: Decodable {
+        let utilization: Double?
+        let resets_at: String?
     }
 
     private struct AdditionalRateLimit: Decodable {
@@ -3474,7 +3687,32 @@ enum LLMUsageReader {
     }
 
     static func read() -> LLMUsageSnapshot {
-        let local = readLocalCodexUsage()
+        let codexLocal = readLocalCodexUsage()
+        let claudeLocal = readLocalClaudeUsage()
+        let local = mergedLocalUsage(codexLocal, claudeLocal)
+        var snapshot = readCodexUsage(local: local)
+
+        if let token = readClaudeAccessToken() {
+            switch readClaudeLimits(accessToken: token) {
+            case .success(let limits):
+                snapshot.limits.append(contentsOf: limits)
+            case .failure(let message):
+                snapshot.providerErrors["Claude"] = message
+            }
+        } else if !claudeLocal.recentSessions.isEmpty || claudeAccountExists() {
+            snapshot.providerErrors["Claude"] = "Live limits require a Claude Code OAuth sign-in; local Claude sessions are still captured."
+        }
+
+        if let codexError = snapshot.error {
+            snapshot.providerErrors["Codex"] = codexError
+        }
+        snapshot.error = snapshot.providerErrors.isEmpty
+            ? nil
+            : snapshot.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
+        return snapshot
+    }
+
+    private static func readCodexUsage(local: LocalCodexUsage) -> LLMUsageSnapshot {
         guard let token = readAccessToken() else {
             return LLMUsageSnapshot(
                 email: nil,
@@ -3600,6 +3838,315 @@ enum LLMUsageReader {
             return nil
         }
         return token
+    }
+
+    private enum ClaudeLimitReadResult {
+        case success([LLMUsageLimit])
+        case failure(String)
+    }
+
+    private static func readClaudeLimits(accessToken: String) -> ClaudeLimitReadResult {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultBox = HTTPResultBox()
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            resultBox.set(data: data, response: response, error: error)
+            semaphore.signal()
+        }.resume()
+
+        guard semaphore.wait(timeout: .now() + 4) != .timedOut else {
+            return .failure("usage request timed out")
+        }
+        let result = resultBox.snapshot()
+        if let error = result.errorDescription {
+            return .failure(error)
+        }
+        guard result.statusCode == 200, let data = result.data else {
+            return .failure(result.statusCode.map { "usage returned HTTP \($0)" } ?? "usage unavailable")
+        }
+        guard let response = try? JSONDecoder().decode(ClaudeUsageResponse.self, from: data) else {
+            return .failure("could not parse usage response")
+        }
+
+        var limits: [LLMUsageLimit] = []
+        let general = LLMUsageLimit(
+            name: "Claude",
+            primary: claudeWindow(response.five_hour, label: "5h", seconds: 18_000),
+            secondary: claudeWindow(response.seven_day, label: "Weekly", seconds: 604_800)
+        )
+        if !general.windows.isEmpty {
+            limits.append(general)
+        }
+        if let opus = claudeWindow(response.seven_day_opus, label: "Weekly", seconds: 604_800) {
+            limits.append(LLMUsageLimit(name: "Claude Opus", primary: nil, secondary: opus))
+        }
+        if let sonnet = claudeWindow(response.seven_day_sonnet, label: "Weekly", seconds: 604_800) {
+            limits.append(LLMUsageLimit(name: "Claude Sonnet", primary: nil, secondary: sonnet))
+        }
+        return limits.isEmpty ? .failure("usage response contained no limit windows") : .success(limits)
+    }
+
+    private static func claudeWindow(
+        _ payload: ClaudeUsageWindowPayload?,
+        label: String,
+        seconds: Int
+    ) -> LLMUsageWindow? {
+        guard let utilization = payload?.utilization else { return nil }
+        let used = min(max(Int(utilization.rounded()), 0), 100)
+        return LLMUsageWindow(
+            label: label,
+            usedPercent: used,
+            remainingPercent: 100 - used,
+            resetAt: payload?.resets_at.flatMap(iso8601Date),
+            windowSeconds: seconds
+        )
+    }
+
+    private static func iso8601Date(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        return standard.date(from: value)
+    }
+
+    private static func readClaudeAccessToken() -> String? {
+        let credentialsURL = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".claude/.credentials.json")
+        if let data = try? Data(contentsOf: credentialsURL),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let oauth = object["claudeAiOauth"] as? [String: Any],
+           let token = oauth["accessToken"] as? String,
+           !token.isEmpty {
+            return token
+        }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        task.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let output = Pipe()
+        task.standardOutput = output
+        task.standardError = Pipe()
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = object["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String,
+              !token.isEmpty else {
+            return nil
+        }
+        return token
+    }
+
+    private static func claudeAccountExists() -> Bool {
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return object["oauthAccount"] is [String: Any]
+    }
+
+    private static func mergedLocalUsage(
+        _ codex: LocalCodexUsage,
+        _ claude: LocalCodexUsage
+    ) -> LocalCodexUsage {
+        let labels = ["1h", "5h", "24h", "7d"]
+        let windows = labels.map { label in
+            let values = (codex.windows + claude.windows).filter { $0.label == label }
+            return LLMLocalUsageWindow(
+                label: label,
+                tokens: values.reduce(0) { $0 + $1.tokens },
+                threads: values.reduce(0) { $0 + $1.threads }
+            )
+        }
+        let recent = uniqueSessions(codex.recentSessions + claude.recentSessions)
+            .sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+        let topWeekly = uniqueSessions(codex.topWeeklySessions + claude.topWeeklySessions)
+            .sorted { $0.tokens == $1.tokens
+                ? ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast)
+                : $0.tokens > $1.tokens
+            }
+        return LocalCodexUsage(
+            fiveHourTokens: codex.fiveHourTokens + claude.fiveHourTokens,
+            weeklyTokens: codex.weeklyTokens + claude.weeklyTokens,
+            weeklyThreads: codex.weeklyThreads + claude.weeklyThreads,
+            windows: windows,
+            costEstimates: codex.costEstimates,
+            recentSessions: Array(recent.prefix(30)),
+            topWeeklySessions: Array(topWeekly.prefix(30))
+        )
+    }
+
+    private static func uniqueSessions(_ sessions: [LLMUsageSession]) -> [LLMUsageSession] {
+        var seen = Set<String>()
+        return sessions.filter { seen.insert("\($0.provider):\($0.id)").inserted }
+    }
+
+    private static func readLocalClaudeUsage() -> LocalCodexUsage {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let roots = [
+            home.appendingPathComponent(".claude/projects", isDirectory: true),
+            home.appendingPathComponent("Library/Application Support/Claude/local-agent-mode-sessions", isDirectory: true)
+        ]
+        var urls: [URL] = []
+        for root in roots where FileManager.default.fileExists(atPath: root.path) {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsPackageDescendants]
+            ) else { continue }
+            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                guard url.lastPathComponent != "audit.jsonl",
+                      url.path.contains("/projects/") else { continue }
+                urls.append(url)
+            }
+        }
+
+        let sessions = uniqueSessions(urls.compactMap(claudeSession))
+        let now = Date()
+        func usageWindow(label: String, seconds: TimeInterval) -> LLMLocalUsageWindow {
+            let matching = sessions.filter { session in
+                guard let updatedAt = session.updatedAt ?? session.createdAt else { return false }
+                return now.timeIntervalSince(updatedAt) <= seconds
+            }
+            return LLMLocalUsageWindow(
+                label: label,
+                tokens: matching.reduce(0) { $0 + $1.tokens },
+                threads: matching.count
+            )
+        }
+        let windows = [
+            usageWindow(label: "1h", seconds: 3_600),
+            usageWindow(label: "5h", seconds: 18_000),
+            usageWindow(label: "24h", seconds: 86_400),
+            usageWindow(label: "7d", seconds: 604_800)
+        ]
+        let recent = sessions.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+        let weekly = sessions
+            .filter { now.timeIntervalSince($0.updatedAt ?? $0.createdAt ?? .distantPast) <= 604_800 }
+            .sorted { $0.tokens == $1.tokens
+                ? ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast)
+                : $0.tokens > $1.tokens
+            }
+        return LocalCodexUsage(
+            fiveHourTokens: windows.first(where: { $0.label == "5h" })?.tokens ?? 0,
+            weeklyTokens: windows.first(where: { $0.label == "7d" })?.tokens ?? 0,
+            weeklyThreads: windows.first(where: { $0.label == "7d" })?.threads ?? 0,
+            windows: windows,
+            costEstimates: [],
+            recentSessions: Array(recent.prefix(30)),
+            topWeeklySessions: Array(weekly.prefix(30))
+        )
+    }
+
+    private static func claudeSession(from url: URL) -> LLMUsageSession? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        var sessionID = url.deletingPathExtension().lastPathComponent
+        var title: String?
+        var preview: String?
+        var cwd: String?
+        var model: String?
+        var createdAt: Date?
+        var updatedAt: Date?
+        var requestUsage: [String: LLMTokenUsageSummary] = [:]
+
+        for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if let value = object["sessionId"] as? String, !value.isEmpty { sessionID = value }
+            if let value = object["customTitle"] as? String, !value.isEmpty { title = value }
+            if title == nil, let value = object["aiTitle"] as? String, !value.isEmpty { title = value }
+            if let value = object["cwd"] as? String, !value.isEmpty { cwd = value }
+            if let value = object["timestamp"] as? String, let date = iso8601Date(value) {
+                createdAt = min(createdAt ?? date, date)
+                updatedAt = max(updatedAt ?? date, date)
+            }
+
+            guard let message = object["message"] as? [String: Any] else { continue }
+            if preview == nil,
+               (object["type"] as? String) == "user",
+               (message["role"] as? String) == "user" {
+                preview = claudeMessageText(message["content"])
+            }
+            guard (object["type"] as? String) == "assistant",
+                  let usage = message["usage"] as? [String: Any] else { continue }
+            if let value = message["model"] as? String, !value.isEmpty { model = value }
+            let input = uint64(usage["input_tokens"])
+            let cacheCreated = uint64(usage["cache_creation_input_tokens"])
+            let cacheRead = uint64(usage["cache_read_input_tokens"])
+            let output = uint64(usage["output_tokens"])
+            let key = (object["requestId"] as? String) ?? (object["uuid"] as? String) ?? "line-\(index)"
+            requestUsage[key] = LLMTokenUsageSummary(
+                inputTokens: input + cacheCreated + cacheRead,
+                cachedInputTokens: cacheRead,
+                outputTokens: output,
+                reasoningOutputTokens: 0,
+                totalTokens: input + cacheCreated + cacheRead + output,
+                turnCount: 1
+            )
+        }
+
+        let totals = requestUsage.values.reduce(
+            LLMTokenUsageSummary(inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, turnCount: 0)
+        ) { result, usage in
+            LLMTokenUsageSummary(
+                inputTokens: result.inputTokens + usage.inputTokens,
+                cachedInputTokens: result.cachedInputTokens + usage.cachedInputTokens,
+                outputTokens: result.outputTokens + usage.outputTokens,
+                reasoningOutputTokens: 0,
+                totalTokens: result.totalTokens + usage.totalTokens,
+                turnCount: result.turnCount + 1
+            )
+        }
+        guard createdAt != nil || updatedAt != nil || totals.totalTokens > 0 else { return nil }
+        let cleanPreview = compactText(preview ?? "", fallback: "No prompt preview stored")
+        return LLMUsageSession(
+            id: sessionID,
+            provider: "Claude",
+            title: compactText(title ?? preview ?? "", fallback: "Claude session"),
+            projectName: projectName(from: cwd ?? ""),
+            modelName: compactText(model ?? "", fallback: "Claude model unavailable"),
+            preview: trimmed(cleanPreview, maxLength: 500),
+            rolloutPath: url.path,
+            tokens: totals.totalTokens,
+            tokenUsage: totals.totalTokens > 0 ? totals : nil,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private static func claudeMessageText(_ value: Any?) -> String? {
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        guard let blocks = value as? [[String: Any]] else { return nil }
+        let text = blocks.compactMap { block -> String? in
+            guard (block["type"] as? String) == "text" else { return nil }
+            return block["text"] as? String
+        }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private static func uint64(_ value: Any?) -> UInt64 {
+        if let value = value as? UInt64 { return value }
+        if let value = value as? Int { return UInt64(max(value, 0)) }
+        if let value = value as? Double { return UInt64(max(value, 0)) }
+        if let value = value as? String { return UInt64(value) ?? 0 }
+        return 0
     }
 
     private static func readLocalCodexUsage() -> LocalCodexUsage {

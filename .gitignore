@@ -4,3 +4,4 @@ DerivedData/
 *.xcuserdata/
 Dist/
 Dist.noindex/
+.DS_Store

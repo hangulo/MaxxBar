@@ -68,5 +68,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 PLIST
 
 xattr -cr "$APP_DIR" 2>/dev/null || true
-codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
+codesign --force --sign - \
+    --requirements '=designated => identifier "com.hector.MaxxBar"' \
+    "$APP_DIR" >/dev/null 2>&1 || true
 echo "$APP_DIR"
