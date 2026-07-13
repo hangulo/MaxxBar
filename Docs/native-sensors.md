@@ -1,6 +1,6 @@
 # Native Sensor Collection Plan
 
-The app should not depend on iStat Menus being installed. The current iStat history reader is a temporary bridge that helps validate labels and values while developing our own collector.
+The app uses its own native helper and public system telemetry for sensor collection.
 
 ## Target Data
 
@@ -27,7 +27,6 @@ Secondary values:
 - Battery temperature and system input power are available from public I/O Registry battery telemetry.
 - `powermetrics` exposes useful CPU/GPU power, frequency, and thermal information, but it must be invoked as superuser.
 - Detailed thermal/fan sensors appear behind private Apple services such as `AppleSMCKeysEndpoint`, `AppleSMCClient`, `AppleARMPMUTempSensor`, and related telemetry services.
-- iStat Menus stores recent numeric sensor history locally, but its sensor labels are stored as hashes and resolved inside iStat's own helper/app logic.
 
 ## Current Helper Architecture
 
@@ -44,7 +43,7 @@ Install scripts:
 - `Scripts/install-sensor-helper.sh` builds the helper, copies it to `/Library/PrivilegedHelperTools/com.hector.MaxxBarSensorHelper`, installs a LaunchDaemon, and starts it.
 - `Scripts/uninstall-sensor-helper.sh` unloads and removes the helper.
 
-The menu bar app reads `/Library/Application Support/MaxxBar/sensors.json` first. If the cache is missing or stale, it falls back to the temporary iStat history bridge and public battery telemetry.
+The menu bar app reads `/Library/Application Support/MaxxBar/sensors.json` first. If the cache is missing or stale, it falls back to public battery telemetry and marks unavailable values clearly.
 
 ## Proposed Architecture
 
@@ -79,7 +78,7 @@ The helper shell is in place, but the native collector still needs the private A
 
 ## Acceptance Criteria
 
-- App continues to show CPU temp, GPU temp, and fan status after iStat Menus is uninstalled.
+- App shows CPU temperature, GPU temperature, and fan status when the native helper can collect them.
 - Sensor refresh does not block opening the popover.
 - Missing sensors degrade to `-` without crashing.
 - Helper has the smallest possible surface area and only returns read-only sensor snapshots.

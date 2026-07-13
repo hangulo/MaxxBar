@@ -2,7 +2,7 @@ import Foundation
 
 /// MaxxBar's canonical vocabulary for AI tools, surfaces, sites, and broad use cases.
 enum AITaxonomy {
-    static func tool(appName: String, url: String?) -> (tool: String?, surface: String?) {
+    static func tool(appName: String, bundleID: String = "", url: String?) -> (tool: String?, surface: String?) {
         if let url, let components = URLComponents(string: url), let host = components.host?.lowercased() {
             let path = components.path.lowercased()
             if host == "chatgpt.com", path.hasPrefix("/codex") {
@@ -26,6 +26,11 @@ enum AITaxonomy {
             if host == "copilot.microsoft.com" {
                 return ("Copilot", "Copilot web")
             }
+        }
+
+        let lowerBundleID = bundleID.lowercased()
+        if lowerBundleID == "com.openai.codex" || lowerBundleID.contains("codex") {
+            return ("Codex", "Codex client")
         }
 
         let lowerApp = appName.lowercased()

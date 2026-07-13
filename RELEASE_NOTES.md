@@ -2,15 +2,17 @@
 
 ## v0.2.0 - 2026-07-10
 
+- Added Claude parity across Runway and Sessions: local Claude Code/Desktop/Cowork transcript discovery, per-session model and token/cache totals, combined local windows, provider labels, and live five-hour/weekly Claude limits when Claude Code OAuth is available.
+- Added explicit provider status so Claude sessions remain visible when Desktop authentication is present but a Claude Code OAuth credential is not.
 - Promoted MaxxBar from a compact runway utility into a fuller AI workflow companion.
-- Added the MaxxBar Hub with Overview, AI Insights, Runway, Sessions, and Advanced destinations.
+- Added the MaxxBar Hub with Overview, AI Insights, Runway, and Sessions destinations.
 - Added metadata-only AI output destination tracking for Cmd+C/Cmd+V flows without reading clipboard contents.
 - Added a shared AI taxonomy for tools, surfaces, sites, and broad use cases.
 - Added Start Deep Trace handoff into the Tracework Hub.
 - Updated the menu bar to show 5H runway, weekly reset day, and compact AI activity context.
 - Moved global Hub, Deep Trace, pop-out, relaunch, and quit controls into the bottom action bar.
 - Changed dense popover help to use delayed hover with click-to-pin, while bottom icon/version labels appear immediately.
-- Moved Moments to the fourth tab so Runway, Insights, and Memory stay primary.
+- Removed the Moments surface from the primary menu bar app so Runway, Insights, and Memory stay primary.
 - Refined Memory typography and bar alignment.
 - Updated the app bundle default version to `0.2.0`.
 

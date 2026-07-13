@@ -10,6 +10,11 @@ enum MaxxBarLauncher {
         let shouldVerifyPopoverAction = CommandLine.arguments.contains("--verify-popover-action")
         let shouldVerifyPopOutAction = CommandLine.arguments.contains("--verify-popout-action")
 
+        if CommandLine.arguments.contains("--input-monitoring-status") {
+            print("inputMonitoring=\(CGPreflightListenEventAccess() ? "authorized" : "denied")")
+            return
+        }
+
         if let renderIndex = CommandLine.arguments.firstIndex(of: "--render-popover"),
            CommandLine.arguments.indices.contains(renderIndex + 1) {
             let path = CommandLine.arguments[renderIndex + 1]
@@ -52,17 +57,23 @@ enum MaxxBarLauncher {
             let llmUsage = LLMUsageReader.read()
             print("llmPlan=\(llmUsage.planType ?? "-")")
             print("llmEmail=\(llmUsage.email ?? "-")")
-            print("llmLimits=\(llmUsage.limits.map { limit in "\(limit.name):\(limit.primary?.remainingPercent ?? -1)%/\(limit.secondary?.remainingPercent ?? -1)%" }.joined(separator: ","))")
+            print("llmLimits=\(llmUsage.limits.map { limit in "\(limit.name):\(limit.shortWindow?.remainingPercent ?? -1)%/\(limit.weeklyWindow?.remainingPercent ?? -1)%" }.joined(separator: ","))")
             print("llmResetCredits=\(llmUsage.resetCreditCount.map(String.init) ?? "-")")
             print("llmLocalFiveHourTokens=\(llmUsage.localFiveHourTokens)")
             print("llmLocalWeeklyTokens=\(llmUsage.localWeeklyTokens)")
+            print("llmLocalWeeklyThreads=\(llmUsage.localWeeklyThreads)")
+            let sessionProviders = Dictionary(grouping: llmUsage.recentSessions, by: \.provider)
+                .map { "\($0.key)=\($0.value.count)" }
+                .sorted()
+                .joined(separator: ",")
+            print("llmSessionProviders=\(sessionProviders)")
             print("llmError=\(llmUsage.error ?? "-")")
             let aiUsage = AIUsageReader.recordAndRead(memory: snapshot, cpuGPU: .empty, llmUsage: llmUsage)
             print("aiActiveTool=\(aiUsage.activeTool ?? "-")")
             print("aiSessionsToday=\(aiUsage.sessionsToday)")
             print("aiTimeToday=\(Int(aiUsage.timeTodaySeconds))")
             print("aiTopTools=\(aiUsage.topTools.map { "\($0.label)=\($0.count)" }.joined(separator: ","))")
-            print("aiMomentsToday=\(aiUsage.momentsToday)")
+            print("aiProviderStats=\(aiUsage.providerSummaries.map { "\($0.provider):\($0.sessionsToday)sessions/\(Int($0.timeTodaySeconds))s/\($0.transferFlows.count)flows" }.joined(separator: ","))")
             let sensors = SensorReader.read()
             print("sensorCPUTemp=\(sensors.cpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
             print("sensorGPUTemp=\(sensors.gpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
@@ -113,7 +124,7 @@ extension StatsPanel {
         case "ai", "insights", "maxxinsights", "maxx-insights", "llm", "usage", "llmusage", "llm-usage":
             self = .llmUsage
         case "moments", "maxxmoment", "maxx-moment", "maxxmoments", "maxx-moments":
-            self = .moments
+            self = .llmUsage
         default:
             self = .memory
         }
@@ -276,16 +287,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func statusTextLines() -> (top: String, bottom: String) {
-        guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first,
-              let fiveHourRemaining = codexLimit.primary?.remainingPercent,
-              let weeklyRemaining = codexLimit.secondary?.remainingPercent else {
+        guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first else {
             return ("-- Day", "- -")
         }
 
-        return (
-            "\(hoursLeftLabel(codexLimit.primary?.resetAt)) \(weekdayLabel(codexLimit.secondary?.resetAt)) AI",
-            "\(fiveHourRemaining)% \(weeklyRemaining)% \(model.aiUsage.sessionsToday)|\(aiTimeLabel(model.aiUsage.timeTodaySeconds))"
-        )
+        let shortWindow = codexLimit.shortWindow
+        let weeklyWindow = codexLimit.weeklyWindow
+        let aiLabel = "\(model.aiUsage.sessionsToday)|\(aiTimeLabel(model.aiUsage.timeTodaySeconds))"
+
+        if let shortWindow, let weeklyWindow {
+            return (
+                "\(hoursLeftLabel(shortWindow.resetAt)) \(weekdayLabel(weeklyWindow.resetAt)) AI",
+                "\(shortWindow.remainingPercent)% \(weeklyWindow.remainingPercent)% \(aiLabel)"
+            )
+        }
+
+        if let weeklyWindow {
+            return (
+                "\(weekdayLabel(weeklyWindow.resetAt)) AI",
+                "\(weeklyWindow.remainingPercent)% \(aiLabel)"
+            )
+        }
+
+        if let shortWindow {
+            return (
+                "\(hoursLeftLabel(shortWindow.resetAt)) AI",
+                "\(shortWindow.remainingPercent)% \(aiLabel)"
+            )
+        }
+
+        return ("-- AI", "- \(aiLabel)")
     }
 
     private func aiTimeLabel(_ seconds: TimeInterval) -> String {
@@ -303,7 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return """
         Codex 5h remaining · weekly remaining
         AI today: \(usage.sessionsToday) sessions · \(aiTimeLabel(usage.timeTodaySeconds)) inferred time
-        \(usage.copyEventsToday) copy · \(usage.pasteEventsToday) paste · \(usage.momentsToday) moments · \(usage.insightEventsToday) insight events
+        \(usage.copyEventsToday) copy · \(usage.pasteEventsToday) paste · \(usage.insightEventsToday) insight events
         """
     }
 

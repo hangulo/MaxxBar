@@ -44,16 +44,6 @@ struct MemoryPopoverView: View {
                     onPopOut: onPopOut,
                     onQuit: onQuit
                 )
-            case .moments:
-                MaxxMomentsPanelView(
-                    aiUsage: model.aiUsage,
-                    onCaptureMaxxMoment: { sentiment, note, includeScreenshot in
-                        model.captureMaxxMoment(sentiment: sentiment, note: note, includeScreenshot: includeScreenshot)
-                    },
-                    onOpenAIReport: { model.openAIUsageReport() },
-                    onPopOut: onPopOut,
-                    onQuit: onQuit
-                )
             case .runway:
                 LLMRunwayPanelView(
                     snapshot: model.llmUsage,
@@ -89,14 +79,13 @@ struct MemoryPopoverView: View {
 enum StatsPanel: String, CaseIterable, Identifiable {
     case runway = "Runway"
     case llmUsage = "Insights"
-    case moments = "Moments"
     case memory = "Memory"
     case cpuGPU = "CPU/GPU"
 
     var id: String { rawValue }
 
     static var visibleCases: [StatsPanel] {
-        [.runway, .llmUsage, .memory, .moments]
+        [.runway, .llmUsage, .memory]
     }
 }
 
@@ -185,7 +174,7 @@ struct CPUGPUPanelView: View {
     let sensors: SensorSnapshot
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
-    @State private var processScale = CPUProcessScale.istatShare
+    @State private var processScale = CPUProcessScale.systemShare
 
     var body: some View {
         VStack(spacing: 7) {
@@ -255,19 +244,117 @@ struct AIUsagePanelView: View {
     var onStartDeepTrace: (() -> Void)?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
+    @State private var providerFilter = AIInsightProviderFilter.all
 
     var body: some View {
         VStack(spacing: 7) {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 7) {
-                    AIUsageOverviewCard(snapshot: aiUsage)
-                    AITransferCard(snapshot: aiUsage)
-                    AIWorkflowMiniCard(snapshot: aiUsage)
-                    LLMSessionTimelineCard(snapshot: snapshot)
+                    AIUsageOverviewCard(snapshot: filteredAIUsage, providerFilter: $providerFilter)
+                    AITransferCard(snapshot: filteredAIUsage)
+                    AIWorkflowMiniCard(snapshot: filteredAIUsage)
+                    LLMSessionTimelineCard(snapshot: filteredLLMSnapshot)
                 }
             }
 
         }
+    }
+
+    private var filteredAIUsage: AIUsageSnapshot {
+        guard providerFilter != .all,
+              let summary = aiUsage.providerSummaries.first(where: { $0.provider == providerFilter.rawValue }) else {
+            return aiUsage
+        }
+        var filtered = aiUsage
+        filtered.activeTool = providerFilter.rawValue
+        filtered.sessionsToday = summary.sessionsToday
+        filtered.sessionsSevenDays = summary.sessionsSevenDays
+        filtered.timeTodaySeconds = summary.timeTodaySeconds
+        filtered.timeSevenDaysSeconds = summary.timeSevenDaysSeconds
+        filtered.averageSessionSeconds = summary.averageSessionSeconds
+        filtered.contextConfidence = summary.contextConfidence
+        filtered.topTools = summary.topTools
+        filtered.topBeforeApps = summary.topBeforeApps
+        filtered.topAfterApps = summary.topAfterApps
+        filtered.workflowPaths = summary.workflowPaths
+        filtered.copyEventsToday = summary.copyEventsToday
+        filtered.pasteEventsToday = summary.pasteEventsToday
+        filtered.topCopiedFrom = summary.topCopiedFrom
+        filtered.topPastedInto = summary.topPastedInto
+        filtered.transferFlows = summary.transferFlows
+        return filtered
+    }
+
+    private var filteredLLMSnapshot: LLMUsageSnapshot {
+        guard providerFilter != .all else { return snapshot }
+        var filtered = snapshot
+        filtered.recentSessions = snapshot.recentSessions.filter(providerFilter.matches)
+        filtered.topWeeklySessions = snapshot.topWeeklySessions.filter(providerFilter.matches)
+        return filtered
+    }
+}
+
+enum AIInsightProviderFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case codex = "Codex"
+    case claude = "Claude"
+
+    var id: String { rawValue }
+
+    var color: Color {
+        switch self {
+        case .all: return .white.opacity(0.68)
+        case .codex: return .codexBlue
+        case .claude: return .claudeCoral
+        }
+    }
+
+    func matches(_ session: LLMUsageSession) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .codex:
+            return session.provider.caseInsensitiveCompare("Codex") == .orderedSame
+        case .claude:
+            return session.provider.caseInsensitiveCompare("Claude") == .orderedSame
+        }
+    }
+}
+
+struct AIInsightProviderToggle: View {
+    @Binding var selection: AIInsightProviderFilter
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(AIInsightProviderFilter.allCases) { provider in
+                Button {
+                    selection = provider
+                } label: {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(provider.color)
+                            .frame(width: 5, height: 5)
+                        Text(provider.rawValue)
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(selection == provider ? .white : .white.opacity(0.52))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                    .background(selection == provider ? provider.color.opacity(0.2) : Color.clear)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(selection == provider ? provider.color.opacity(0.7) : Color.clear, lineWidth: 0.75)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(2)
+        .background(Color.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -306,15 +393,21 @@ struct LLMRunwayPanelView: View {
         VStack(spacing: 7) {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 7) {
-                    if let codexLimit {
-                        LLMUsageLimitCard(
-                            limit: codexLimit,
-                            title: "CODEX RUNWAY (\(planName(snapshot.planType)))",
-                            resetCreditCount: snapshot.resetCreditCount,
-                            resetCreditExpirations: snapshot.resetCreditExpirations
-                        )
+                    if runwayLimits.isEmpty {
+                        LLMUsageUnavailableCard(message: snapshot.error ?? "Live AI usage unavailable")
                     } else {
-                        LLMUsageUnavailableCard(message: snapshot.error ?? "Codex usage unavailable")
+                        ForEach(runwayLimits) { limit in
+                            LLMUsageLimitCard(
+                                limit: limit,
+                                title: runwayTitle(for: limit),
+                                resetCreditCount: limit.name == "Codex" ? snapshot.resetCreditCount : nil,
+                                resetCreditExpirations: limit.name == "Codex" ? snapshot.resetCreditExpirations : []
+                            )
+                        }
+                    }
+
+                    if !snapshot.providerErrors.isEmpty {
+                        LLMProviderStatusCard(errors: snapshot.providerErrors)
                     }
 
                     LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
@@ -326,23 +419,30 @@ struct LLMRunwayPanelView: View {
         }
     }
 
-    private var codexLimit: LLMUsageLimit? {
-        snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first
+    private var runwayLimits: [LLMUsageLimit] {
+        let preferred = snapshot.limits.filter { $0.name == "Codex" || $0.name == "Claude" }
+        return preferred.isEmpty ? Array(snapshot.limits.prefix(2)) : preferred
+    }
+
+    private func runwayTitle(for limit: LLMUsageLimit) -> String {
+        limit.name == "Codex"
+            ? "CODEX RUNWAY (\(planName(snapshot.planType)))"
+            : "\(limit.name.uppercased()) RUNWAY"
     }
 
 }
 
 struct AIUsageOverviewCard: View {
     let snapshot: AIUsageSnapshot
+    @Binding var providerFilter: AIInsightProviderFilter
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center, spacing: 8) {
                 InstantHelpTitle("MAXX INSIGHTS", help: maxxInsightsHelp)
                 Spacer()
-                Text(snapshot.activeTool ?? "Watching")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle((snapshot.activeTool == nil ? Color.white.opacity(0.52) : Color.accentBlue))
+                AIInsightProviderToggle(selection: $providerFilter)
+                    .frame(width: 154)
             }
 
             HStack(spacing: 7) {
@@ -350,6 +450,13 @@ struct AIUsageOverviewCard: View {
                 aiMetric("AI time", aiDuration(snapshot.timeTodaySeconds), "today")
                 aiMetric("Avg", aiDuration(snapshot.averageSessionSeconds), "session")
             }
+
+            Text(providerFilter == .all
+                 ? "Shared activity windows · provider counts may overlap"
+                 : "\(providerFilter.rawValue) activity windows")
+                .font(.system(size: 9, weight: .regular))
+                .foregroundStyle(.white.opacity(0.4))
+                .fixedSize(horizontal: false, vertical: true)
 
         }
         .sectionStyle()
@@ -372,7 +479,7 @@ struct AIUsageOverviewCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
         .background(Color.background.opacity(0.35))
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
@@ -624,7 +731,7 @@ struct MiniSankeyView: View {
 
         return counts
             .sorted { lhs, rhs in lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value }
-            .prefix(column == .surface ? 1 : 4)
+            .prefix(4)
             .enumerated()
             .map { offset, entry in
                 MiniSankeyNode(column: columnName(column), label: entry.key, count: entry.value, index: offset)
@@ -882,8 +989,16 @@ struct LLMUsageSummaryCard: View {
             }
 
             if let limit = snapshot.limits.first {
-                LLMUsageWindowRow(window: limit.primary)
-                LLMUsageWindowRow(window: limit.secondary)
+                let windows = [limit.shortWindow, limit.weeklyWindow].compactMap { $0 }
+                if windows.isEmpty {
+                    Text("No live limit windows returned by the usage API.")
+                        .font(.system(size: 13.5, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.7))
+                } else {
+                    ForEach(windows, id: \.label) { window in
+                        LLMUsageWindowRow(window: window)
+                    }
+                }
             } else {
                 Text(snapshot.error ?? "Codex usage unavailable")
                     .font(.system(size: 13.5, weight: .regular))
@@ -904,7 +1019,10 @@ struct LLMUsageLimitCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                InstantHelpTitle(title ?? limit.name.uppercased(), help: codexRunwayHelp)
+                InstantHelpTitle(
+                    title ?? limit.name.uppercased(),
+                    help: limit.name.hasPrefix("Claude") ? claudeRunwayHelp : codexRunwayHelp
+                )
                 Spacer()
                 if let resetCreditCount {
                     Text("\(resetCreditCount) resets")
@@ -924,10 +1042,28 @@ struct LLMUsageLimitCard: View {
                         }
                 }
             }
-            LLMUsageProgress(window: limit.primary)
-            LLMUsageProgress(window: limit.secondary)
+            let windows = orderedWindows
+            if windows.isEmpty {
+                Text("No live limit windows returned by the usage API.")
+                    .font(.system(size: 11.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.56))
+            } else {
+                ForEach(windows, id: \.label) { window in
+                    LLMUsageProgress(window: window)
+                }
+            }
         }
         .sectionStyle()
+    }
+
+    private var orderedWindows: [LLMUsageWindow] {
+        [limit.shortWindow, limit.weeklyWindow]
+            .compactMap { $0 }
+            .reduce(into: [LLMUsageWindow]()) { result, window in
+                if !result.contains(where: { $0.label == window.label && $0.windowSeconds == window.windowSeconds }) {
+                    result.append(window)
+                }
+            }
     }
 }
 
@@ -971,11 +1107,29 @@ struct LLMUsageUnavailableCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("CODEX USAGE")
+            Text("AI USAGE")
                 .sectionTitle()
             Text(message)
                 .font(.system(size: 13.5, weight: .regular))
                 .foregroundStyle(.white.opacity(0.7))
+        }
+        .sectionStyle()
+    }
+}
+
+struct LLMProviderStatusCard: View {
+    let errors: [String: String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("PROVIDER STATUS")
+                .sectionTitle()
+            ForEach(errors.keys.sorted(), id: \.self) { provider in
+                Text("\(provider): \(errors[provider] ?? "Unavailable")")
+                    .font(.system(size: 11.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .sectionStyle()
     }
@@ -1029,8 +1183,8 @@ struct DrawdownInsightCard: View {
         return [
             LLMQuotaHistorySample(
                 sampledAt: snapshot.lastUpdated ?? Date(),
-                primaryRemainingPercent: limit.primary?.remainingPercent,
-                weeklyRemainingPercent: limit.secondary?.remainingPercent,
+                primaryRemainingPercent: limit.shortWindow?.remainingPercent,
+                weeklyRemainingPercent: limit.weeklyWindow?.remainingPercent,
                 planType: snapshot.planType
             )
         ]
@@ -1085,8 +1239,8 @@ struct LLMLocalUsageCard: View {
         return [
             LLMQuotaHistorySample(
                 sampledAt: snapshot.lastUpdated ?? Date(),
-                primaryRemainingPercent: limit.primary?.remainingPercent,
-                weeklyRemainingPercent: limit.secondary?.remainingPercent,
+                primaryRemainingPercent: limit.shortWindow?.remainingPercent,
+                weeklyRemainingPercent: limit.weeklyWindow?.remainingPercent,
                 planType: snapshot.planType
             )
         ]
@@ -1970,6 +2124,7 @@ struct LLMAdvancedUsageCard: View {
     let snapshot: LLMUsageSnapshot
     @Binding var isExpanded: Bool
     @State private var sessionMode = LLMTokenUserMode.recent
+    @State private var providerFilter = LLMSessionProviderFilter.all
     @State private var detailExpanded = false
 
     var body: some View {
@@ -1982,8 +2137,10 @@ struct LLMAdvancedUsageCard: View {
                 }
                 .padding(.top, 2)
 
+                LLMSessionProviderToggle(selection: $providerFilter)
+
                 if selectedSessions.isEmpty {
-                    Text("No local session token detail found")
+                    Text("No \(providerFilter.emptyStateLabel) session token detail found")
                         .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(.white.opacity(0.62))
                 } else {
@@ -2035,7 +2192,7 @@ struct LLMAdvancedUsageCard: View {
         case .highest:
             sessions = snapshot.topWeeklySessions
         }
-        return Array(sessions.prefix(5))
+        return Array(sessions.filter(providerFilter.matches).prefix(5))
     }
 }
 
@@ -2069,6 +2226,67 @@ struct LLMSessionModeToggle: View {
         .padding(2)
         .background(Color.background.opacity(0.42))
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+}
+
+enum LLMSessionProviderFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case codex = "Codex"
+    case claude = "Claude"
+
+    var id: String { rawValue }
+
+    var color: Color {
+        switch self {
+        case .all: return .white.opacity(0.68)
+        case .codex: return .codexBlue
+        case .claude: return .claudeCoral
+        }
+    }
+
+    var emptyStateLabel: String {
+        self == .all ? "local" : rawValue
+    }
+
+    func matches(_ session: LLMUsageSession) -> Bool {
+        self == .all || session.provider.caseInsensitiveCompare(rawValue) == .orderedSame
+    }
+}
+
+struct LLMSessionProviderToggle: View {
+    @Binding var selection: LLMSessionProviderFilter
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(LLMSessionProviderFilter.allCases) { provider in
+                Button {
+                    selection = provider
+                } label: {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(provider.color)
+                            .frame(width: 5, height: 5)
+                        Text(provider.rawValue)
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(selection == provider ? .white : .white.opacity(0.52))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                    .background(selection == provider ? provider.color.opacity(0.2) : Color.clear)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(selection == provider ? provider.color.opacity(0.7) : Color.clear, lineWidth: 0.75)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(2)
+        .background(Color.background.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -2118,7 +2336,15 @@ struct LLMSessionRow: View {
             }
 
             HStack {
-                Text(session.detail)
+                Text(session.provider)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(providerColor)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(providerColor.opacity(0.15))
+                    .clipShape(Capsule())
+                Text("\(session.projectName) • \(session.modelName)")
+                    .foregroundStyle(.white.opacity(0.56))
                     .lineLimit(1)
                 Spacer()
                 if let cacheLabel {
@@ -2130,7 +2356,6 @@ struct LLMSessionRow: View {
                     .monospacedDigit()
             }
             .font(.system(size: 11.5, weight: .regular))
-            .foregroundStyle(.white.opacity(0.56))
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 4) {
@@ -2196,6 +2421,10 @@ struct LLMSessionRow: View {
     private var cacheLabel: String? {
         guard let usage = session.tokenUsage, usage.inputTokens > 0 else { return nil }
         return "\(usage.cacheHitPercent)% cached"
+    }
+
+    private var providerColor: Color {
+        session.provider.caseInsensitiveCompare("Claude") == .orderedSame ? .claudeCoral : .codexBlue
     }
 
     private func openSessionContext() {
@@ -2689,15 +2918,15 @@ private extension CPUCoreLoad {
 }
 
 enum CPUProcessScale: String, CaseIterable, Identifiable {
-    case istatShare = "iStat"
+    case systemShare = "System"
     case activityMonitor = "Raw"
 
     var id: String { rawValue }
 
     var help: String {
         switch self {
-        case .istatShare:
-            return "Share of the whole machine. Raw per-process CPU is divided by logical CPU count so it is closer to iStat's menu percentage scale."
+        case .systemShare:
+            return "Share of the whole machine. Raw per-process CPU is divided by logical CPU count."
         case .activityMonitor:
             return "Activity Monitor style. A process can exceed 100% because macOS reports CPU per core before grouping helper processes."
         }
@@ -2735,7 +2964,7 @@ struct CPUProcessesView: View {
 
     private func displayPercent(for process: CPUProcess) -> Double {
         switch scale {
-        case .istatShare:
+        case .systemShare:
             return process.cpuPercent
         case .activityMonitor:
             return process.rawCPUPercent
@@ -3022,7 +3251,7 @@ enum ProcessListMode: String, CaseIterable, Identifiable {
     var help: String {
         switch self {
         case .apps:
-            return "Group helper processes by owning app bundle, similar to iStat."
+            return "Group helper processes by their owning app bundle."
         case .rows:
             return "Show individual process rows using the Activity Monitor-like MEM value."
         }
@@ -3767,6 +3996,10 @@ private let codexRunwayHelp = """
 Shows your live Codex quota windows from the usage API. The 5h bar is the short runway you feel during heavy work; the weekly bar shows the longer reset cycle, and reset credits appear when the API reports them.
 """
 
+private let claudeRunwayHelp = """
+Shows your live Claude five-hour and weekly usage windows when Claude Code OAuth is available. Claude Desktop, Claude Code, and claude.ai draw from shared usage limits; local Claude sessions remain visible even when live limits are unavailable.
+"""
+
 private let limitDrawdownHelp = """
 Shows how your Codex 5H limit has been draining based on samples MaxxBar stores locally. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
 """
@@ -3792,7 +4025,7 @@ Shows lightweight before -> AI -> after patterns from local app and site metadat
 """
 
 private let topTokenUsersHelp = """
-Lists the local Codex sessions with the most token usage. Use this when runway drops faster than expected and you want to see which recent session likely drove the drawdown.
+Lists local Codex and Claude sessions by recency or token usage. Use All, Codex, or Claude to isolate a provider while keeping the selected Recent or Highest ordering.
 """
 
 private let availableDetailHelp = """
@@ -3924,6 +4157,9 @@ extension Color {
     static let panel = Color(red: 35 / 255, green: 38 / 255, blue: 52 / 255)
     static let panelLift = Color(red: 45 / 255, green: 49 / 255, blue: 65 / 255)
     static let accentBlue = Color(red: 0 / 255, green: 128 / 255, blue: 255 / 255)
+    static let codexBlue = Color(red: 72 / 255, green: 157 / 255, blue: 255 / 255)
+    static let chatGPTGreen = Color(red: 52 / 255, green: 211 / 255, blue: 153 / 255)
+    static let claudeCoral = Color(red: 224 / 255, green: 129 / 255, blue: 92 / 255)
     static let wiredPink = Color(red: 248 / 255, green: 65 / 255, blue: 151 / 255)
     static let compressedYellow = Color(red: 255 / 255, green: 202 / 255, blue: 18 / 255)
     static let freeGray = Color(red: 104 / 255, green: 111 / 255, blue: 132 / 255)

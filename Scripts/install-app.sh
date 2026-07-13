@@ -17,7 +17,9 @@ APP_DIR="$STAGING_APP" "$ROOT_DIR/Scripts/build-app.sh"
 rm -rf "$INSTALL_APP"
 ditto "$STAGING_APP" "$INSTALL_APP"
 xattr -cr "$INSTALL_APP" 2>/dev/null || true
-codesign --force --sign - "$INSTALL_APP" >/dev/null 2>&1 || true
+codesign --force --sign - \
+    --requirements '=designated => identifier "com.hector.MaxxBar"' \
+    "$INSTALL_APP" >/dev/null 2>&1 || true
 
 if [ -e "$DESKTOP_LINK" ] && [ ! -L "$DESKTOP_LINK" ]; then
     echo "Desktop path exists and is not a shortcut: $DESKTOP_LINK" >&2
