@@ -411,6 +411,143 @@ struct LLMUsageSnapshot: Equatable {
     var topWeeklySessions: [LLMUsageSession]
     var error: String?
     var providerErrors: [String: String] = [:]
+    var weeklyModelUsage: [LLMModelUsageTotal] = []
+    var dailyModelUsage: [LLMModelUsageTotal] = []
+    var providerAccounts: [LLMProviderAccount] = []
+}
+
+struct LLMProviderAccount: Identifiable, Equatable {
+    var id: String { provider.lowercased() }
+    let provider: String
+    let email: String?
+    let displayName: String?
+    let organizationName: String?
+    let planName: String?
+}
+
+struct LLMModelUsageTotal: Equatable {
+    let provider: String
+    let modelName: String
+    let tokens: UInt64
+    let sessionCount: Int
+}
+
+struct LLMModelUsage: Identifiable, Equatable {
+    var id: String { "\(provider.lowercased())|\(modelName.lowercased())" }
+    let provider: String
+    let modelName: String
+    let tokens: UInt64
+    let sessionCount: Int
+    let sharePercent: Int
+}
+
+struct LLMModelUsageSummary: Equatable {
+    let models: [LLMModelUsage]
+    let totalTokens: UInt64
+    let sessionCount: Int
+    let distributionBasis: String
+}
+
+extension LLMUsageSnapshot {
+    func modelUsageSummary(provider: String? = nil, lastSeconds: TimeInterval = 604_800) -> LLMModelUsageSummary {
+        struct Aggregate {
+            var provider: String
+            var modelName: String
+            var tokens: UInt64
+            var sessionCount: Int
+        }
+
+        var aggregates: [String: Aggregate] = [:]
+        let recordedModelUsage = lastSeconds <= 86_400 ? dailyModelUsage : weeklyModelUsage
+        let selectedRecordedModelUsage = recordedModelUsage.filter {
+            provider == nil || $0.provider.caseInsensitiveCompare(provider!) == .orderedSame
+        }
+        let recordedProviders = Set(selectedRecordedModelUsage.map { $0.provider.lowercased() })
+
+        for total in selectedRecordedModelUsage {
+            let key = "\(total.provider.lowercased())|\(total.modelName.lowercased())"
+            aggregates[key] = Aggregate(
+                provider: total.provider,
+                modelName: total.modelName,
+                tokens: total.tokens,
+                sessionCount: total.sessionCount
+            )
+        }
+
+        // A provider-specific reader can fail independently (for example, after a
+        // local database schema change). Keep the other provider's exact totals,
+        // then fill only the missing provider from discovered sessions.
+        if selectedRecordedModelUsage.isEmpty || provider == nil {
+            let cutoff = Date().addingTimeInterval(-lastSeconds)
+            var seen = Set<String>()
+            let sessions = (recentSessions + topWeeklySessions).filter { session in
+                guard seen.insert("\(session.provider.lowercased()):\(session.id)").inserted else { return false }
+                if let provider,
+                   session.provider.caseInsensitiveCompare(provider) != .orderedSame {
+                    return false
+                }
+                if recordedProviders.contains(session.provider.lowercased()) {
+                    return false
+                }
+                guard let timestamp = session.updatedAt ?? session.createdAt else { return true }
+                return timestamp >= cutoff
+            }
+            for session in sessions {
+                let modelName = session.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = modelName.isEmpty ? "Model unavailable" : modelName
+                let key = "\(session.provider.lowercased())|\(displayName.lowercased())"
+                var aggregate = aggregates[key] ?? Aggregate(
+                    provider: session.provider,
+                    modelName: displayName,
+                    tokens: 0,
+                    sessionCount: 0
+                )
+                aggregate.tokens += session.tokenUsage?.totalTokens ?? session.tokens
+                aggregate.sessionCount += 1
+                aggregates[key] = aggregate
+            }
+        }
+
+        let sorted = aggregates.values.sorted {
+            if $0.tokens != $1.tokens { return $0.tokens > $1.tokens }
+            if $0.sessionCount != $1.sessionCount { return $0.sessionCount > $1.sessionCount }
+            return $0.modelName.localizedCaseInsensitiveCompare($1.modelName) == .orderedAscending
+        }
+        let totalTokens = sorted.reduce(UInt64(0)) { $0 + $1.tokens }
+        let totalSessions = sorted.reduce(0) { $0 + $1.sessionCount }
+        let usesTokenShare = totalTokens > 0
+        let weights = sorted.map { usesTokenShare ? Double($0.tokens) : Double($0.sessionCount) }
+        let totalWeight = weights.reduce(0, +)
+        let rawShares = weights.map { totalWeight > 0 ? $0 / totalWeight * 100 : 0 }
+        var shares = rawShares.map { Int($0.rounded(.down)) }
+        let pointsToAssign = max(0, 100 - shares.reduce(0, +))
+        let fractionalOrder = rawShares.indices.sorted {
+            let lhs = rawShares[$0] - Double(shares[$0])
+            let rhs = rawShares[$1] - Double(shares[$1])
+            return lhs == rhs ? $0 < $1 : lhs > rhs
+        }
+        if !fractionalOrder.isEmpty {
+            for index in 0..<pointsToAssign {
+                shares[fractionalOrder[index % fractionalOrder.count]] += 1
+            }
+        }
+
+        let models = sorted.enumerated().map { index, aggregate in
+            LLMModelUsage(
+                provider: aggregate.provider,
+                modelName: aggregate.modelName,
+                tokens: aggregate.tokens,
+                sessionCount: aggregate.sessionCount,
+                sharePercent: shares[index]
+            )
+        }
+        return LLMModelUsageSummary(
+            models: models,
+            totalTokens: totalTokens,
+            sessionCount: totalSessions,
+            distributionBasis: usesTokenShare ? "recorded tokens" : "sessions"
+        )
+    }
 }
 
 struct AIUsageCounter: Identifiable, Equatable {
@@ -1240,7 +1377,7 @@ extension LLMUsageSnapshot {
                 id: "demo-2",
                 title: "Sensor helper",
                 projectName: "MaxxBar",
-                modelName: "GPT-5 Codex",
+                modelName: "GPT-5.3 Codex",
                 preview: "Built native helper for thermal and fan data.",
                 rolloutPath: "",
                 tokens: 31_500_000,
@@ -1264,9 +1401,10 @@ extension LLMUsageSnapshot {
             ),
             LLMUsageSession(
                 id: "demo-3",
+                provider: "Claude",
                 title: "CPU/GPU panel",
                 projectName: "MaxxBar",
-                modelName: "GPT-5 Codex",
+                modelName: "Claude Sonnet 4.5",
                 preview: "Compared CPU and GPU data with system monitoring panels.",
                 rolloutPath: "",
                 tokens: 58_700_000,
@@ -1275,7 +1413,23 @@ extension LLMUsageSnapshot {
                 updatedAt: Date().addingTimeInterval(-86_400)
             )
         ],
-        error: nil
+        error: nil,
+        providerAccounts: [
+            LLMProviderAccount(
+                provider: "Codex",
+                email: "you@example.com",
+                displayName: nil,
+                organizationName: nil,
+                planName: "prolite"
+            ),
+            LLMProviderAccount(
+                provider: "Claude",
+                email: "you@client.example",
+                displayName: "Hector",
+                organizationName: "Client workspace",
+                planName: "Team"
+            )
+        ]
     )
 }
 
@@ -2906,8 +3060,8 @@ enum AIUsageReader {
             h1{margin:0 0 4px;font-size:30px}h2{font-size:15px;text-transform:uppercase;letter-spacing:0;margin:0 0 12px;color:var(--accent)}
             .sub{color:var(--muted);margin:0 0 22px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.card span{display:block;color:var(--muted);font-size:12px}.card strong{display:block;font-size:24px;margin-top:4px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}.list div{display:flex;justify-content:space-between;gap:16px;padding:8px 0;border-bottom:1px solid var(--line)}.list div:last-child{border-bottom:0}.list span{color:var(--muted);font-variant-numeric:tabular-nums}.paths div,.ai-path-top div{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}.paths em,.ai-path-top em{font:700 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;font-style:normal;color:var(--muted)}.paths span,.ai-path-top span{color:var(--accent);font-weight:900}.ai-path-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.ai-path-head h2{margin:0 0 6px}.ai-path-head p{margin:0;color:var(--muted)}.ai-path-head strong{font:800 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:rgba(0,128,255,.10);border-radius:999px;padding:7px 10px;white-space:nowrap}.ai-sankey-wrap{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--panel2);padding:10px}.ai-sankey{display:block;width:100%;height:auto}.ai-sankey-stage{fill:var(--muted);font:800 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0;text-transform:uppercase}.ai-sankey-link{fill:none;stroke:var(--accent);stroke-linecap:round;opacity:.18}.ai-sankey-link:hover{opacity:.38}.ai-sankey-node{fill:var(--accent);opacity:.68}.ai-sankey-icon text{font:800 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.ai-sankey-label{fill:var(--text);font:700 12px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.ai-sankey-count{fill:var(--muted);font:700 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.ai-path-top{display:grid;gap:2px;margin-top:12px}.footer{margin-top:20px;color:var(--muted);font-size:12px}.flows{display:grid;gap:8px}.flow{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr) auto;gap:8px;align-items:center;padding:10px;background:var(--panel2);border-radius:7px}.arrow{color:var(--accent);font-weight:900}.badge{font:750 10px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent)}@media(max-width:760px){.topline{padding:12px 18px;flex-wrap:wrap}.tabs{order:3;width:100%;overflow:auto}.content{padding:22px 18px}.grid,.two{grid-template-columns:1fr 1fr}.flow{grid-template-columns:1fr 20px 1fr}.flow .badge{grid-column:1/-1}}
             .tabs button{border:0;background:transparent;color:var(--muted);padding:8px 11px;border-radius:7px;font:700 12px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;cursor:pointer;white-space:nowrap}.tabs button:hover{background:var(--panel2);color:var(--text)}.tabs button.active{background:var(--accent);color:white}.hub-page{display:none}.hub-page.active{display:block}.page-head{margin:0 0 22px;padding-bottom:18px;border-bottom:1px solid var(--line)}.page-head h1{font-size:32px;margin:0 0 6px}.page-head p{margin:0;color:var(--muted);max-width:760px}.page-kicker{display:block;color:var(--accent);font:800 11px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0;text-transform:uppercase;margin-bottom:7px}.panel{margin-bottom:18px}.meter{height:8px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:7px 0 4px}.meter span{display:block;height:100%;background:var(--accent);border-radius:99px}.metric-row{display:grid;grid-template-columns:minmax(190px,1fr) minmax(160px,2fr) auto;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}.metric-row:last-child{border-bottom:0}.metric-row small,.detail-grid dt{color:var(--muted)}.metric-row strong,.num{font-variant-numeric:tabular-nums}.metric-row .window-label strong,.metric-row .window-label small{display:block}.metric-row .window-label small{margin-top:2px}.timeline{display:grid;gap:9px}.timeline-session{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}.timeline-session summary{list-style:none;cursor:pointer}.timeline-session summary::-webkit-details-marker{display:none}.timeline-session[open] summary{border-bottom:1px solid var(--line)}.timeline-row{display:grid;grid-template-columns:minmax(150px,240px) 1fr auto;gap:12px;align-items:center;padding:12px 14px}.timeline-label strong,.timeline-label small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.timeline-label small{color:var(--muted)}.timeline-track{position:relative;height:18px;background:var(--panel2);border-radius:5px;overflow:hidden}.timeline-bar{position:absolute;top:3px;height:12px;min-width:3px;background:var(--accent);border-radius:4px}.session-list{display:grid;gap:9px}.session{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}.session summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;padding:14px;cursor:pointer;list-style:none}.session summary::-webkit-details-marker{display:none}.session summary strong,.session summary small{display:block}.session summary small{color:var(--muted);margin-top:3px}.session[open] summary{border-bottom:1px solid var(--line)}.session-body{padding:14px}.detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 18px;margin:0}.detail-grid div{padding:7px 0;border-bottom:1px solid var(--line)}.detail-grid dt{font-size:11px}.detail-grid dd{margin:3px 0 0;font-weight:650;word-break:break-word}.preview{margin:14px 0 0;padding:12px;background:var(--panel2);border-radius:7px;color:var(--muted);white-space:pre-wrap}.data-table{width:100%;border-collapse:collapse}.data-table th,.data-table td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line)}.data-table th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0}.data-table td.num,.data-table th.num{text-align:right}.quota-chart{width:100%;height:auto;display:block;background:var(--panel2);border-radius:8px}.quota-primary{fill:none;stroke:var(--accent);stroke-width:3}.quota-weekly{fill:none;stroke:#8bb4ff;stroke-width:2}.chart-grid{stroke:var(--line);stroke-width:1}.legend{display:flex;gap:16px;color:var(--muted);font-size:12px;margin-top:8px}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
-            .content{padding:18px 24px 34px}.page-head{margin-bottom:12px;padding-bottom:10px}.page-head h1{font-size:28px;margin-bottom:4px}.page-kicker{margin-bottom:4px}.grid{gap:8px;margin-bottom:10px}.card,.panel{padding:10px 12px}.two{gap:8px;margin-bottom:10px;align-items:start}.list div{padding:5px 0}.panel{margin-bottom:10px}.sub{margin-bottom:10px}.footer{margin-top:14px}.scope-toggle{display:inline-flex;gap:3px;padding:3px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;margin:0 0 10px}.scope-toggle button{border:0;background:transparent;color:var(--muted);padding:5px 12px;border-radius:6px;font:750 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;cursor:pointer}.scope-toggle button.active{background:var(--accent);color:white}.insight-scope{display:none}.insight-scope.active{display:block}
-            @media(max-width:760px){.content{padding:16px 14px}.grid,.two{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr 1fr}.timeline-row{grid-template-columns:110px 1fr}.timeline-row>.num{display:none}.metric-row{grid-template-columns:1fr auto}.metric-row>.meter-wrap{grid-column:1/-1;grid-row:2}.tabs button{padding:7px 9px}}
+            .content{padding:18px 24px 34px}.page-head{margin-bottom:12px;padding-bottom:10px}.page-head h1{font-size:28px;margin-bottom:4px}.page-kicker{margin-bottom:4px}.grid{gap:8px;margin-bottom:10px}.card,.panel{padding:10px 12px}.two{gap:8px;margin-bottom:10px;align-items:start}.list div{padding:5px 0}.panel{margin-bottom:10px}.sub{margin-bottom:10px}.footer{margin-top:14px}.scope-toggle{display:inline-flex;gap:3px;padding:3px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;margin:0 0 10px}.scope-toggle button{border:0;background:transparent;color:var(--muted);padding:5px 12px;border-radius:6px;font:750 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;cursor:pointer}.scope-toggle button.active{background:var(--accent);color:white}.insight-scope{display:none}.insight-scope.active{display:block}.model-summary{color:var(--muted);margin:0 0 8px;font-size:12px}.model-usage{display:grid;gap:2px}.model-row{display:grid;grid-template-columns:minmax(180px,1.4fr) minmax(160px,2fr) 44px;gap:14px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}.model-row:last-child{border-bottom:0}.model-label strong,.model-label span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.model-label span{color:var(--muted);font-size:11px;margin-top:2px}.model-meter{height:7px;background:var(--panel2);border-radius:99px;overflow:hidden}.model-meter span{display:block;height:100%;background:var(--accent);border-radius:99px}
+            @media(max-width:760px){.content{padding:16px 14px}.grid,.two{grid-template-columns:1fr}.detail-grid{grid-template-columns:1fr 1fr}.timeline-row{grid-template-columns:110px 1fr}.timeline-row>.num{display:none}.metric-row{grid-template-columns:1fr auto}.metric-row>.meter-wrap{grid-column:1/-1;grid-row:2}.model-row{grid-template-columns:minmax(0,1fr) 42px}.model-meter{grid-column:1/-1;grid-row:2}.tabs button{padding:7px 9px}}
           </style>
         </head>
         <body>
@@ -2928,11 +3082,11 @@ enum AIUsageReader {
           </section>
 
           <section id="page-insights" class="hub-page">
-            \(pageHeading("AI Insights", "How AI enters your work, which tools you use, and where generated output goes afterward."))
+            \(pageHeading("AI Insights", "Which models you use, how usage is distributed, how AI enters your work, and where generated output goes afterward."))
             <div class="scope-toggle"><button data-insight-filter="all" onclick="showInsightScope('all')">All</button><button data-insight-filter="codex" onclick="showInsightScope('codex')">Codex</button><button data-insight-filter="claude" onclick="showInsightScope('claude')">Claude</button></div>
-            <div class="insight-scope" data-insight-scope="all">\(insightPanels(records: records, transfers: transfers, provider: nil, startOfDay: startOfDay))</div>
-            <div class="insight-scope" data-insight-scope="codex">\(insightPanels(records: records, transfers: transfers, provider: "Codex", startOfDay: startOfDay))</div>
-            <div class="insight-scope" data-insight-scope="claude">\(insightPanels(records: records, transfers: transfers, provider: "Claude", startOfDay: startOfDay))</div>
+            <div class="insight-scope" data-insight-scope="all">\(insightPanels(records: records, transfers: transfers, llmUsage: llmUsage, provider: nil, startOfDay: startOfDay))</div>
+            <div class="insight-scope" data-insight-scope="codex">\(insightPanels(records: records, transfers: transfers, llmUsage: llmUsage, provider: "Codex", startOfDay: startOfDay))</div>
+            <div class="insight-scope" data-insight-scope="claude">\(insightPanels(records: records, transfers: transfers, llmUsage: llmUsage, provider: "Claude", startOfDay: startOfDay))</div>
           </section>
 
           <section id="page-runway" class="hub-page">
@@ -2963,6 +3117,7 @@ enum AIUsageReader {
     private static func insightPanels(
         records: [AIActivityRecord],
         transfers: [AITransferRecord],
+        llmUsage: LLMUsageSnapshot,
         provider: String?,
         startOfDay: Date
     ) -> String {
@@ -2991,12 +3146,32 @@ enum AIUsageReader {
         let after = counters(workflows.map(\.after), limit: 8)
 
         return """
+        \(modelUsagePanel(llmUsage, provider: provider))
         <div class="two">\(panel("Today’s AI Tools", list(todayTools)))\(panel("7-day AI Tools", list(weeklyTools)))</div>
         \(panel("AI Output Destinations", transferRows(flows)))
         <div class="two">\(panel("Likely Use Cases · 7 days", list(useCases)))\(panel("Where AI Output Went", list(destinations)))</div>
         <div class="two">\(panel("Before AI", list(before)))\(panel("After AI", list(after)))</div>
         \(pathVisual(workflows))
         """
+    }
+
+    private static func modelUsagePanel(_ snapshot: LLMUsageSnapshot, provider: String?) -> String {
+        let summary = snapshot.modelUsageSummary(provider: provider)
+        guard !summary.models.isEmpty else {
+            return panel("Model Usage · 7 days", "<p class=\"sub\">No local model context found in the last seven days.</p>")
+        }
+        let rows = summary.models.map { model in
+            let barColor = model.provider.caseInsensitiveCompare("Claude") == .orderedSame ? "#e0815c" : "var(--accent)"
+            return """
+            <div class="model-row">
+              <div class="model-label"><strong>\(html(model.modelName))</strong><span>\(html(model.provider)) · \(model.sessionCount) session\(model.sessionCount == 1 ? "" : "s") · \(compactTokenCount(model.tokens)) tokens</span></div>
+              <div class="model-meter"><span style="width:\(model.sharePercent)%;background:\(barColor)"></span></div>
+              <strong class="num">\(model.sharePercent == 0 && model.tokens > 0 ? "&lt;1%" : "\(model.sharePercent)%")</strong>
+            </div>
+            """
+        }.joined()
+        let context = "\(summary.sessionCount) sessions · \(compactTokenCount(summary.totalTokens)) recorded tokens · distribution by \(summary.distributionBasis)"
+        return panel("Model Usage · 7 days", "<p class=\"model-summary\">\(html(context))</p><div class=\"model-usage\">\(rows)</div>")
     }
 
     private static func card(_ title: String, _ value: String, _ subtitle: String) -> String {
@@ -3442,6 +3617,21 @@ enum LLMUsageReader {
         let costEstimates: [LLMTokenCostEstimate]
         let recentSessions: [LLMUsageSession]
         let topWeeklySessions: [LLMUsageSession]
+        let modelUsage: [LLMModelUsageTotal]
+        let dailyModelUsage: [LLMModelUsageTotal]
+    }
+
+    private struct ClaudeModelUsageEvent {
+        let requestID: String
+        let sessionID: String
+        let modelName: String
+        let tokens: UInt64
+        let timestamp: Date?
+    }
+
+    private struct ClaudeTranscript {
+        let session: LLMUsageSession
+        let modelEvents: [ClaudeModelUsageEvent]
     }
 
     private final class HTTPResultBox: @unchecked Sendable {
@@ -3691,6 +3881,14 @@ enum LLMUsageReader {
         let claudeLocal = readLocalClaudeUsage()
         let local = mergedLocalUsage(codexLocal, claudeLocal)
         var snapshot = readCodexUsage(local: local)
+        snapshot.weeklyModelUsage = local.modelUsage
+        snapshot.dailyModelUsage = local.dailyModelUsage
+        snapshot.providerAccounts = providerAccounts(
+            codexEmail: snapshot.email,
+            codexPlan: snapshot.planType,
+            hasCodexSessions: !codexLocal.recentSessions.isEmpty,
+            hasClaudeSessions: !claudeLocal.recentSessions.isEmpty
+        )
 
         if let token = readClaudeAccessToken() {
             switch readClaudeLimits(accessToken: token) {
@@ -3710,6 +3908,82 @@ enum LLMUsageReader {
             ? nil
             : snapshot.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
         return snapshot
+    }
+
+    private static func providerAccounts(
+        codexEmail: String?,
+        codexPlan: String?,
+        hasCodexSessions: Bool,
+        hasClaudeSessions: Bool
+    ) -> [LLMProviderAccount] {
+        var accounts: [LLMProviderAccount] = []
+        if codexEmail != nil || codexPlan != nil || hasCodexSessions {
+            accounts.append(
+                LLMProviderAccount(
+                    provider: "Codex",
+                    email: codexEmail,
+                    displayName: nil,
+                    organizationName: nil,
+                    planName: codexPlan
+                )
+            )
+        }
+        if let claude = readClaudeAccountProfile() {
+            accounts.append(claude)
+        } else if hasClaudeSessions {
+            accounts.append(
+                LLMProviderAccount(
+                    provider: "Claude",
+                    email: nil,
+                    displayName: nil,
+                    organizationName: nil,
+                    planName: nil
+                )
+            )
+        }
+        return accounts
+    }
+
+    private static func readClaudeAccountProfile() -> LLMProviderAccount? {
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let account = (root["oauthAccount"] as? [String: Any]) ?? root
+
+        func text(_ key: String) -> String? {
+            guard let value = account[key] as? String else { return nil }
+            let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clean.isEmpty ? nil : clean
+        }
+
+        let seatTier = text("seatTier")
+        let plan: String?
+        if let seatTier {
+            let normalized = seatTier.lowercased()
+            if normalized.contains("team") {
+                plan = "Team"
+            } else if normalized.contains("enterprise") {
+                plan = "Enterprise"
+            } else if normalized.contains("max") {
+                plan = "Max"
+            } else if normalized.contains("pro") {
+                plan = "Pro"
+            } else {
+                plan = seatTier.replacingOccurrences(of: "_", with: " ").capitalized
+            }
+        } else {
+            plan = nil
+        }
+
+        return LLMProviderAccount(
+            provider: "Claude",
+            email: text("emailAddress"),
+            displayName: text("displayName"),
+            organizationName: text("organizationName"),
+            planName: plan
+        )
     }
 
     private static func readCodexUsage(local: LocalCodexUsage) -> LLMUsageSnapshot {
@@ -3986,8 +4260,29 @@ enum LLMUsageReader {
             windows: windows,
             costEstimates: codex.costEstimates,
             recentSessions: Array(recent.prefix(30)),
-            topWeeklySessions: Array(topWeekly.prefix(30))
+            topWeeklySessions: Array(topWeekly.prefix(30)),
+            modelUsage: mergedModelUsage(codex.modelUsage + claude.modelUsage),
+            dailyModelUsage: mergedModelUsage(codex.dailyModelUsage + claude.dailyModelUsage)
         )
+    }
+
+    private static func mergedModelUsage(_ totals: [LLMModelUsageTotal]) -> [LLMModelUsageTotal] {
+        var merged: [String: LLMModelUsageTotal] = [:]
+        for total in totals {
+            let key = "\(total.provider.lowercased())|\(total.modelName.lowercased())"
+            let existing = merged[key]
+            merged[key] = LLMModelUsageTotal(
+                provider: existing?.provider ?? total.provider,
+                modelName: existing?.modelName ?? total.modelName,
+                tokens: (existing?.tokens ?? 0) + total.tokens,
+                sessionCount: (existing?.sessionCount ?? 0) + total.sessionCount
+            )
+        }
+        return merged.values.sorted {
+            $0.tokens == $1.tokens
+                ? $0.modelName.localizedCaseInsensitiveCompare($1.modelName) == .orderedAscending
+                : $0.tokens > $1.tokens
+        }
     }
 
     private static func uniqueSessions(_ sessions: [LLMUsageSession]) -> [LLMUsageSession] {
@@ -4015,7 +4310,9 @@ enum LLMUsageReader {
             }
         }
 
-        let sessions = uniqueSessions(urls.compactMap(claudeSession))
+        let transcripts = urls.compactMap(claudeTranscript)
+        let sessions = uniqueSessions(transcripts.map(\.session))
+        let modelEvents = uniqueClaudeModelEvents(transcripts.flatMap(\.modelEvents))
         let now = Date()
         func usageWindow(label: String, seconds: TimeInterval) -> LLMLocalUsageWindow {
             let matching = sessions.filter { session in
@@ -4048,11 +4345,54 @@ enum LLMUsageReader {
             windows: windows,
             costEstimates: [],
             recentSessions: Array(recent.prefix(30)),
-            topWeeklySessions: Array(weekly.prefix(30))
+            topWeeklySessions: Array(weekly.prefix(30)),
+            modelUsage: modelUsageTotals(from: modelEvents, since: now.addingTimeInterval(-604_800)),
+            dailyModelUsage: modelUsageTotals(from: modelEvents, since: now.addingTimeInterval(-86_400))
         )
     }
 
-    private static func claudeSession(from url: URL) -> LLMUsageSession? {
+    private static func modelUsageTotals(from sessions: [LLMUsageSession]) -> [LLMModelUsageTotal] {
+        let totals = sessions.map { session in
+            LLMModelUsageTotal(
+                provider: session.provider,
+                modelName: compactText(session.modelName, fallback: "Model unavailable"),
+                tokens: session.tokenUsage?.totalTokens ?? session.tokens,
+                sessionCount: 1
+            )
+        }
+        return mergedModelUsage(totals)
+    }
+
+    private static func uniqueClaudeModelEvents(_ events: [ClaudeModelUsageEvent]) -> [ClaudeModelUsageEvent] {
+        var seen = Set<String>()
+        return events.filter { seen.insert("\($0.sessionID)|\($0.requestID)").inserted }
+    }
+
+    private static func modelUsageTotals(
+        from events: [ClaudeModelUsageEvent],
+        since cutoff: Date
+    ) -> [LLMModelUsageTotal] {
+        let recent = events.filter {
+            ($0.timestamp ?? .distantPast) >= cutoff
+                && $0.tokens > 0
+                && !$0.modelName.localizedCaseInsensitiveContains("synthetic")
+        }
+        let groups = Dictionary(grouping: recent, by: { $0.modelName })
+        return groups.map { modelName, modelEvents in
+            LLMModelUsageTotal(
+                provider: "Claude",
+                modelName: modelName,
+                tokens: modelEvents.reduce(UInt64(0)) { $0 + $1.tokens },
+                sessionCount: Set(modelEvents.map(\.sessionID)).count
+            )
+        }.sorted {
+            $0.tokens == $1.tokens
+                ? $0.modelName.localizedCaseInsensitiveCompare($1.modelName) == .orderedAscending
+                : $0.tokens > $1.tokens
+        }
+    }
+
+    private static func claudeTranscript(from url: URL) -> ClaudeTranscript? {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         var sessionID = url.deletingPathExtension().lastPathComponent
         var title: String?
@@ -4061,7 +4401,7 @@ enum LLMUsageReader {
         var model: String?
         var createdAt: Date?
         var updatedAt: Date?
-        var requestUsage: [String: LLMTokenUsageSummary] = [:]
+        var requestUsage: [String: (usage: LLMTokenUsageSummary, modelName: String, timestamp: Date?)] = [:]
 
         for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
             guard let data = String(line).data(using: .utf8),
@@ -4070,7 +4410,8 @@ enum LLMUsageReader {
             if let value = object["customTitle"] as? String, !value.isEmpty { title = value }
             if title == nil, let value = object["aiTitle"] as? String, !value.isEmpty { title = value }
             if let value = object["cwd"] as? String, !value.isEmpty { cwd = value }
-            if let value = object["timestamp"] as? String, let date = iso8601Date(value) {
+            let eventTimestamp = (object["timestamp"] as? String).flatMap(iso8601Date)
+            if let date = eventTimestamp {
                 createdAt = min(createdAt ?? date, date)
                 updatedAt = max(updatedAt ?? date, date)
             }
@@ -4089,17 +4430,21 @@ enum LLMUsageReader {
             let cacheRead = uint64(usage["cache_read_input_tokens"])
             let output = uint64(usage["output_tokens"])
             let key = (object["requestId"] as? String) ?? (object["uuid"] as? String) ?? "line-\(index)"
-            requestUsage[key] = LLMTokenUsageSummary(
-                inputTokens: input + cacheCreated + cacheRead,
-                cachedInputTokens: cacheRead,
-                outputTokens: output,
-                reasoningOutputTokens: 0,
-                totalTokens: input + cacheCreated + cacheRead + output,
-                turnCount: 1
+            requestUsage[key] = (
+                LLMTokenUsageSummary(
+                    inputTokens: input + cacheCreated + cacheRead,
+                    cachedInputTokens: cacheRead,
+                    outputTokens: output,
+                    reasoningOutputTokens: 0,
+                    totalTokens: input + cacheCreated + cacheRead + output,
+                    turnCount: 1
+                ),
+                compactText(message["model"] as? String ?? "", fallback: "Claude model unavailable"),
+                eventTimestamp
             )
         }
 
-        let totals = requestUsage.values.reduce(
+        let totals = requestUsage.values.map(\.usage).reduce(
             LLMTokenUsageSummary(inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, turnCount: 0)
         ) { result, usage in
             LLMTokenUsageSummary(
@@ -4113,12 +4458,15 @@ enum LLMUsageReader {
         }
         guard createdAt != nil || updatedAt != nil || totals.totalTokens > 0 else { return nil }
         let cleanPreview = compactText(preview ?? "", fallback: "No prompt preview stored")
-        return LLMUsageSession(
+        let dominantModel = Dictionary(grouping: requestUsage.values, by: \.modelName)
+            .map { (model: $0.key, tokens: $0.value.reduce(UInt64(0)) { $0 + $1.usage.totalTokens }) }
+            .max { $0.tokens < $1.tokens }?.model
+        let session = LLMUsageSession(
             id: sessionID,
             provider: "Claude",
             title: compactText(title ?? preview ?? "", fallback: "Claude session"),
             projectName: projectName(from: cwd ?? ""),
-            modelName: compactText(model ?? "", fallback: "Claude model unavailable"),
+            modelName: dominantModel ?? compactText(model ?? "", fallback: "Claude model unavailable"),
             preview: trimmed(cleanPreview, maxLength: 500),
             rolloutPath: url.path,
             tokens: totals.totalTokens,
@@ -4126,6 +4474,16 @@ enum LLMUsageReader {
             createdAt: createdAt,
             updatedAt: updatedAt
         )
+        let events = requestUsage.map { key, value in
+            ClaudeModelUsageEvent(
+                requestID: key,
+                sessionID: sessionID,
+                modelName: value.modelName,
+                tokens: value.usage.totalTokens,
+                timestamp: value.timestamp ?? updatedAt
+            )
+        }
+        return ClaudeTranscript(session: session, modelEvents: events)
     }
 
     private static func claudeMessageText(_ value: Any?) -> String? {
@@ -4152,7 +4510,7 @@ enum LLMUsageReader {
     private static func readLocalCodexUsage() -> LocalCodexUsage {
         let databasePath = "\(NSHomeDirectory())/.codex/state_5.sqlite"
         guard FileManager.default.fileExists(atPath: databasePath) else {
-            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], costEstimates: [], recentSessions: [], topWeeklySessions: [])
+            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], costEstimates: [], recentSessions: [], topWeeklySessions: [], modelUsage: [], dailyModelUsage: [])
         }
 
         let windows = [
@@ -4171,8 +4529,32 @@ enum LLMUsageReader {
             windows: windows,
             costEstimates: costEstimates(databasePath: databasePath),
             recentSessions: sessions(databasePath: databasePath, mode: .recent),
-            topWeeklySessions: sessions(databasePath: databasePath, mode: .highestWeekly)
+            topWeeklySessions: sessions(databasePath: databasePath, mode: .highestWeekly),
+            modelUsage: codexModelUsage(databasePath: databasePath, seconds: 604_800),
+            dailyModelUsage: codexModelUsage(databasePath: databasePath, seconds: 86_400)
         )
+    }
+
+    private static func codexModelUsage(databasePath: String, seconds: Int) -> [LLMModelUsageTotal] {
+        let query = """
+        select
+            replace(replace(coalesce(nullif(model,''), nullif(model_provider,''), 'Model unavailable'), char(10), ' '), char(9), ' '),
+            coalesce(sum(tokens_used),0),
+            count(*)
+        from threads
+        where coalesce(updated_at_ms, updated_at * 1000) >= (strftime('%s','now')-\(seconds))*1000
+        group by 1
+        order by 2 desc;
+        """
+        return sqliteRows(databasePath: databasePath, query: query).compactMap { row in
+            guard row.count >= 3 else { return nil }
+            return LLMModelUsageTotal(
+                provider: "Codex",
+                modelName: compactText(row[0], fallback: "Model unavailable"),
+                tokens: UInt64(row[1]) ?? 0,
+                sessionCount: Int(row[2]) ?? 0
+            )
+        }
     }
 
     private static func localWindow(databasePath: String, label: String, seconds: Int) -> LLMLocalUsageWindow {

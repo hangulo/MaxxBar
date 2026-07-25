@@ -67,6 +67,10 @@ enum MaxxBarLauncher {
                 .sorted()
                 .joined(separator: ",")
             print("llmSessionProviders=\(sessionProviders)")
+            let modelUsage = llmUsage.modelUsageSummary()
+            print("llmModelUsage=\(modelUsage.models.map { "\($0.provider):\($0.modelName)=\($0.sharePercent)%/\($0.tokens)t/\($0.sessionCount)s" }.joined(separator: ","))")
+            let dailyModelUsage = llmUsage.modelUsageSummary(lastSeconds: 86_400)
+            print("llmModelUsage24h=\(dailyModelUsage.models.map { "\($0.provider):\($0.modelName)=\($0.sharePercent)%/\($0.tokens)t/\($0.sessionCount)s" }.joined(separator: ","))")
             print("llmError=\(llmUsage.error ?? "-")")
             let aiUsage = AIUsageReader.recordAndRead(memory: snapshot, cpuGPU: .empty, llmUsage: llmUsage)
             print("aiActiveTool=\(aiUsage.activeTool ?? "-")")
@@ -143,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private let clipboardFlowMonitor = ClipboardFlowMonitor()
     private var currentPopoverPanel: StatsPanel = .runway
+    private var currentPopoverSize = PopoverSizePreference.load()
 
     init(shouldVerifyPopoverAction: Bool = false, shouldVerifyPopOutAction: Bool = false) {
         self.shouldVerifyPopoverAction = shouldVerifyPopoverAction
@@ -177,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 306, height: 662)
+        popover.contentSize = currentPopoverSize
         popover.contentViewController = makePopoverContent(selectedPanel: .runway)
         self.popover = popover
 
@@ -281,9 +286,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onPopOut: { [weak self] in self?.showDetachedWindow() },
                 onQuit: { NSApp.terminate(nil) },
                 onStartDeepTrace: { [weak self] in self?.model.startDeepTrace() },
-                selectedPanel: selectedPanel
+                selectedPanel: selectedPanel,
+                fixedSize: false,
+                resizableSize: currentPopoverSize,
+                onResize: { [weak self] size in self?.resizePopover(to: size) ?? size }
             )
         )
+    }
+
+    @discardableResult
+    private func resizePopover(to proposedSize: CGSize) -> CGSize {
+        let size = PopoverSizePreference.clamped(proposedSize)
+        currentPopoverSize = size
+        popover?.contentSize = size
+        PopoverSizePreference.save(size)
+        return size
     }
 
     private func statusTextLines() -> (top: String, bottom: String) {
@@ -428,6 +445,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fputs("pop-out verification failed\n", stderr)
             exit(1)
         }
+    }
+}
+
+@MainActor
+private enum PopoverSizePreference {
+    static let defaultSize = NSSize(width: 306, height: 662)
+    static let minimumSize = NSSize(width: 280, height: 480)
+    static let maximumWidth: CGFloat = 640
+    private static let widthKey = "MaxxBar.popoverWidth"
+    private static let heightKey = "MaxxBar.popoverHeight"
+
+    static func load() -> NSSize {
+        let defaults = UserDefaults.standard
+        let width = defaults.double(forKey: widthKey)
+        let height = defaults.double(forKey: heightKey)
+        guard width > 0, height > 0 else { return defaultSize }
+        return clamped(NSSize(width: width, height: height))
+    }
+
+    static func save(_ size: NSSize) {
+        UserDefaults.standard.set(Double(size.width), forKey: widthKey)
+        UserDefaults.standard.set(Double(size.height), forKey: heightKey)
+    }
+
+    static func clamped(_ size: NSSize) -> NSSize {
+        let availableHeight = NSScreen.main.map {
+            max($0.visibleFrame.height - 44, minimumSize.height)
+        } ?? 900
+        return NSSize(
+            width: min(max(size.width, minimumSize.width), maximumWidth),
+            height: min(max(size.height, minimumSize.height), availableHeight)
+        )
     }
 }
 
