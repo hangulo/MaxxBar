@@ -2,6 +2,10 @@
 
 ## v0.2.0 - 2026-07-10
 
+- Added a resizable menu-bar popover that remembers its last width and height.
+- Added detected Codex/Claude account and plan rows with today’s provider-attributed time and session share.
+- Strengthened weekly drawdown rendering with a continuous line and interactive point hover for timestamp and remaining percentage.
+- Added seven-day model context and model-usage distribution to Insights in both the menu bar popover and MaxxBar Hub, with Codex/Claude filtering and token-share percentages.
 - Added Claude parity across Runway and Sessions: local Claude Code/Desktop/Cowork transcript discovery, per-session model and token/cache totals, combined local windows, provider labels, and live five-hour/weekly Claude limits when Claude Code OAuth is available.
 - Added explicit provider status so Claude sessions remain visible when Desktop authentication is present but a Claude Code OAuth credential is not.
 - Promoted MaxxBar from a compact runway utility into a fuller AI workflow companion.

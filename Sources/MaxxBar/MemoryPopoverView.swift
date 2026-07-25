@@ -7,6 +7,8 @@ struct MemoryPopoverView: View {
     var onQuit: (() -> Void)?
     var onStartDeepTrace: (() -> Void)?
     var fixedSize: Bool
+    var resizableSize: CGSize?
+    var onResize: ((CGSize) -> CGSize)?
     @State private var selectedPanel = StatsPanel.runway
 
     init(
@@ -15,13 +17,17 @@ struct MemoryPopoverView: View {
         onQuit: (() -> Void)? = nil,
         onStartDeepTrace: (() -> Void)? = nil,
         selectedPanel: StatsPanel = .runway,
-        fixedSize: Bool = true
+        fixedSize: Bool = true,
+        resizableSize: CGSize? = nil,
+        onResize: ((CGSize) -> CGSize)? = nil
     ) {
         self.model = model
         self.onPopOut = onPopOut
         self.onQuit = onQuit
         self.onStartDeepTrace = onStartDeepTrace
         self.fixedSize = fixedSize
+        self.resizableSize = resizableSize
+        self.onResize = onResize
         _selectedPanel = State(initialValue: selectedPanel)
     }
 
@@ -63,16 +69,79 @@ struct MemoryPopoverView: View {
         }
         .padding(8)
         .frame(
-            minWidth: fixedSize ? 306 : 306,
+            minWidth: fixedSize ? 306 : 280,
             idealWidth: 306,
             maxWidth: fixedSize ? 306 : .infinity,
-            minHeight: fixedSize ? 662 : 662,
+            minHeight: fixedSize ? 662 : 480,
             idealHeight: 662,
             maxHeight: fixedSize ? 662 : .infinity,
             alignment: .top
         )
         .background(Color.background)
         .foregroundStyle(.white)
+        .overlay(alignment: .bottomTrailing) {
+            if let resizableSize, let onResize {
+                PopoverResizeHandle(initialSize: resizableSize, onResize: onResize)
+                    .padding(3)
+            }
+        }
+    }
+}
+
+private struct PopoverResizeHandle: View {
+    let initialSize: CGSize
+    let onResize: (CGSize) -> CGSize
+    @State private var committedSize: CGSize
+    @State private var dragStartSize: CGSize?
+
+    init(initialSize: CGSize, onResize: @escaping (CGSize) -> CGSize) {
+        self.initialSize = initialSize
+        self.onResize = onResize
+        _committedSize = State(initialValue: initialSize)
+    }
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<3, id: \.self) { index in
+                Path { path in
+                    let inset = CGFloat(index * 4)
+                    path.move(to: CGPoint(x: 5 + inset, y: 17))
+                    path.addLine(to: CGPoint(x: 17, y: 5 + inset))
+                }
+                .stroke(
+                    Color.white.opacity(0.34),
+                    style: StrokeStyle(lineWidth: 1.2, lineCap: .round)
+                )
+            }
+        }
+        .frame(width: 22, height: 22)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    let start = dragStartSize ?? committedSize
+                    if dragStartSize == nil {
+                        dragStartSize = start
+                    }
+                    _ = onResize(
+                        CGSize(
+                            width: start.width + value.translation.width,
+                            height: start.height + value.translation.height
+                        )
+                    )
+                }
+                .onEnded { value in
+                    let start = dragStartSize ?? committedSize
+                    let resized = CGSize(
+                        width: start.width + value.translation.width,
+                        height: start.height + value.translation.height
+                    )
+                    committedSize = onResize(resized)
+                    dragStartSize = nil
+                }
+        )
+        .help("Drag to resize. MaxxBar remembers this size.")
+        .accessibilityLabel("Resize MaxxBar menu")
     }
 }
 
@@ -251,6 +320,12 @@ struct AIUsagePanelView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 7) {
                     AIUsageOverviewCard(snapshot: filteredAIUsage, providerFilter: $providerFilter)
+                    AIProviderAccountsCard(
+                        aiUsage: aiUsage,
+                        accounts: snapshot.providerAccounts,
+                        providerFilter: providerFilter
+                    )
+                    LLMModelUsageCard(snapshot: filteredLLMSnapshot)
                     AITransferCard(snapshot: filteredAIUsage)
                     AIWorkflowMiniCard(snapshot: filteredAIUsage)
                     LLMSessionTimelineCard(snapshot: filteredLLMSnapshot)
@@ -290,7 +365,104 @@ struct AIUsagePanelView: View {
         var filtered = snapshot
         filtered.recentSessions = snapshot.recentSessions.filter(providerFilter.matches)
         filtered.topWeeklySessions = snapshot.topWeeklySessions.filter(providerFilter.matches)
+        filtered.weeklyModelUsage = snapshot.weeklyModelUsage.filter {
+            $0.provider.caseInsensitiveCompare(providerFilter.rawValue) == .orderedSame
+        }
+        filtered.dailyModelUsage = snapshot.dailyModelUsage.filter {
+            $0.provider.caseInsensitiveCompare(providerFilter.rawValue) == .orderedSame
+        }
         return filtered
+    }
+}
+
+struct AIProviderAccountsCard: View {
+    let aiUsage: AIUsageSnapshot
+    let accounts: [LLMProviderAccount]
+    let providerFilter: AIInsightProviderFilter
+
+    private var visibleAccounts: [LLMProviderAccount] {
+        accounts.filter {
+            providerFilter == .all
+                || $0.provider.caseInsensitiveCompare(providerFilter.rawValue) == .orderedSame
+        }
+    }
+
+    private var totalProviderTime: TimeInterval {
+        aiUsage.providerSummaries.reduce(0) { $0 + $1.timeTodaySeconds }
+    }
+
+    private var totalProviderSessions: Int {
+        aiUsage.providerSummaries.reduce(0) { $0 + $1.sessionsToday }
+    }
+
+    var body: some View {
+        if !visibleAccounts.isEmpty {
+            VStack(alignment: .leading, spacing: 7) {
+                InstantHelpTitle(
+                    "ACTIVE ACCOUNTS · TODAY",
+                    help: "Codex account and plan come from its live usage response. Claude account, organization, and seat tier come from the local Claude profile. Activity share is based on foreground windows attributed to each provider today; provider windows can overlap."
+                )
+
+                ForEach(visibleAccounts) { account in
+                    let usage = aiUsage.providerSummaries.first {
+                        $0.provider.caseInsensitiveCompare(account.provider) == .orderedSame
+                    }
+                    accountRow(account, usage: usage)
+                }
+            }
+            .sectionStyle()
+        }
+    }
+
+    private func accountRow(
+        _ account: LLMProviderAccount,
+        usage: AIProviderUsageSummary?
+    ) -> some View {
+        let accountName = account.organizationName ?? account.displayName ?? account.provider
+        let time = usage?.timeTodaySeconds ?? 0
+        let sessions = usage?.sessionsToday ?? 0
+        let timeShare = totalProviderTime > 0 ? Int((time / totalProviderTime * 100).rounded()) : 0
+        let sessionShare = totalProviderSessions > 0
+            ? Int((Double(sessions) / Double(totalProviderSessions) * 100).rounded())
+            : 0
+
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Circle()
+                    .fill(account.provider == "Claude" ? Color.claudeCoral : Color.codexBlue)
+                    .frame(width: 6, height: 6)
+                Text(accountName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .lineLimit(1)
+                if accountName.caseInsensitiveCompare(account.provider) != .orderedSame {
+                    Text("· \(account.provider)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.48))
+                }
+                Spacer(minLength: 4)
+                Text("\(timeShare)% time")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.74))
+                    .monospacedDigit()
+            }
+
+            HStack(spacing: 5) {
+                Text(account.email ?? "Account unavailable")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("· \(planName(account.planName))")
+                Spacer(minLength: 4)
+                Text("\(sessions) session\(sessions == 1 ? "" : "s") · \(sessionShare)%")
+                    .monospacedDigit()
+            }
+            .font(.system(size: 9.5, weight: .regular))
+            .foregroundStyle(.white.opacity(0.46))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.background.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -446,14 +618,14 @@ struct AIUsageOverviewCard: View {
             }
 
             HStack(spacing: 7) {
-                aiMetric("Today", "\(snapshot.sessionsToday)", "sessions")
-                aiMetric("AI time", aiDuration(snapshot.timeTodaySeconds), "today")
-                aiMetric("Avg", aiDuration(snapshot.averageSessionSeconds), "session")
+                aiMetric("Today", "\(snapshot.sessionsToday)", "windows")
+                aiMetric("Foreground", aiDuration(snapshot.timeTodaySeconds), "today")
+                aiMetric("Avg", aiDuration(snapshot.averageSessionSeconds), "window")
             }
 
             Text(providerFilter == .all
-                 ? "Shared activity windows · provider counts may overlap"
-                 : "\(providerFilter.rawValue) activity windows")
+                 ? "Foreground AI windows · provider counts may overlap"
+                 : "Foreground \(providerFilter.rawValue) activity · transcript totals below")
                 .font(.system(size: 9, weight: .regular))
                 .foregroundStyle(.white.opacity(0.4))
                 .fixedSize(horizontal: false, vertical: true)
@@ -483,6 +655,108 @@ struct AIUsageOverviewCard: View {
         .background(Color.background.opacity(0.35))
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
+}
+
+struct LLMModelUsageCard: View {
+    let snapshot: LLMUsageSnapshot
+    @State private var selectedWindow = ModelMixWindow.day
+
+    private var summary: LLMModelUsageSummary {
+        snapshot.modelUsageSummary(lastSeconds: selectedWindow.seconds)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                InstantHelpTitle(
+                    "MODEL MIX",
+                    help: "Shows which models appear in locally discovered Codex and Claude activity. Claude totals are attributed per assistant response so model switches inside a session are counted correctly."
+                )
+                Spacer()
+                HStack(spacing: 2) {
+                    ForEach(ModelMixWindow.allCases) { window in
+                        Button(window.rawValue) { selectedWindow = window }
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(selectedWindow == window ? .white : .white.opacity(0.48))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(selectedWindow == window ? Color.white.opacity(0.12) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .buttonStyle(.plain)
+                    }
+                }
+                .padding(2)
+                .background(Color.background.opacity(0.36))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+
+            if summary.models.isEmpty {
+                Text("No local model context found in the last \(selectedWindow.description).")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.55))
+            } else {
+                ForEach(Array(summary.models.prefix(5))) { model in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(providerColor(model.provider))
+                                .frame(width: 6, height: 6)
+                            Text(model.modelName)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.82))
+                                .lineLimit(1)
+                                .help(model.modelName)
+                            Spacer(minLength: 4)
+                            Text(model.sharePercent == 0 && model.tokens > 0 ? "<1%" : "\(model.sharePercent)%")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.82))
+                                .monospacedDigit()
+                        }
+
+                        GeometryReader { proxy in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.background.opacity(0.55))
+                                Capsule()
+                                    .fill(providerColor(model.provider).opacity(0.82))
+                                    .frame(width: max(model.sharePercent > 0 ? 2 : 0, proxy.size.width * CGFloat(model.sharePercent) / 100))
+                            }
+                        }
+                        .frame(height: 4)
+
+                        Text("\(model.provider) · \(model.sessionCount) session\(model.sessionCount == 1 ? "" : "s") · \(tokenCount(model.tokens)) tokens")
+                            .font(.system(size: 9, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.42))
+                            .lineLimit(1)
+                    }
+                }
+
+                if summary.models.count > 5 {
+                    Text("+\(summary.models.count - 5) more models")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.48))
+                }
+
+                Text("\(summary.sessionCount) sessions · \(tokenCount(summary.totalTokens)) tokens · share by \(summary.distributionBasis)")
+                    .font(.system(size: 9, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .sectionStyle()
+    }
+
+    private func providerColor(_ provider: String) -> Color {
+        provider.caseInsensitiveCompare("Claude") == .orderedSame ? .claudeCoral : .codexBlue
+    }
+}
+
+private enum ModelMixWindow: String, CaseIterable, Identifiable {
+    case day = "24H"
+    case sevenDays = "7D"
+
+    var id: String { rawValue }
+    var seconds: TimeInterval { self == .day ? 86_400 : 604_800 }
+    var description: String { self == .day ? "24 hours" : "seven days" }
 }
 
 struct AITransferCard: View {
@@ -1166,7 +1440,7 @@ struct DrawdownInsightCard: View {
     }
 
     private var rangedQuotaHistory: [LLMQuotaHistorySample] {
-        let cutoff = Date().addingTimeInterval(-LLMQuotaHistoryRange.sixHours.interval)
+        let cutoff = Date().addingTimeInterval(-LLMQuotaHistoryRange.sevenDays.interval)
         let samples = effectiveQuotaHistory.filter { $0.sampledAt >= cutoff }
         return samples.isEmpty ? Array(effectiveQuotaHistory.suffix(1)) : samples
     }
@@ -1195,13 +1469,13 @@ struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
-    @State private var drawdownRange = LLMQuotaHistoryRange.sixHours
+    @State private var drawdownRange = LLMQuotaHistoryRange.day
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    InstantHelpTitle("LIMIT DRAWDOWN", help: limitDrawdownHelp)
+                    InstantHelpTitle("WEEKLY DRAWDOWN", help: limitDrawdownHelp)
                     Spacer()
                     Button {
                         onSampleQuota?()
@@ -1213,12 +1487,15 @@ struct LLMLocalUsageCard: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(onSampleQuota == nil)
-                    .help("Capture the current 5H and Week values now")
+                    .help("Capture the current weekly value now")
                 }
 
                 HStack {
                     Spacer()
-                    LLMQuotaHistoryRangeToggle(selection: $drawdownRange)
+                    LLMQuotaHistoryRangeToggle(
+                        selection: $drawdownRange,
+                        ranges: [.day, .sevenDays]
+                    )
                 }
             }
 
@@ -1290,7 +1567,10 @@ struct LLMSessionTimelineCard: View {
             HStack {
                 InstantHelpTitle("SESSION TIMELINE", help: sessionTimelineHelp)
                 Spacer()
-                LLMQuotaHistoryRangeToggle(selection: $range)
+                LLMQuotaHistoryRangeToggle(
+                    selection: $range,
+                    ranges: [.sixHours, .day]
+                )
             }
 
             if sessionTimelineSessions.isEmpty {
@@ -1308,6 +1588,7 @@ struct LLMSessionTimelineCard: View {
 enum LLMQuotaHistoryRange: String, CaseIterable, Identifiable {
     case sixHours = "6H"
     case day = "24H"
+    case sevenDays = "1W"
 
     var id: String { rawValue }
 
@@ -1317,16 +1598,19 @@ enum LLMQuotaHistoryRange: String, CaseIterable, Identifiable {
             return 6 * 60 * 60
         case .day:
             return 24 * 60 * 60
+        case .sevenDays:
+            return 7 * 24 * 60 * 60
         }
     }
 }
 
 struct LLMQuotaHistoryRangeToggle: View {
     @Binding var selection: LLMQuotaHistoryRange
+    var ranges = LLMQuotaHistoryRange.allCases
 
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(LLMQuotaHistoryRange.allCases) { range in
+            ForEach(ranges) { range in
                 Button {
                     selection = range
                 } label: {
@@ -1385,6 +1669,7 @@ struct LLMQuotaDrawdownModeToggle: View {
 struct LLMQuotaHistoryGraph: View {
     let samples: [LLMQuotaHistorySample]
     let range: LLMQuotaHistoryRange
+    @State private var hoveredPoint: LLMQuotaPlotPoint?
 
     var body: some View {
         VStack(spacing: 5) {
@@ -1415,11 +1700,32 @@ struct LLMQuotaHistoryGraph: View {
                             .position(x: 12, y: y)
                     }
 
-                    linePath(for: \.primaryRemainingPercent, in: chartRect)
-                        .stroke(Color.accentBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    latestBadge(for: \.primaryRemainingPercent, color: .accentBlue, in: chartRect)
+                    linePath(for: \.weeklyRemainingPercent, in: chartRect)
+                        .stroke(
+                            Color.accentBlue.opacity(0.28),
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
+                        )
+                    linePath(for: \.weeklyRemainingPercent, in: chartRect)
+                        .stroke(
+                            Color.accentBlue,
+                            style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
+                        )
+                    latestBadge(for: \.weeklyRemainingPercent, color: .accentBlue, in: chartRect)
 
-                    sampleDots(for: \.primaryRemainingPercent, color: .accentBlue, label: "5H", in: chartRect)
+                    sampleDots(for: \.weeklyRemainingPercent, color: .accentBlue, label: "Weekly", in: chartRect)
+
+                    if let hoveredPoint {
+                        hoverIndicator(for: hoveredPoint, in: chartRect)
+                    }
+                }
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let location):
+                        hoveredPoint = nearestPoint(to: location, in: chartRect)
+                    case .ended:
+                        hoveredPoint = nil
+                    }
                 }
             }
             .frame(height: 44)
@@ -1449,8 +1755,62 @@ struct LLMQuotaHistoryGraph: View {
 
     private func sampleDots(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, label: String, in rect: CGRect) -> some View {
         ForEach(thinnedPlotPoints(for: keyPath, label: label)) { point in
-            LLMQuotaSampleDot(point: point, color: color)
+            Circle()
+                .fill(color.opacity(0.82))
+                .overlay(Circle().stroke(Color.background.opacity(0.9), lineWidth: 0.8))
+                .frame(width: 4, height: 4)
                 .position(pointPosition(for: point, in: rect))
+        }
+    }
+
+    private func hoverIndicator(for point: LLMQuotaPlotPoint, in rect: CGRect) -> some View {
+        let position = pointPosition(for: point, in: rect)
+        let tooltipX = min(max(position.x, rect.minX + 62), rect.maxX - 62)
+        let tooltipY = position.y < rect.midY ? position.y + 15 : position.y - 15
+
+        return ZStack(alignment: .topLeading) {
+            Path { path in
+                path.move(to: CGPoint(x: position.x, y: rect.minY))
+                path.addLine(to: CGPoint(x: position.x, y: rect.maxY))
+            }
+            .stroke(Color.white.opacity(0.28), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+
+            Circle()
+                .fill(Color.white)
+                .overlay(Circle().stroke(Color.accentBlue, lineWidth: 2))
+                .frame(width: 9, height: 9)
+                .position(position)
+
+            Text("\(point.remainingPercent)% · \(quotaHoverTime(point.sampledAt, range: range))")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white)
+                .monospacedDigit()
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.background.opacity(0.96))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.accentBlue.opacity(0.55), lineWidth: 0.8)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .position(x: tooltipX, y: tooltipY)
+        }
+    }
+
+    private func nearestPoint(to location: CGPoint, in rect: CGRect) -> LLMQuotaPlotPoint? {
+        let points = samples.compactMap { sample -> LLMQuotaPlotPoint? in
+            guard let remaining = sample.weeklyRemainingPercent else { return nil }
+            return LLMQuotaPlotPoint(
+                series: "Weekly",
+                sampledAt: sample.sampledAt,
+                remainingPercent: remaining
+            )
+        }
+        guard location.x >= rect.minX - 8, location.x <= rect.maxX + 8 else { return nil }
+        return points.min {
+            abs(pointPosition(for: $0, in: rect).x - location.x)
+                < abs(pointPosition(for: $1, in: rect).x - location.x)
         }
     }
 
@@ -1532,7 +1892,7 @@ struct LLMQuotaHistoryGraph: View {
     private func dateBounds() -> (start: Date, end: Date) {
         let sampleDates = samples
             .compactMap { sample in
-                sample.primaryRemainingPercent == nil ? nil : sample.sampledAt
+                sample.weeklyRemainingPercent == nil ? nil : sample.sampledAt
             }
             .sorted()
         let end = Date()
@@ -3728,7 +4088,7 @@ private struct LLMQuotaValue {
 private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample], mode: LLMQuotaDrawdownMode) -> LLMQuotaDrawdownInsight? {
     let values = samples
         .compactMap { sample -> LLMQuotaValue? in
-            guard let remaining = sample.primaryRemainingPercent else { return nil }
+            guard let remaining = sample.weeklyRemainingPercent else { return nil }
             return LLMQuotaValue(
                 sampledAt: sample.sampledAt,
                 remainingPercent: remaining,
@@ -3969,6 +4329,15 @@ private func quotaPointTime(_ value: Date) -> String {
     exactClockTime(value)
 }
 
+private func quotaHoverTime(_ value: Date, range: LLMQuotaHistoryRange) -> String {
+    if range == .sevenDays {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE h:mm a"
+        return formatter.string(from: value)
+    }
+    return exactClockTime(value)
+}
+
 private func quotaMilestoneTime(_ value: Date) -> String {
     exactClockTime(value)
 }
@@ -4001,7 +4370,7 @@ Shows your live Claude five-hour and weekly usage windows when Claude Code OAuth
 """
 
 private let limitDrawdownHelp = """
-Shows how your Codex 5H limit has been draining based on samples MaxxBar stores locally. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
+Shows how your Codex weekly limit has been draining over the last 24 hours or seven days, based on samples MaxxBar stores locally. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
 """
 
 private let sessionTimelineHelp = """
@@ -4009,7 +4378,7 @@ Shows recent local Codex sessions in the selected drawdown window, newest first.
 """
 
 private let drawdownInsightHelp = """
-Summarizes the latest sampled runway drop from the local quota history. It is useful for seeing how quickly the 5H window moved, but exact crossing times are bounded by how often MaxxBar sampled the API.
+Summarizes the latest sampled weekly runway drop from the last seven days of local quota history. Exact crossing times are bounded by how often MaxxBar sampled the API.
 """
 
 private let maxxInsightsHelp = """

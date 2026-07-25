@@ -6,7 +6,15 @@ enum PopoverRenderer {
     static func renderDemo(to url: URL, panel: StatsPanel = .memory) throws {
         let model = MemoryModel(snapshot: .demo, history: MemoryBreakdown.demoHistory())
         model.applyDemoSnapshots()
-        let view = MemoryPopoverView(model: model, onPopOut: {}, onQuit: {}, selectedPanel: panel)
+        let view = MemoryPopoverView(
+            model: model,
+            onPopOut: {},
+            onQuit: {},
+            selectedPanel: panel,
+            fixedSize: false,
+            resizableSize: CGSize(width: 306, height: 662),
+            onResize: { $0 }
+        )
         let hostingView = NSHostingView(rootView: view)
         hostingView.frame = NSRect(x: 0, y: 0, width: 306, height: 662)
 

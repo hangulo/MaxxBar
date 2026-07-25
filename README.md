@@ -16,7 +16,7 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 
 - Shows a two-line menu bar status for 5H runway, weekly reset day, and AI activity captured today.
 - Opens a Runway-first popover with live Codex and Claude limits when authenticated, reset credits, local quota history, drawdown insight, cache-token detail, combined token/session totals, and recent session timelines.
-- Provides an Insights tab with AI sessions, output destinations, copy/paste flow metadata, before/after workflow paths, and recent Codex and Claude session context.
+- Provides an Insights tab with detected provider accounts/plans, today’s time and session share, a seven-day model mix and token distribution, output destinations, copy/paste flow metadata, before/after workflow paths, and recent Codex and Claude session context.
 - Generates a separate MaxxBar Hub with Tracework-aligned navigation for Overview, AI Insights, Runway, and Sessions.
 - Tracks Cmd+C/Cmd+V output flows as metadata only: app/site/title context, never clipboard contents or typed text.
 - Keeps Memory visible with pressure, memory breakdown, top processes, swap, and grouped/raw process views.
@@ -26,10 +26,10 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 ## Popover Tabs
 
 - Runway: live Codex and Claude limits, resets, local drawdown, and a combined session timeline.
-- Insights: AI usage patterns, output destinations, and AI workflow paths.
+- Insights: models used, token-share distribution, AI usage patterns, output destinations, and AI workflow paths.
 - Memory: pressure, memory mix, top apps/processes, and swap.
 
-The bottom action bar opens the MaxxBar Hub, starts Deep Trace in Tracework when available, opens the popover as a window, relaunches the app, or quits. Dense chart/help titles use a short hover delay and can be clicked to pin the explanation; bottom action icons and the compact version label show immediate labels.
+Drag the lower-right grip to resize the popover; MaxxBar stores the last width and height locally and restores them at the next open or launch. The bottom action bar opens the MaxxBar Hub, starts Deep Trace in Tracework when available, opens the popover as a window, relaunches the app, or quits. Dense chart/help titles use a short hover delay and can be clicked to pin the explanation; bottom action icons and the compact version label show immediate labels.
 
 ## Build
 
@@ -82,6 +82,8 @@ This ChatGPT usage endpoint is undocumented and is not a stable, officially supp
 ### Claude Sessions And Live Usage
 
 MaxxBar discovers local Claude Code and Claude Desktop/Cowork transcripts under `~/.claude/projects` and Claude's local-agent session directory. It reads session metadata and the token-usage fields Claude already stores locally: provider, title, project, model, timestamps, input, cache creation/read, and output totals. Prompt previews are limited to the locally stored first user message; MaxxBar does not upload transcript content.
+
+The Insights account label comes from Claude’s local `~/.claude.json` profile metadata (email, display name, organization, and seat tier). Codex account email and plan come from the live usage response described above. These labels remain inside MaxxBar’s local UI and reports.
 
 For live five-hour and weekly Claude runway, MaxxBar uses the existing Claude Code OAuth credential from `~/.claude/.credentials.json` or the `Claude Code-credentials` macOS Keychain item and sends it only to `https://api.anthropic.com/api/oauth/usage`. The token is not copied into MaxxBar data or reports. This endpoint is used by Claude Code but is not a stable public API. Claude Desktop/Cowork authentication alone may not expose a Claude Code OAuth credential; in that state MaxxBar still captures local Claude sessions and shows a provider-status note until Claude Code is signed in.
 
