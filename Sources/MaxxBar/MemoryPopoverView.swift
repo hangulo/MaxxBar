@@ -55,9 +55,14 @@ struct MemoryPopoverView: View {
                     snapshot: model.llmUsage,
                     quotaHistory: model.llmQuotaHistory,
                     onSampleQuota: { model.captureLLMQuotaSample() },
+                    onCheckClaudeNow: { model.checkClaudeUsageNow() },
+                    isCheckingClaude: model.isCheckingClaude,
+                    claudeCheckNote: model.claudeCheckNote,
                     onPopOut: onPopOut,
                     onQuit: onQuit
                 )
+            case .clipboard:
+                ClipboardPanelView(snapshot: model.clipboardDebug)
             }
 
             ActionBarView(
@@ -148,13 +153,14 @@ private struct PopoverResizeHandle: View {
 enum StatsPanel: String, CaseIterable, Identifiable {
     case runway = "Runway"
     case llmUsage = "Insights"
+    case clipboard = "Clipboard"
     case memory = "Memory"
     case cpuGPU = "CPU/GPU"
 
     var id: String { rawValue }
 
     static var visibleCases: [StatsPanel] {
-        [.runway, .llmUsage, .memory]
+        [.runway, .llmUsage, .clipboard, .memory]
     }
 }
 
@@ -187,6 +193,325 @@ struct PanelSwitch: View {
     }
 }
 
+private enum ClipboardPanelSection: String, CaseIterable, Identifiable {
+    case queue = "Queue"
+    case insights = "Insights"
+
+    var id: String { rawValue }
+}
+
+struct ClipboardPanelView: View {
+    let snapshot: ClipboardDebugSnapshot
+    @State private var section = ClipboardPanelSection.queue
+
+    var body: some View {
+        VStack(spacing: 7) {
+            VStack(spacing: 7) {
+                HStack {
+                    Text("CLIPBOARD")
+                        .sectionTitle()
+                    Spacer()
+                    Text("Images saved 24h")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                }
+
+                HStack(spacing: 3) {
+                    ForEach(ClipboardPanelSection.allCases) { item in
+                        Button {
+                            section = item
+                        } label: {
+                            Text(item.rawValue)
+                                .font(.system(size: 10, weight: .semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 5)
+                                .foregroundStyle(section == item ? .white : .white.opacity(0.6))
+                                .background(section == item ? Color.panelLift : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(3)
+                .background(Color.background.opacity(0.45))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .padding(12)
+            .background(Color.panel)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            if section == .queue {
+                clipboardQueue
+            } else {
+                clipboardInsights
+            }
+        }
+    }
+
+    private var clipboardQueue: some View {
+        VStack(spacing: 7) {
+            HStack(spacing: 6) {
+                clipboardMetric("Writes", value: snapshot.writesToday)
+                clipboardMetric("Pastes", value: snapshot.pasteAttemptsToday)
+                clipboardMetric("Images", value: snapshot.imageWritesToday)
+                clipboardMetric("Known", value: snapshot.pasteSourceKnownPercent, suffix: "%")
+            }
+
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    if snapshot.events.isEmpty {
+                        Text("The next clipboard change will appear here.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.62))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                    } else {
+                        ForEach(Array(snapshot.events.prefix(60))) { event in
+                            clipboardEventRow(
+                                event,
+                                isCurrent: (event.kind == .clipboardWrite || event.kind == .clipboardState)
+                                    && event.id == snapshot.currentClipboardWrite?.id
+                            )
+                        }
+                    }
+                }
+            }
+            .background(Color.panel)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+    }
+
+    private var clipboardInsights: some View {
+        ScrollView {
+            VStack(spacing: 7) {
+                clipboardInsightNote
+                providerCard(snapshot.providerSummary("Claude"), color: .claudeCoral)
+                providerCard(snapshot.providerSummary("Codex"), color: .codexBlue)
+            }
+        }
+    }
+
+    private var clipboardInsightNote: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("WHAT MAXXBAR CAN SEE")
+                .sectionTitle()
+            Text("Writes include keyboard shortcuts, menus, Copy buttons, and screenshots. Paste attempts currently mean observed ⌘V. macOS does not expose a general event when an app reads the clipboard.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.68))
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Copied images are stored locally for up to 24 hours (100 images / 250 MB). Text and other clipboard payloads are never stored.")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.82))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func clipboardMetric(_ label: String, value: Int, suffix: String = "") -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.5))
+            Text("\(value)\(suffix)")
+                .font(.system(size: 17, weight: .semibold))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func clipboardEventRow(_ event: ClipboardDebugEvent, isCurrent: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: eventIcon(event))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(eventColor(event))
+                .frame(width: 18, height: 18)
+                .background(eventColor(event).opacity(0.14))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    if isCurrent {
+                        Text("CURRENT CLIPBOARD")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(Color.accentBlue)
+                    } else {
+                        Text(eventTitle(event))
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    Spacer()
+                    Text(event.ts, style: .relative)
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.white.opacity(0.42))
+                }
+
+                HStack(spacing: 4) {
+                    Text(event.context.label)
+                        .font(.system(size: 11, weight: .semibold))
+                    if !event.contentKinds.isEmpty {
+                        Text("· \(event.contentKinds.joined(separator: ", "))")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.62))
+                    }
+                }
+
+                Text(eventDetail(event))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.48))
+                    .lineLimit(2)
+            }
+
+            clipboardImageThumbnail(event)
+        }
+        .padding(9)
+        .background(isCurrent ? Color.accentBlue.opacity(0.08) : Color.clear)
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(isCurrent ? Color.accentBlue.opacity(0.45) : Color.white.opacity(0.06))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .help(event.typeIdentifiers.isEmpty ? "No clipboard type metadata" : event.typeIdentifiers.joined(separator: "\n"))
+    }
+
+    @ViewBuilder
+    private func clipboardImageThumbnail(_ event: ClipboardDebugEvent) -> some View {
+        if let thumbnailPath = event.imageThumbnailPath,
+           let imagePath = event.imagePath,
+           FileManager.default.fileExists(atPath: imagePath),
+           let image = NSImage(contentsOfFile: thumbnailPath) {
+            Button {
+                NSWorkspace.shared.open(URL(fileURLWithPath: imagePath))
+            } label: {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 54, height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 0.75)
+                    }
+            }
+            .buttonStyle(.plain)
+            .help("Open saved image\n\(imagePath)")
+            .accessibilityLabel("Open copied image")
+        }
+    }
+
+    private func providerCard(_ summary: ClipboardProviderDebugSummary, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Circle().fill(color).frame(width: 7, height: 7)
+                Text(summary.provider.uppercased())
+                    .sectionTitle()
+                Spacer()
+            }
+
+            HStack(spacing: 6) {
+                providerMetric(
+                    "Into \(summary.provider)",
+                    value: "\(summary.inboundPasteAttempts)",
+                    detail: "\(summary.inboundKnownPercent)% source known"
+                )
+                providerMetric(
+                    "Out of \(summary.provider)",
+                    value: "\(summary.outboundWrites)",
+                    detail: "\(summary.outboundTracedPercent)% destination traced"
+                )
+            }
+
+            flowLine("From", counters: summary.topInboundSources)
+            flowLine("To", counters: summary.topOutboundDestinations)
+        }
+        .padding(12)
+        .background(Color.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func providerMetric(_ title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.54))
+            Text(value)
+                .font(.system(size: 18, weight: .semibold))
+            Text(detail)
+                .font(.system(size: 8.5))
+                .foregroundStyle(.white.opacity(0.46))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.background.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    private func flowLine(_ label: String, counters: [ClipboardDebugCounter]) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.42))
+                .frame(width: 28, alignment: .leading)
+            Text(counters.prefix(3).map { "\($0.label) \($0.count)×" }.joined(separator: "  ·  ").nonEmpty ?? "Unknown")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.white.opacity(0.72))
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func eventTitle(_ event: ClipboardDebugEvent) -> String {
+        switch event.kind {
+        case .clipboardState: return "Clipboard at launch"
+        case .clipboardWrite: return "Clipboard history"
+        case .copyShortcut: return "Copy shortcut"
+        case .pasteAttempt: return "Paste attempt"
+        }
+    }
+
+    private func eventIcon(_ event: ClipboardDebugEvent) -> String {
+        switch event.kind {
+        case .clipboardState: return event.contentKinds.contains("Image") ? "photo" : "doc.on.clipboard"
+        case .clipboardWrite: return event.contentKinds.contains("Image") ? "photo" : "doc.on.clipboard"
+        case .copyShortcut: return "keyboard"
+        case .pasteAttempt: return "arrow.down.doc"
+        }
+    }
+
+    private func eventColor(_ event: ClipboardDebugEvent) -> Color {
+        if event.context.provider == "Claude" { return .claudeCoral }
+        if event.context.provider == "Codex" { return .codexBlue }
+        return .accentBlue
+    }
+
+    private func eventDetail(_ event: ClipboardDebugEvent) -> String {
+        if event.kind == .pasteAttempt {
+            if let source = event.sourceContext?.label, let age = event.sourceAgeSeconds {
+                return "From \(source) · \(age)s after clipboard changed"
+            }
+            return "Source unknown"
+        }
+        if event.kind == .copyShortcut {
+            return "Shortcut observed; waiting for clipboard change"
+        }
+        if event.kind == .clipboardState {
+            return "Present when MaxxBar started · origin unknown"
+        }
+        if let imagePath = event.imagePath {
+            return FileManager.default.fileExists(atPath: imagePath)
+                ? "Saved locally for 24h · Click thumbnail to open"
+                : "Saved image expired · metadata retained"
+        }
+        return "Change #\(event.changeCount ?? 0) · \(event.itemCount ?? 0) item(s) · \(event.typeIdentifiers.count) type(s)"
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
 struct MemoryPanelView: View {
     @ObservedObject var model: MemoryModel
     var onPopOut: (() -> Void)?
@@ -202,7 +527,52 @@ struct MemoryPanelView: View {
 
             SwapView(snapshot: model.snapshot)
 
+            CompactSensorsCard(snapshot: model.sensors)
+
         }
+    }
+}
+
+struct CompactSensorsCard: View {
+    let snapshot: SensorSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("SENSORS").sectionTitle()
+            HStack(spacing: 12) {
+                HStack(spacing: 5) {
+                    Image(systemName: "thermometer.medium").foregroundStyle(Color.accentBlue)
+                    Text(snapshot.cpuTemperature == nil ? "Battery" : "CPU")
+                        .foregroundStyle(.white.opacity(0.58))
+                    Spacer(minLength: 0)
+                    Text(temperature(snapshot.cpuTemperature ?? snapshot.batteryTemperature))
+                        .monospacedDigit()
+                }
+                if let gpu = snapshot.gpuTemperature {
+                    HStack(spacing: 5) {
+                        Text("GPU").foregroundStyle(.white.opacity(0.58))
+                        Text(temperature(gpu)).monospacedDigit()
+                    }
+                }
+            }
+            HStack(spacing: 5) {
+                Image(systemName: "fanblades").foregroundStyle(Color.accentBlue)
+                Text("Fans").foregroundStyle(.white.opacity(0.58))
+                Spacer(minLength: 4)
+                Text(fanSpeeds)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+        }
+        .font(.system(size: 12, weight: .regular))
+        .sectionStyle()
+        .help("Live local temperatures and fan speeds in RPM. Separate fan readings follow fan order. A dash means the reading is unavailable.")
+    }
+
+    private var fanSpeeds: String {
+        guard !snapshot.fanReadings.isEmpty else { return rpm(snapshot.fanRPM) }
+        return snapshot.fanReadings.map { $0.rpm.formatted() }.joined(separator: " / ") + " rpm"
     }
 }
 
@@ -557,6 +927,9 @@ struct LLMRunwayPanelView: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
+    var onCheckClaudeNow: (() -> Void)?
+    var isCheckingClaude = false
+    var claudeCheckNote: String?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
     @State private var advancedExpanded = false
@@ -572,8 +945,12 @@ struct LLMRunwayPanelView: View {
                             LLMUsageLimitCard(
                                 limit: limit,
                                 title: runwayTitle(for: limit),
+                                unavailableMessage: snapshot.providerErrors[limit.name],
                                 resetCreditCount: limit.name == "Codex" ? snapshot.resetCreditCount : nil,
-                                resetCreditExpirations: limit.name == "Codex" ? snapshot.resetCreditExpirations : []
+                                resetCreditExpirations: limit.name == "Codex" ? snapshot.resetCreditExpirations : [],
+                                onCheckNow: limit.name == "Claude" ? onCheckClaudeNow : nil,
+                                isChecking: limit.name == "Claude" && isCheckingClaude,
+                                checkNote: limit.name == "Claude" ? claudeCheckNote : nil
                             )
                         }
                     }
@@ -593,7 +970,11 @@ struct LLMRunwayPanelView: View {
 
     private var runwayLimits: [LLMUsageLimit] {
         let preferred = snapshot.limits.filter { $0.name == "Codex" || $0.name == "Claude" }
-        return preferred.isEmpty ? Array(snapshot.limits.prefix(2)) : preferred
+        var result = preferred.isEmpty ? Array(snapshot.limits.prefix(2)) : preferred
+        if !result.contains(where: { $0.name == "Claude" }), snapshot.providerErrors["Claude"] != nil {
+            result.append(LLMUsageLimit(name: "Claude", primary: nil, secondary: nil))
+        }
+        return result
     }
 
     private func runwayTitle(for limit: LLMUsageLimit) -> String {
@@ -765,7 +1146,10 @@ struct AITransferCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                InstantHelpTitle("AI OUTPUT DESTINATIONS", help: "Tracks Cmd+C and Cmd+V as context metadata only. MaxxBar never reads or stores clipboard contents.")
+                InstantHelpTitle(
+                    "AI OUTPUT DESTINATIONS",
+                    help: "Tracks Cmd+C and Cmd+V as context metadata. A flow requires a copy followed by a paste within 15 minutes. Claude-to-Claude and Codex-to-Codex pairs are excluded; Claude↔Codex and AI-to-other-app flows remain. Raw Copy and Paste totals still count observed shortcuts. Copied images may be stored locally for up to 24 hours; text clipboard contents are never stored."
+                )
                 Spacer()
                 Text("\(snapshot.pasteEventsToday) today")
                     .font(.system(size: 10.5, weight: .semibold))
@@ -1286,8 +1670,12 @@ struct LLMUsageSummaryCard: View {
 struct LLMUsageLimitCard: View {
     let limit: LLMUsageLimit
     var title: String?
+    var unavailableMessage: String? = nil
     var resetCreditCount: Int? = nil
     var resetCreditExpirations: [LLMResetCreditExpiration] = []
+    var onCheckNow: (() -> Void)? = nil
+    var isChecking = false
+    var checkNote: String? = nil
     @State private var resetDetailsPresented = false
 
     var body: some View {
@@ -1295,7 +1683,8 @@ struct LLMUsageLimitCard: View {
             HStack(alignment: .firstTextBaseline) {
                 InstantHelpTitle(
                     title ?? limit.name.uppercased(),
-                    help: limit.name.hasPrefix("Claude") ? claudeRunwayHelp : codexRunwayHelp
+                    help: limit.name.hasPrefix("Claude") ? claudeRunwayHelp : codexRunwayHelp,
+                    color: providerColor
                 )
                 Spacer()
                 if let resetCreditCount {
@@ -1316,19 +1705,46 @@ struct LLMUsageLimitCard: View {
                         }
                 }
             }
+            if let onCheckNow {
+                HStack(spacing: 6) {
+                    if let checkNote, !isChecking {
+                        Text(checkNote)
+                    } else if let checkedAt = limit.checkedAt ?? limit.cachedAt {
+                        Text("Last checked \(checkedAt.formatted(date: .omitted, time: .shortened))")
+                    }
+                    Spacer()
+                    if isChecking {
+                        ProgressView().controlSize(.mini)
+                        Text("Checking…")
+                    } else {
+                        Button("Check now", action: onCheckNow)
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentBlue)
+                    }
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(0.56))
+            } else if let cachedAt = limit.cachedAt {
+                Text("Last checked \(cachedAt.formatted(date: .omitted, time: .shortened))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.56))
+            }
             let windows = orderedWindows
             if windows.isEmpty {
-                Text("No live limit windows returned by the usage API.")
+                Text(unavailableMessage ?? "No live limit windows returned by the usage API.")
                     .font(.system(size: 11.5, weight: .regular))
                     .foregroundStyle(.white.opacity(0.56))
             } else {
                 ForEach(windows, id: \.label) { window in
-                    LLMUsageProgress(window: window)
+                    LLMUsageProgress(window: window, color: providerColor)
                 }
             }
         }
         .sectionStyle()
+        .overlay(RoundedRectangle(cornerRadius: 8).fill(providerColor.opacity(limit.name.hasPrefix("Claude") ? 0.045 : 0)).allowsHitTesting(false))
     }
+
+    private var providerColor: Color { limit.name.hasPrefix("Claude") ? .claudeCoral : .accentBlue }
 
     private var orderedWindows: [LLMUsageWindow] {
         [limit.shortWindow, limit.weeklyWindow]
@@ -1469,7 +1885,7 @@ struct LLMLocalUsageCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
-    @State private var drawdownRange = LLMQuotaHistoryRange.day
+    @AppStorage("weeklyDrawdownRange") private var drawdownRange = LLMQuotaHistoryRange.sevenDays
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -1489,38 +1905,28 @@ struct LLMLocalUsageCard: View {
                     .disabled(onSampleQuota == nil)
                     .help("Capture the current weekly value now")
                 }
-
-                HStack {
-                    Spacer()
-                    LLMQuotaHistoryRangeToggle(
-                        selection: $drawdownRange,
-                        ranges: [.day, .sevenDays]
-                    )
-                }
             }
 
-            LLMQuotaHistoryGraph(samples: rangedQuotaHistory, range: drawdownRange)
+            LLMQuotaHistoryGraph(samples: rangedQuotaHistory, range: drawdownRange, rangeSelection: $drawdownRange)
         }
         .sectionStyle()
     }
 
     private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
-        if !quotaHistory.isEmpty {
-            return quotaHistory
+        var history = quotaHistory
+        let codex = snapshot.limits.first { $0.name == "Codex" }
+        let claude = snapshot.limits.first { $0.name == "Claude" }
+        if let updatedAt = snapshot.lastUpdated, codex != nil || claude != nil,
+           updatedAt > (history.last?.sampledAt ?? .distantPast) {
+            history.append(LLMQuotaHistorySample(
+                sampledAt: updatedAt,
+                primaryRemainingPercent: codex?.shortWindow?.remainingPercent,
+                weeklyRemainingPercent: codex?.weeklyWindow?.remainingPercent,
+                planType: snapshot.planType,
+                claudeWeeklyRemainingPercent: claude?.weeklyWindow?.remainingPercent
+            ))
         }
-
-        guard let limit = snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first else {
-            return []
-        }
-
-        return [
-            LLMQuotaHistorySample(
-                sampledAt: snapshot.lastUpdated ?? Date(),
-                primaryRemainingPercent: limit.shortWindow?.remainingPercent,
-                weeklyRemainingPercent: limit.weeklyWindow?.remainingPercent,
-                planType: snapshot.planType
-            )
-        ]
+        return history
     }
 
     private var rangedQuotaHistory: [LLMQuotaHistorySample] {
@@ -1588,6 +1994,7 @@ struct LLMSessionTimelineCard: View {
 enum LLMQuotaHistoryRange: String, CaseIterable, Identifiable {
     case sixHours = "6H"
     case day = "24H"
+    case threeDays = "72H"
     case sevenDays = "1W"
 
     var id: String { rawValue }
@@ -1598,6 +2005,8 @@ enum LLMQuotaHistoryRange: String, CaseIterable, Identifiable {
             return 6 * 60 * 60
         case .day:
             return 24 * 60 * 60
+        case .threeDays:
+            return 3 * 24 * 60 * 60
         case .sevenDays:
             return 7 * 24 * 60 * 60
         }
@@ -1669,10 +2078,22 @@ struct LLMQuotaDrawdownModeToggle: View {
 struct LLMQuotaHistoryGraph: View {
     let samples: [LLMQuotaHistorySample]
     let range: LLMQuotaHistoryRange
+    var rangeSelection: Binding<LLMQuotaHistoryRange>?
     @State private var hoveredPoint: LLMQuotaPlotPoint?
 
     var body: some View {
         VStack(spacing: 5) {
+            HStack(spacing: 12) {
+                seriesLegend("Codex", keyPath: \.weeklyRemainingPercent, color: .accentBlue)
+                seriesLegend("Claude", keyPath: \.claudeWeeklyRemainingPercent, color: .claudeCoral)
+                Spacer()
+                if let rangeSelection {
+                    LLMQuotaHistoryRangeToggle(selection: rangeSelection, ranges: [.day, .threeDays, .sevenDays])
+                } else {
+                    Text(range.rawValue).foregroundStyle(.white.opacity(0.5))
+                }
+            }
+            .font(.system(size: 10, weight: .medium))
             GeometryReader { proxy in
                 let chartRect = CGRect(
                     x: 27,
@@ -1710,9 +2131,13 @@ struct LLMQuotaHistoryGraph: View {
                             Color.accentBlue,
                             style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
                         )
-                    latestBadge(for: \.weeklyRemainingPercent, color: .accentBlue, in: chartRect)
+                    linePath(for: \.claudeWeeklyRemainingPercent, in: chartRect)
+                        .stroke(Color.claudeCoral.opacity(0.25), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                    linePath(for: \.claudeWeeklyRemainingPercent, in: chartRect)
+                        .stroke(Color.claudeCoral, style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
 
-                    sampleDots(for: \.weeklyRemainingPercent, color: .accentBlue, label: "Weekly", in: chartRect)
+                    sampleDots(for: \.weeklyRemainingPercent, color: .accentBlue, label: "Codex", in: chartRect)
+                    sampleDots(for: \.claudeWeeklyRemainingPercent, color: .claudeCoral, label: "Claude", in: chartRect)
 
                     if let hoveredPoint {
                         hoverIndicator(for: hoveredPoint, in: chartRect)
@@ -1728,33 +2153,22 @@ struct LLMQuotaHistoryGraph: View {
                     }
                 }
             }
-            .frame(height: 44)
+            .frame(height: 58)
         }
     }
 
-    private func latestValue(_ keyPath: KeyPath<LLMQuotaHistorySample, Int?>) -> String {
-        guard let remaining = samples.last?[keyPath: keyPath] else { return "-" }
-        return "\(remaining)%"
-    }
-
-    private func latestBadge(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, in rect: CGRect) -> some View {
-        Group {
-            if let remaining = samples.last?[keyPath: keyPath] {
-                Text("\(remaining)%")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .monospacedDigit()
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(color.opacity(0.88))
-                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    .position(x: rect.maxX + 19, y: yPosition(for: remaining, in: rect))
-            }
+    private func seriesLegend(_ name: String, keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 5, height: 5)
+            Text(name)
+            Text(samples.last?[keyPath: keyPath].map { "\($0)%" } ?? "—")
+                .monospacedDigit()
         }
+        .foregroundStyle(color)
     }
 
     private func sampleDots(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, color: Color, label: String, in rect: CGRect) -> some View {
-        ForEach(thinnedPlotPoints(for: keyPath, label: label)) { point in
+        ForEach(changePlotPoints(for: keyPath, label: label)) { point in
             Circle()
                 .fill(color.opacity(0.82))
                 .overlay(Circle().stroke(Color.background.opacity(0.9), lineWidth: 0.8))
@@ -1764,6 +2178,7 @@ struct LLMQuotaHistoryGraph: View {
     }
 
     private func hoverIndicator(for point: LLMQuotaPlotPoint, in rect: CGRect) -> some View {
+        let color: Color = point.series == "Claude" ? .claudeCoral : .accentBlue
         let position = pointPosition(for: point, in: rect)
         let tooltipX = min(max(position.x, rect.minX + 62), rect.maxX - 62)
         let tooltipY = position.y < rect.midY ? position.y + 15 : position.y - 15
@@ -1777,11 +2192,11 @@ struct LLMQuotaHistoryGraph: View {
 
             Circle()
                 .fill(Color.white)
-                .overlay(Circle().stroke(Color.accentBlue, lineWidth: 2))
+                .overlay(Circle().stroke(color, lineWidth: 2))
                 .frame(width: 9, height: 9)
                 .position(position)
 
-            Text("\(point.remainingPercent)% · \(quotaHoverTime(point.sampledAt, range: range))")
+            Text("\(point.series) \(point.remainingPercent)% · \(quotaHoverTime(point.sampledAt, range: range))")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.white)
                 .monospacedDigit()
@@ -1791,7 +2206,7 @@ struct LLMQuotaHistoryGraph: View {
                 .background(Color.background.opacity(0.96))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color.accentBlue.opacity(0.55), lineWidth: 0.8)
+                        .stroke(color.opacity(0.55), lineWidth: 0.8)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 .position(x: tooltipX, y: tooltipY)
@@ -1799,50 +2214,28 @@ struct LLMQuotaHistoryGraph: View {
     }
 
     private func nearestPoint(to location: CGPoint, in rect: CGRect) -> LLMQuotaPlotPoint? {
-        let points = samples.compactMap { sample -> LLMQuotaPlotPoint? in
-            guard let remaining = sample.weeklyRemainingPercent else { return nil }
-            return LLMQuotaPlotPoint(
-                series: "Weekly",
-                sampledAt: sample.sampledAt,
-                remainingPercent: remaining
-            )
-        }
+        let points = changePlotPoints(for: \.weeklyRemainingPercent, label: "Codex")
+            + changePlotPoints(for: \.claudeWeeklyRemainingPercent, label: "Claude")
         guard location.x >= rect.minX - 8, location.x <= rect.maxX + 8 else { return nil }
         return points.min {
-            abs(pointPosition(for: $0, in: rect).x - location.x)
-                < abs(pointPosition(for: $1, in: rect).x - location.x)
+            hypot(pointPosition(for: $0, in: rect).x - location.x, pointPosition(for: $0, in: rect).y - location.y)
+                < hypot(pointPosition(for: $1, in: rect).x - location.x, pointPosition(for: $1, in: rect).y - location.y)
         }
     }
 
-    private func thinnedPlotPoints(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, label: String) -> [LLMQuotaPlotPoint] {
+    private func changePlotPoints(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, label: String) -> [LLMQuotaPlotPoint] {
         let values = samples.compactMap { sample -> (Date, Int)? in
             guard let remaining = sample[keyPath: keyPath] else { return nil }
             return (sample.sampledAt, remaining)
         }
-        guard values.count > 2 else {
-            return values.map { LLMQuotaPlotPoint(series: label, sampledAt: $0.0, remainingPercent: $0.1) }
+        // Keep the range endpoints and the first sample of each new percentage.
+        // The full series still draws the line so plateaus retain their duration.
+        return values.enumerated().compactMap { index, value in
+            let isEndpoint = index == 0 || index == values.count - 1
+            let changed = index > 0 && value.1 != values[index - 1].1
+            guard isEndpoint || changed else { return nil }
+            return LLMQuotaPlotPoint(series: label, sampledAt: value.0, remainingPercent: value.1)
         }
-
-        var points: [LLMQuotaPlotPoint] = []
-        var previousKeptPointAt: Date?
-
-        for index in values.indices {
-            let value = values[index]
-            let previous = index > 0 ? values[index - 1].1 : nil
-            let next = index < values.count - 1 ? values[index + 1].1 : nil
-            let isEndpoint = index == values.startIndex || index == values.index(before: values.endIndex)
-            let isChangePoint = value.1 != previous || value.1 != next
-            let shouldKeepFlatPoint = previousKeptPointAt.map { value.0.timeIntervalSince($0) >= 3_600 } ?? true
-
-            guard isEndpoint || isChangePoint || shouldKeepFlatPoint else {
-                continue
-            }
-
-            points.append(LLMQuotaPlotPoint(series: label, sampledAt: value.0, remainingPercent: value.1))
-            previousKeptPointAt = value.0
-        }
-
-        return points
     }
 
     private func linePath(for keyPath: KeyPath<LLMQuotaHistorySample, Int?>, in rect: CGRect) -> Path {
@@ -1890,27 +2283,8 @@ struct LLMQuotaHistoryGraph: View {
     }
 
     private func dateBounds() -> (start: Date, end: Date) {
-        let sampleDates = samples
-            .compactMap { sample in
-                sample.weeklyRemainingPercent == nil ? nil : sample.sampledAt
-            }
-            .sorted()
         let end = Date()
-        let fullStart = end.addingTimeInterval(-range.interval)
-        guard let firstSample = sampleDates.first,
-              let lastSample = sampleDates.last else {
-            return (fullStart, end)
-        }
-
-        let sampleSpan = max(lastSample.timeIntervalSince(firstSample), 60)
-        guard sampleSpan < range.interval * 0.5 else {
-            return (fullStart, end)
-        }
-
-        let padding = max(sampleSpan * 0.18, min(15 * 60, range.interval * 0.08))
-        let start = max(firstSample.addingTimeInterval(-padding), fullStart)
-        let paddedEnd = min(lastSample.addingTimeInterval(padding), end)
-        return (start, max(paddedEnd, start.addingTimeInterval(5 * 60)))
+        return (end.addingTimeInterval(-range.interval), end)
     }
 
     private func xPosition(for date: Date, start: Date, duration: TimeInterval, in rect: CGRect) -> CGFloat {
@@ -2343,19 +2717,27 @@ struct LLMSessionHoverCard: View {
                     hoverMetric("Turns", "\(turns)")
                 }
                 if let usage = session.tokenUsage, usage.inputTokens > 0 {
+                    hoverMetric("Rebuilds", "\(usage.rebuildCount)")
                     hoverMetric("Cache", "\(usage.cacheHitPercent)%")
                 }
             }
 
             if let usage = session.tokenUsage {
+                let cost = usage.costBreakdown(for: session.modelName)
                 VStack(alignment: .leading, spacing: 3) {
-                    hoverLine("Input", tokenCount(usage.inputTokens))
-                    hoverLine("Cached", tokenCount(usage.cachedInputTokens))
-                    hoverLine("Output", tokenCount(usage.outputTokens))
+                    hoverLine("Fresh input", "\(tokenCount(usage.freshInputTokens)) • \(dollarEstimate(cost.freshInput))")
+                    if usage.cacheWriteInputTokens > 0 {
+                        hoverLine("Cache write", "\(tokenCount(usage.cacheWriteInputTokens)) • \(dollarEstimate(cost.cacheWrite))")
+                    }
+                    hoverLine("Cache read", "\(tokenCount(usage.cachedInputTokens)) • \(dollarEstimate(cost.cacheRead))")
+                    hoverLine("Output", "\(tokenCount(usage.outputTokens)) • \(dollarEstimate(cost.output))")
                     if usage.reasoningOutputTokens > 0 {
                         hoverLine("Reasoning", tokenCount(usage.reasoningOutputTokens))
                     }
-                    hoverLine("Cost est.", dollarEstimate(usage.estimatedCost(for: session.modelName)))
+                    hoverLine("Cost est.", "\(dollarEstimate(cost.total)) lifetime")
+                    if let recent = usage.last24h {
+                        hoverLine("Last 24h", "\(dollarEstimate(recent.costBreakdown(for: session.modelName).total)) • \(tokenCount(recent.totalTokens))")
+                    }
                 }
             }
 
@@ -2780,7 +3162,8 @@ struct LLMSessionRow: View {
 
     private var cacheLabel: String? {
         guard let usage = session.tokenUsage, usage.inputTokens > 0 else { return nil }
-        return "\(usage.cacheHitPercent)% cached"
+        let rebuilds = usage.rebuildCount == 1 ? "1 rebuild" : "\(usage.rebuildCount) rebuilds"
+        return "\(dollarEstimate(usage.estimatedCost(for: session.modelName))) • \(rebuilds)"
     }
 
     private var providerColor: Color {
@@ -2809,19 +3192,30 @@ struct LLMSessionTokenUsageView: View {
     let modelName: String
 
     var body: some View {
+        let cost = usage.costBreakdown(for: modelName)
         VStack(alignment: .leading, spacing: 3) {
-            LLMSessionMetricRow(label: "API est.", value: dollarEstimate(usage.estimatedCost(for: modelName)))
-            LLMSessionMetricRow(label: "Est. rate", value: usage.pricingLabel(for: modelName))
-            LLMSessionMetricRow(label: "Cache hit", value: "\(usage.cacheHitPercent)% of input")
-            LLMSessionMetricRow(label: "Cached input", value: tokenCount(usage.cachedInputTokens))
-            LLMSessionMetricRow(label: "Fresh input", value: tokenCount(usage.nonCachedInputTokens))
-            LLMSessionMetricRow(label: "Output", value: tokenCount(usage.outputTokens))
-            if usage.reasoningOutputTokens > 0 {
-                LLMSessionMetricRow(label: "Reasoning", value: tokenCount(usage.reasoningOutputTokens))
+            LLMSessionMetricRow(label: "API est.", value: "\(dollarEstimate(cost.total)) lifetime")
+            if let recent = usage.last24h {
+                LLMSessionMetricRow(label: "Last 24h", value: "\(dollarEstimate(recent.costBreakdown(for: modelName).total)) • \(tokenCount(recent.totalTokens)) • \(recent.callCount) calls • \(recent.rebuildCount) rebuilds")
             }
-            LLMSessionMetricRow(label: "Total", value: tokenCount(usage.totalTokens))
+            LLMSessionMetricRow(label: "Est. rate", value: usage.pricingLabel(for: modelName))
+            LLMSessionMetricRow(label: "Cache read", value: "\(tokenCount(usage.cachedInputTokens)) • \(dollarEstimate(cost.cacheRead))")
+            if usage.cacheWriteInputTokens > 0 {
+                LLMSessionMetricRow(label: "Cache write", value: "\(tokenCount(usage.cacheWriteInputTokens)) • \(dollarEstimate(cost.cacheWrite))")
+            }
+            LLMSessionMetricRow(label: "Fresh input", value: "\(tokenCount(usage.freshInputTokens)) • \(dollarEstimate(cost.freshInput))")
+            LLMSessionMetricRow(label: "Output", value: "\(tokenCount(usage.outputTokens)) • \(dollarEstimate(cost.output))")
+            if usage.reasoningOutputTokens > 0 {
+                LLMSessionMetricRow(label: "Reasoning", value: "\(tokenCount(usage.reasoningOutputTokens)) (in output)")
+            }
+            LLMSessionMetricRow(label: "Rebuilds", value: "\(usage.rebuildCount) calls with half+ of a 30K+ prompt uncached")
+            if usage.peakContextTokens > 0 {
+                LLMSessionMetricRow(label: "Peak context", value: tokenCount(usage.peakContextTokens))
+            }
+            LLMSessionMetricRow(label: "Cache hit", value: "\(usage.cacheHitPercent)% of input")
+            LLMSessionMetricRow(label: "Total", value: "\(tokenCount(usage.totalTokens)) incl. cache reads")
             if usage.turnCount > 0 {
-                LLMSessionMetricRow(label: "Turns", value: "\(usage.turnCount)")
+                LLMSessionMetricRow(label: "Model calls", value: "\(usage.turnCount)")
             }
         }
         .padding(.vertical, 3)
@@ -2891,6 +3285,7 @@ struct LLMUsageWindowRow: View {
 
 struct LLMUsageProgress: View {
     let window: LLMUsageWindow?
+    var color: Color = .accentBlue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -2908,7 +3303,7 @@ struct LLMUsageProgress: View {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color.freeGray.opacity(0.28))
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.accentBlue)
+                        .fill(color)
                         .frame(width: proxy.size.width * usedRatio)
                 }
             }
@@ -2949,7 +3344,6 @@ struct MemoryRunwayHeroView: View {
                 detail: "\(ByteFormat.memory(snapshot.breakdown.app + snapshot.breakdown.wired + snapshot.breakdown.compressed)) used",
                 percent: snapshot.usedPercent,
                 color: .accentBlue,
-                markers: [75, 90],
                 segments: memorySegments
             )
         }
@@ -3018,10 +3412,9 @@ struct MemoryRunwayLane: View {
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Color.freeGray.opacity(0.22))
-
                     if segments.isEmpty {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.freeGray.opacity(0.22))
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
                             .fill(color.opacity(0.9))
                             .frame(width: proxy.size.width * clampedRatio)
@@ -3063,11 +3456,16 @@ struct MemoryRunwayLane: View {
     }
 
     private func segmentedTrack(width: CGFloat) -> some View {
-        HStack(spacing: 0) {
-            ForEach(segments) { segment in
+        // A small background-colored gap between segments keeps bright colors from
+        // visually swallowing darker neighbors at their shared edge.
+        let gap: CGFloat = 2
+        let visible = segments.filter { $0.value > 0 }
+        let fillWidth = max(width - gap * CGFloat(max(visible.count - 1, 0)), 0)
+        return HStack(spacing: gap) {
+            ForEach(visible) { segment in
                 Rectangle()
                     .fill(segment.color.opacity(segment.label == "Free" ? 0.48 : 0.88))
-                    .frame(width: max(width * CGFloat(max(segment.value, 0)), 0))
+                    .frame(width: fillWidth * CGFloat(segment.value))
             }
         }
         .frame(width: width, alignment: .leading)
@@ -4330,7 +4728,7 @@ private func quotaPointTime(_ value: Date) -> String {
 }
 
 private func quotaHoverTime(_ value: Date, range: LLMQuotaHistoryRange) -> String {
-    if range == .sevenDays {
+    if range == .threeDays || range == .sevenDays {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE h:mm a"
         return formatter.string(from: value)
@@ -4370,7 +4768,7 @@ Shows your live Claude five-hour and weekly usage windows when Claude Code OAuth
 """
 
 private let limitDrawdownHelp = """
-Shows how your Codex weekly limit has been draining over the last 24 hours or seven days, based on samples MaxxBar stores locally. If the selected window has only a small amount of history, MaxxBar zooms to the samples it has so the chart is not mostly empty space.
+Shows weekly quota remaining over the last 24 hours, 72 hours, or seven days (pick with the toggle): Codex in blue and Claude in orange. Markers and hover details focus on changes rather than repeated samples. Claude history starts when MaxxBar first records its quota; earlier values are unavailable.
 """
 
 private let sessionTimelineHelp = """

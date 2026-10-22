@@ -2,6 +2,7 @@ import Darwin
 import AppKit
 import Foundation
 import MachO
+import CryptoKit
 
 struct MemoryBreakdown: Equatable {
     var app: UInt64
@@ -146,6 +147,9 @@ struct LLMUsageLimit: Identifiable, Equatable {
     var name: String
     var primary: LLMUsageWindow?
     var secondary: LLMUsageWindow?
+    var cachedAt: Date? = nil
+    /// When this reading was taken, for display; set for Claude readings whether live or cached.
+    var checkedAt: Date? = nil
 
     var windows: [LLMUsageWindow] {
         [primary, secondary].compactMap { $0 }
@@ -191,6 +195,76 @@ struct LLMUsageSession: Identifiable, Equatable {
     }
 }
 
+/// One model request. `inputTokens` is the whole prompt, including cache reads and cache writes.
+struct LLMTokenCall: Equatable {
+    static let rebuildMinimumPromptTokens: UInt64 = 30_000
+
+    var timestamp: Date?
+    var inputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var cacheWriteInputTokens: UInt64 = 0
+    var cacheWrite1hInputTokens: UInt64 = 0
+    var outputTokens: UInt64
+
+    /// A near-full cache rebuild: at least half of a 30K+ prompt was not read from cache.
+    var isCacheRebuild: Bool {
+        guard inputTokens >= Self.rebuildMinimumPromptTokens else { return false }
+        let uncached = inputTokens - min(cachedInputTokens, inputTokens)
+        return uncached * 2 >= inputTokens
+    }
+}
+
+struct LLMTokenWindowUsage: Equatable {
+    var inputTokens: UInt64 = 0
+    var cachedInputTokens: UInt64 = 0
+    var cacheWriteInputTokens: UInt64 = 0
+    var cacheWrite1hInputTokens: UInt64 = 0
+    var outputTokens: UInt64 = 0
+    var callCount = 0
+    var rebuildCount = 0
+
+    var totalTokens: UInt64 {
+        inputTokens + outputTokens
+    }
+
+    func costBreakdown(for modelName: String) -> LLMCostBreakdown {
+        LLMTokenPricing.rates(for: modelName).breakdown(
+            inputTokens: inputTokens,
+            cachedInputTokens: cachedInputTokens,
+            cacheWriteInputTokens: cacheWriteInputTokens,
+            cacheWrite1hInputTokens: cacheWrite1hInputTokens,
+            outputTokens: outputTokens
+        )
+    }
+}
+
+extension LLMTokenWindowUsage {
+    init<Calls: Sequence>(calls: Calls) where Calls.Element == LLMTokenCall {
+        for call in calls {
+            inputTokens += call.inputTokens
+            cachedInputTokens += call.cachedInputTokens
+            cacheWriteInputTokens += call.cacheWriteInputTokens
+            cacheWrite1hInputTokens += call.cacheWrite1hInputTokens
+            outputTokens += call.outputTokens
+            callCount += 1
+            if call.isCacheRebuild {
+                rebuildCount += 1
+            }
+        }
+    }
+}
+
+struct LLMCostBreakdown: Equatable {
+    var freshInput: Double
+    var cacheWrite: Double
+    var cacheRead: Double
+    var output: Double
+
+    var total: Double {
+        freshInput + cacheWrite + cacheRead + output
+    }
+}
+
 struct LLMTokenUsageSummary: Equatable {
     var inputTokens: UInt64
     var cachedInputTokens: UInt64
@@ -198,9 +272,18 @@ struct LLMTokenUsageSummary: Equatable {
     var reasoningOutputTokens: UInt64
     var totalTokens: UInt64
     var turnCount: Int
+    var cacheWriteInputTokens: UInt64 = 0
+    var cacheWrite1hInputTokens: UInt64 = 0
+    var rebuildCount = 0
+    var peakContextTokens: UInt64 = 0
+    var last24h: LLMTokenWindowUsage? = nil
 
     var nonCachedInputTokens: UInt64 {
         inputTokens >= cachedInputTokens ? inputTokens - cachedInputTokens : 0
+    }
+
+    var freshInputTokens: UInt64 {
+        nonCachedInputTokens - min(cacheWriteInputTokens, nonCachedInputTokens)
     }
 
     var cacheHitPercent: Int {
@@ -208,17 +291,48 @@ struct LLMTokenUsageSummary: Equatable {
         return Int((Double(cachedInputTokens) / Double(inputTokens) * 100).rounded())
     }
 
-    func estimatedCost(for modelName: String) -> Double {
-        let pricing = LLMTokenPricing.rates(for: modelName)
-        return pricing.estimatedCost(
-            freshInputTokens: nonCachedInputTokens,
+    var lifetime: LLMTokenWindowUsage {
+        LLMTokenWindowUsage(
+            inputTokens: inputTokens,
             cachedInputTokens: cachedInputTokens,
-            outputTokens: outputTokens
+            cacheWriteInputTokens: cacheWriteInputTokens,
+            cacheWrite1hInputTokens: cacheWrite1hInputTokens,
+            outputTokens: outputTokens,
+            callCount: turnCount,
+            rebuildCount: rebuildCount
         )
+    }
+
+    func costBreakdown(for modelName: String) -> LLMCostBreakdown {
+        lifetime.costBreakdown(for: modelName)
+    }
+
+    func estimatedCost(for modelName: String) -> Double {
+        costBreakdown(for: modelName).total
     }
 
     func pricingLabel(for modelName: String) -> String {
         LLMTokenPricing.rates(for: modelName).label
+    }
+}
+
+extension LLMTokenUsageSummary {
+    /// Lifetime totals from per-request calls; `last24h` covers only calls in the 24 hours before `now`.
+    init(calls: [LLMTokenCall], now: Date = Date()) {
+        let lifetime = LLMTokenWindowUsage(calls: calls)
+        self.init(
+            inputTokens: lifetime.inputTokens,
+            cachedInputTokens: lifetime.cachedInputTokens,
+            outputTokens: lifetime.outputTokens,
+            reasoningOutputTokens: 0,
+            totalTokens: lifetime.totalTokens,
+            turnCount: lifetime.callCount,
+            cacheWriteInputTokens: lifetime.cacheWriteInputTokens,
+            cacheWrite1hInputTokens: lifetime.cacheWrite1hInputTokens,
+            rebuildCount: lifetime.rebuildCount,
+            peakContextTokens: calls.map(\.inputTokens).max() ?? 0,
+            last24h: LLMTokenWindowUsage(calls: calls.filter { ($0.timestamp ?? .distantPast) >= now.addingTimeInterval(-86_400) })
+        )
     }
 }
 
@@ -276,7 +390,12 @@ struct LLMTokenPricing: Equatable {
         if model.hasPrefix("gpt-5.4") {
             return .gpt54
         }
-        return .gpt55
+        if model.hasPrefix("gpt-5.5") {
+            return .gpt55
+        }
+        var fallback = LLMTokenPricing.gpt55
+        fallback.label = "gpt-5.5 API rates (model has no known price)"
+        return fallback
     }
 
     func estimatedCost(
@@ -287,6 +406,26 @@ struct LLMTokenPricing: Equatable {
         dollars(for: freshInputTokens, rate: freshInputDollarsPerMillion)
             + dollars(for: cachedInputTokens, rate: cachedInputDollarsPerMillion)
             + dollars(for: outputTokens, rate: outputDollarsPerMillion)
+    }
+
+    /// Cache writes bill at 1.25x base input for the 5-minute cache and 2x for the 1-hour cache.
+    func breakdown(
+        inputTokens: UInt64,
+        cachedInputTokens: UInt64,
+        cacheWriteInputTokens: UInt64,
+        cacheWrite1hInputTokens: UInt64,
+        outputTokens: UInt64
+    ) -> LLMCostBreakdown {
+        let uncached = inputTokens - min(cachedInputTokens, inputTokens)
+        let writes = min(cacheWriteInputTokens, uncached)
+        let writes1h = min(cacheWrite1hInputTokens, writes)
+        return LLMCostBreakdown(
+            freshInput: dollars(for: uncached - writes, rate: freshInputDollarsPerMillion),
+            cacheWrite: dollars(for: writes - writes1h, rate: freshInputDollarsPerMillion * 1.25)
+                + dollars(for: writes1h, rate: freshInputDollarsPerMillion * 2),
+            cacheRead: dollars(for: cachedInputTokens, rate: cachedInputDollarsPerMillion),
+            output: dollars(for: outputTokens, rate: outputDollarsPerMillion)
+        )
     }
 
     private func dollars(for tokens: UInt64, rate: Double) -> Double {
@@ -369,12 +508,14 @@ struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var primaryRemainingPercent: Int?
     var weeklyRemainingPercent: Int?
     var planType: String? = nil
+    var claudeWeeklyRemainingPercent: Int? = nil
 }
 
 private struct LLMQuotaActivitySignature: Equatable {
     var primaryRemainingPercent: Int?
     var weeklyRemainingPercent: Int?
     var planType: String?
+    var claudeWeeklyRemainingPercent: Int?
     var localFiveHourTokens: UInt64
     var localWeeklyTokens: UInt64
     var localWeeklyThreads: Int
@@ -383,6 +524,7 @@ private struct LLMQuotaActivitySignature: Equatable {
     init(usage: LLMUsageSnapshot, limit: LLMUsageLimit) {
         self.primaryRemainingPercent = limit.shortWindow?.remainingPercent
         self.weeklyRemainingPercent = limit.weeklyWindow?.remainingPercent
+        self.claudeWeeklyRemainingPercent = usage.limits.first { $0.name == "Claude" }?.weeklyWindow?.remainingPercent
         self.planType = usage.planType
         self.localFiveHourTokens = usage.localFiveHourTokens
         self.localWeeklyTokens = usage.localWeeklyTokens
@@ -659,6 +801,7 @@ final class MemoryModel: ObservableObject {
     @Published private(set) var llmUsage = LLMUsageSnapshot.empty
     @Published private(set) var llmQuotaHistory: [LLMQuotaHistorySample] = []
     @Published private(set) var aiUsage = AIUsageSnapshot.empty
+    @Published private(set) var clipboardDebug = ClipboardDebugSnapshot.empty
     private var previousCumulativePageIns: UInt64?
     private var previousCumulativePageOuts: UInt64?
     private var previousCPUInfo: CPUReader.CPULoadInfo?
@@ -670,12 +813,22 @@ final class MemoryModel: ObservableObject {
     private var isRefreshing = false
     private var isRefreshingStatus = false
     private var isRefreshingLLMUsage = false
+    private var claudeCheckID: UUID?
+    private let claudeCheckQueue = DispatchQueue(label: "com.hector.MaxxBar.claude-check", qos: .userInitiated)
+    @Published private(set) var isCheckingClaude = false
+    /// A short result shown after "Check now" when no request was made (e.g. "Checked 12s ago").
+    @Published private(set) var claudeCheckNote: String?
     private var isGeneratingAIReport = false
+    private let clipboardProcessingQueue = DispatchQueue(
+        label: "com.hector.MaxxBar.clipboard-processing",
+        qos: .utility
+    )
     private static let llmQuotaHistoryLimit = 4_320
 
     init() {
         llmQuotaHistory = Self.loadLLMQuotaHistory()
         previousLLMQuotaSample = llmQuotaHistory.last?.sampledAt
+        clipboardDebug = ClipboardDebugReader.snapshot()
     }
 
     init(
@@ -684,6 +837,7 @@ final class MemoryModel: ObservableObject {
         network: NetworkSnapshot = .demo,
         llmUsage: LLMUsageSnapshot = .demo,
         aiUsage: AIUsageSnapshot = .demo,
+        clipboardDebug: ClipboardDebugSnapshot = .demo,
         llmQuotaHistory: [LLMQuotaHistorySample] = .demo
     ) {
         self.snapshot = snapshot
@@ -691,6 +845,7 @@ final class MemoryModel: ObservableObject {
         self.network = network
         self.llmUsage = llmUsage
         self.aiUsage = aiUsage
+        self.clipboardDebug = clipboardDebug
         self.llmQuotaHistory = llmQuotaHistory
     }
 
@@ -700,6 +855,7 @@ final class MemoryModel: ObservableObject {
         network = .demo
         llmUsage = .demo
         aiUsage = .demo
+        clipboardDebug = .demo
         llmQuotaHistory = .demo
     }
 
@@ -750,6 +906,7 @@ final class MemoryModel: ObservableObject {
         let previousCPUInfo = previousCPUInfo
         let previousNetworkCounters = previousNetworkCounters
         let networkHistory = networkHistory
+        let currentLLMUsage = llmUsage
 
         DispatchQueue.global(qos: .utility).async {
             let result = Self.collectRefresh(
@@ -757,7 +914,8 @@ final class MemoryModel: ObservableObject {
                 previousPageOuts: previousPageOuts,
                 previousCPUInfo: previousCPUInfo,
                 previousNetworkCounters: previousNetworkCounters,
-                networkHistory: networkHistory
+                networkHistory: networkHistory,
+                llmUsage: currentLLMUsage
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -775,19 +933,26 @@ final class MemoryModel: ObservableObject {
 
         let previousPageIns = previousCumulativePageIns
         let previousPageOuts = previousCumulativePageOuts
+        let currentCPUGPU = cpuGPU
+        let currentLLMUsage = llmUsage
 
         DispatchQueue.global(qos: .utility).async {
             let stats = MemoryReader.read(includeProcesses: false, precisePressure: false)
             var displayStats = stats
             displayStats.pageIns = Self.deltaValue(from: previousPageIns, to: stats.cumulativePageIns)
             displayStats.pageOuts = Self.deltaValue(from: previousPageOuts, to: stats.cumulativePageOuts)
+            let aiUsage = AIUsageReader.recordAndRead(
+                memory: displayStats,
+                cpuGPU: currentCPUGPU,
+                llmUsage: currentLLMUsage
+            )
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.previousCumulativePageIns = stats.cumulativePageIns
                 self.previousCumulativePageOuts = stats.cumulativePageOuts
                 self.snapshot = displayStats
-                self.aiUsage = AIUsageReader.recordAndRead(memory: displayStats, cpuGPU: self.cpuGPU, llmUsage: self.llmUsage)
+                self.aiUsage = aiUsage
                 self.history.append(stats.breakdown)
                 if self.history.count > 60 {
                     self.history.removeFirst(self.history.count - 60)
@@ -798,26 +963,77 @@ final class MemoryModel: ObservableObject {
         }
     }
 
-    func refreshLLMUsageInBackground(force: Bool = false, completion: (@MainActor @Sendable () -> Void)? = nil) {
+    /// "Check now" on the Claude card: an immediate usage read (the reader still honors 429 cooldowns).
+    /// Reads only the Claude usage endpoint, independent of the full (slow) usage refresh, and always ends the
+    /// "Checking…" state: with fresh numbers, a reason no request was made, or after a 20-second limit.
+    func checkClaudeUsageNow() {
+        guard !isCheckingClaude else { return }
+        let id = UUID()
+        claudeCheckID = id
+        isCheckingClaude = true
+        claudeCheckNote = nil
+        let started = Date()
+        let base = llmUsage
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+            guard let self, self.claudeCheckID == id else { return }
+            self.finishClaudeCheck(note: "Still waiting for Claude; the card will update when it answers.")
+        }
+        claudeCheckQueue.async {
+            let result = LLMUsageReader.checkClaudeNow(in: base)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.claudeCheckID == id else { return }
+                // Merge only the Claude parts: a full refresh may have landed in the meantime.
+                var merged = self.llmUsage
+                merged.limits.removeAll { $0.name == "Claude" }
+                merged.limits.append(contentsOf: result.snapshot.limits.filter { $0.name == "Claude" })
+                merged.providerErrors["Claude"] = result.snapshot.providerErrors["Claude"]
+                merged.error = merged.providerErrors.isEmpty
+                    ? nil
+                    : merged.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
+                self.llmUsage = merged
+                // Keep "Checking…" visible briefly so an instant answer still reads as a response.
+                let remaining = max(0, 0.6 - Date().timeIntervalSince(started))
+                DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
+                    guard let self, self.claudeCheckID == id else { return }
+                    self.finishClaudeCheck(note: result.skipped)
+                }
+            }
+        }
+    }
+
+    private func finishClaudeCheck(note: String?) {
+        claudeCheckID = nil
+        isCheckingClaude = false
+        claudeCheckNote = note
+        guard note != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, self.claudeCheckID == nil, self.claudeCheckNote == note else { return }
+            self.claudeCheckNote = nil
+        }
+    }
+
+    func refreshLLMUsageInBackground(
+        force: Bool = false, checkClaudeNow: Bool = false, completion: (@MainActor @Sendable () -> Void)? = nil
+    ) {
         guard !isRefreshingLLMUsage else { return }
+        // 30s keeps the reader's 2-minute Claude schedule on time with the 15s app timer.
         if !force,
            let previousLLMUsageRefresh,
-           Date().timeIntervalSince(previousLLMUsageRefresh) < 60 {
+           Date().timeIntervalSince(previousLLMUsageRefresh) < 30 {
             completion?()
             return
         }
 
         isRefreshingLLMUsage = true
         DispatchQueue.global(qos: .utility).async {
-            let usage = LLMUsageReader.read()
+            let usage = LLMUsageReader.read(checkClaudeNow: checkClaudeNow)
+            Self.logFiveHourUsageWindow(from: usage)
             let refreshedAt = Date()
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.llmUsage = usage
-                self.aiUsage = AIUsageReader.recordAndRead(memory: self.snapshot, cpuGPU: self.cpuGPU, llmUsage: usage)
                 self.previousLLMUsageRefresh = refreshedAt
-                self.logFiveHourUsageWindow(from: usage)
                 self.sampleLLMQuotaIfNeeded()
                 self.isRefreshingLLMUsage = false
                 completion?()
@@ -870,7 +1086,56 @@ final class MemoryModel: ObservableObject {
     }
 
     func recordClipboardEvent(_ eventType: String) {
-        aiUsage = AIUsageReader.recordClipboardEvent(eventType)
+        clipboardProcessingQueue.async { [weak self] in
+            let clipboardDebug = ClipboardDebugReader.recordShortcut(eventType)
+            let aiUsage = eventType == "paste"
+                ? AIUsageReader.recordClipboardEvent(eventType)
+                : nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.clipboardDebug = clipboardDebug
+                if let aiUsage {
+                    self.aiUsage = aiUsage
+                }
+            }
+        }
+    }
+
+    func recordClipboardChange(
+        changeCount: Int,
+        itemCount: Int,
+        typeIdentifiers: [String],
+        imagePayload: ClipboardImagePayload?
+    ) {
+        clipboardProcessingQueue.async { [weak self] in
+            let storedImage = imagePayload.flatMap {
+                ClipboardImageStore.save($0, changeCount: changeCount)
+            }
+            let clipboardDebug = ClipboardDebugReader.recordWrite(
+                changeCount: changeCount,
+                itemCount: itemCount,
+                typeIdentifiers: typeIdentifiers,
+                storedImage: storedImage
+            )
+            let aiUsage = AIUsageReader.recordClipboardEvent("copy")
+            DispatchQueue.main.async { [weak self] in
+                self?.clipboardDebug = clipboardDebug
+                self?.aiUsage = aiUsage
+            }
+        }
+    }
+
+    func recordCurrentClipboardState(changeCount: Int, itemCount: Int, typeIdentifiers: [String]) {
+        clipboardProcessingQueue.async { [weak self] in
+            let clipboardDebug = ClipboardDebugReader.recordCurrentState(
+                changeCount: changeCount,
+                itemCount: itemCount,
+                typeIdentifiers: typeIdentifiers
+            )
+            DispatchQueue.main.async { [weak self] in
+                self?.clipboardDebug = clipboardDebug
+            }
+        }
     }
 
     func startDeepTrace() {
@@ -883,6 +1148,7 @@ final class MemoryModel: ObservableObject {
         let sensors: SensorSnapshot
         let cpuResult: (snapshot: CPUGPUSnapshot, current: CPUReader.CPULoadInfo?)
         let networkResult: (snapshot: NetworkSnapshot, counters: NetworkReader.NetworkCounters?)
+        let aiUsage: AIUsageSnapshot
     }
 
     nonisolated private static func collectRefresh(
@@ -890,7 +1156,8 @@ final class MemoryModel: ObservableObject {
         previousPageOuts: UInt64?,
         previousCPUInfo: CPUReader.CPULoadInfo?,
         previousNetworkCounters: NetworkReader.NetworkCounters?,
-        networkHistory: [NetworkSample]
+        networkHistory: [NetworkSample],
+        llmUsage: LLMUsageSnapshot
     ) -> RefreshResult {
         let stats = MemoryReader.read()
         var displayStats = stats
@@ -899,13 +1166,19 @@ final class MemoryModel: ObservableObject {
         let sensors = SensorReader.read()
         let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
         let networkResult = NetworkReader.read(previous: previousNetworkCounters, history: networkHistory)
+        let aiUsage = AIUsageReader.recordAndRead(
+            memory: displayStats,
+            cpuGPU: cpuResult.snapshot,
+            llmUsage: llmUsage
+        )
 
         return RefreshResult(
             stats: stats,
             displayStats: displayStats,
             sensors: sensors,
             cpuResult: cpuResult,
-            networkResult: networkResult
+            networkResult: networkResult,
+            aiUsage: aiUsage
         )
     }
 
@@ -919,7 +1192,7 @@ final class MemoryModel: ObservableObject {
         previousNetworkCounters = result.networkResult.counters
         networkHistory = result.networkResult.snapshot.history
         network = result.networkResult.snapshot
-        aiUsage = AIUsageReader.recordAndRead(memory: result.displayStats, cpuGPU: cpuGPU, llmUsage: llmUsage)
+        aiUsage = result.aiUsage
         history.append(result.stats.breakdown)
         if history.count > 60 {
             history.removeFirst(history.count - 60)
@@ -937,7 +1210,9 @@ final class MemoryModel: ObservableObject {
     }
 
     private func sampleLLMQuotaIfNeeded(force: Bool = false) {
-        guard let limit = llmUsage.limits.first(where: { $0.name == "Codex" }) ?? llmUsage.limits.first else { return }
+        let codex = llmUsage.limits.first { $0.name == "Codex" }
+        let claude = llmUsage.limits.first { $0.name == "Claude" }
+        guard let limit = codex ?? claude else { return }
         let now = Date()
         let activitySignature = LLMQuotaActivitySignature(usage: llmUsage, limit: limit)
         if !force,
@@ -949,9 +1224,10 @@ final class MemoryModel: ObservableObject {
         llmQuotaHistory.append(
             LLMQuotaHistorySample(
                 sampledAt: now,
-                primaryRemainingPercent: limit.shortWindow?.remainingPercent,
-                weeklyRemainingPercent: limit.weeklyWindow?.remainingPercent,
-                planType: llmUsage.planType
+                primaryRemainingPercent: codex?.shortWindow?.remainingPercent,
+                weeklyRemainingPercent: codex?.weeklyWindow?.remainingPercent,
+                planType: llmUsage.planType,
+                claudeWeeklyRemainingPercent: claude?.weeklyWindow?.remainingPercent
             )
         )
         previousLLMQuotaSample = now
@@ -987,7 +1263,7 @@ final class MemoryModel: ObservableObject {
             .appendingPathComponent("llm-quota-history.json")
     }
 
-    private static var fiveHourUsageLogURL: URL? {
+    nonisolated private static var fiveHourUsageLogURL: URL? {
         guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
@@ -1032,10 +1308,10 @@ final class MemoryModel: ObservableObject {
         }
     }
 
-    private func logFiveHourUsageWindow(from usage: LLMUsageSnapshot) {
+    nonisolated private static func logFiveHourUsageWindow(from usage: LLMUsageSnapshot) {
         guard let estimate = usage.costEstimates.first(where: { $0.label.lowercased() == "5h" }),
-              let url = Self.fiveHourUsageLogURL,
-              let line = Self.logLine(for: LLMUsageWindowLogEntry(estimate: estimate)) else {
+              let url = fiveHourUsageLogURL,
+              let line = logLine(for: LLMUsageWindowLogEntry(estimate: estimate)) else {
             return
         }
 
@@ -1053,13 +1329,12 @@ final class MemoryModel: ObservableObject {
             }
             try handle.seekToEnd()
             handle.write(line)
-            try Self.writeFiveHourUsageReport()
         } catch {
             // The app should never block live stats because the usage log could not be written.
         }
     }
 
-    private static func logLine(for entry: LLMUsageWindowLogEntry) -> Data? {
+    nonisolated private static func logLine(for entry: LLMUsageWindowLogEntry) -> Data? {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard var data = try? encoder.encode(entry) else { return nil }
@@ -1282,14 +1557,14 @@ extension NetworkSnapshot {
 
 extension Array where Element == LLMQuotaHistorySample {
     static let demo: [LLMQuotaHistorySample] = [
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-6_000), primaryRemainingPercent: 99, weeklyRemainingPercent: 84, planType: "plus"),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-5_340), primaryRemainingPercent: 92, weeklyRemainingPercent: 83, planType: "plus"),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-4_680), primaryRemainingPercent: 56, weeklyRemainingPercent: 77, planType: "plus"),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-4_080), primaryRemainingPercent: 34, weeklyRemainingPercent: 74, planType: "plus"),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-3_420), primaryRemainingPercent: 11, weeklyRemainingPercent: 70, planType: "plus"),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_760), primaryRemainingPercent: 0, weeklyRemainingPercent: 68, planType: "plus"),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_100), primaryRemainingPercent: 0, weeklyRemainingPercent: 68, planType: "plus"),
-        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-1_440), primaryRemainingPercent: 99, weeklyRemainingPercent: 100, planType: "prolite")
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-6_000 * 80), primaryRemainingPercent: 99, weeklyRemainingPercent: 84, planType: "plus", claudeWeeklyRemainingPercent: 90),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-5_340 * 80), primaryRemainingPercent: 92, weeklyRemainingPercent: 83, planType: "plus", claudeWeeklyRemainingPercent: 86),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-4_680 * 80), primaryRemainingPercent: 56, weeklyRemainingPercent: 77, planType: "plus", claudeWeeklyRemainingPercent: 81),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-4_080 * 80), primaryRemainingPercent: 34, weeklyRemainingPercent: 74, planType: "plus", claudeWeeklyRemainingPercent: 74),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-3_420 * 80), primaryRemainingPercent: 11, weeklyRemainingPercent: 70, planType: "plus", claudeWeeklyRemainingPercent: 66),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_760 * 80), primaryRemainingPercent: 0, weeklyRemainingPercent: 68, planType: "plus", claudeWeeklyRemainingPercent: 59),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-2_100 * 80), primaryRemainingPercent: 0, weeklyRemainingPercent: 68, planType: "plus", claudeWeeklyRemainingPercent: 52),
+        LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-1_440 * 80), primaryRemainingPercent: 99, weeklyRemainingPercent: 100, planType: "prolite", claudeWeeklyRemainingPercent: 52)
     ]
 }
 
@@ -1320,6 +1595,12 @@ extension LLMUsageSnapshot {
                 name: "Codex",
                 primary: LLMUsageWindow(label: "5h", usedPercent: 58, remainingPercent: 42, resetAt: Date().addingTimeInterval(4_860), windowSeconds: 18_000),
                 secondary: LLMUsageWindow(label: "Weekly", usedPercent: 19, remainingPercent: 81, resetAt: Date().addingTimeInterval(255_000), windowSeconds: 604_800)
+            ),
+            LLMUsageLimit(
+                name: "Claude",
+                primary: LLMUsageWindow(label: "5h", usedPercent: 34, remainingPercent: 66, resetAt: Date().addingTimeInterval(7_200), windowSeconds: 18_000),
+                secondary: LLMUsageWindow(label: "Weekly", usedPercent: 48, remainingPercent: 52, resetAt: Date().addingTimeInterval(345_600), windowSeconds: 604_800),
+                cachedAt: Date().addingTimeInterval(-300)
             )
         ],
         creditsBalance: "0",
@@ -1552,9 +1833,9 @@ extension SensorSnapshot {
         cpuTemperature: 67,
         gpuTemperature: 52,
         batteryTemperature: 30,
-        fanPercent: 0,
-        fanRPM: nil,
-        fanReadings: [],
+        fanPercent: 100,
+        fanRPM: 1450,
+        fanReadings: [FanReading(label: "Fan 1", rpm: 1355), FanReading(label: "Fan 2", rpm: 1450)],
         temperatureReadings: [
             TemperatureReading(label: "Airflow", celsius: 46.7),
             TemperatureReading(label: "Battery", celsius: 30),
@@ -1905,8 +2186,12 @@ enum SensorReader {
     static func read() -> SensorSnapshot {
         let battery = readBatteryTelemetry()
         let native = NativeSensorCache.read()
+        let smc = LocalSMCSensors()
         let batteryTemperature = battery.temperatureCelsius ?? native?.temperature(label: "Battery")
-        let fanReadings = native?.fanReadings ?? []
+        let nativeFans = native?.fanReadings ?? []
+        let fanReadings = nativeFans.isEmpty
+            ? (smc?.fanSpeeds ?? []).enumerated().map { FanReading(label: "Fan \($0.offset + 1)", rpm: $0.element) }
+            : nativeFans
         let maxFanRPM = fanReadings.map(\.rpm).max()
         let fanPercent = maxFanRPM.map { $0 > 0 ? 100 : 0 }
         let preferredTemperatures = native?.temperatureReadings ?? []
@@ -1919,8 +2204,8 @@ enum SensorReader {
             }
 
         return SensorSnapshot(
-            cpuTemperature: native?.cpuTemperatureCelsius,
-            gpuTemperature: native?.gpuTemperatureCelsius,
+            cpuTemperature: native?.cpuTemperatureCelsius ?? smc?.cpuTemperature,
+            gpuTemperature: native?.gpuTemperatureCelsius ?? smc?.gpuTemperature,
             batteryTemperature: batteryTemperature,
             fanPercent: fanPercent,
             fanRPM: maxFanRPM,
@@ -2364,13 +2649,36 @@ enum AIUsageReader {
     nonisolated(unsafe) private static var lastCopyRecord: AITransferRecord?
     nonisolated(unsafe) private static var lastTransferSignature: String?
     nonisolated(unsafe) private static var lastTransferAt: Date?
+    nonisolated(unsafe) private static var activityRecordCache: [AIActivityRecord]?
+    nonisolated(unsafe) private static var momentRecordCache: [MaxxMomentRecord]?
+    nonisolated(unsafe) private static var transferRecordCache: [AITransferRecord]?
     private static let transferLock = NSLock()
+    private static let recordCacheLock = NSLock()
+    private static let transferPairingWindow: TimeInterval = 15 * 60
+    private static let recordCacheRetentionDays = 7
 
     static func recordAndRead(memory: MemorySnapshot, cpuGPU: CPUGPUSnapshot, llmUsage: LLMUsageSnapshot) -> AIUsageSnapshot {
         let context = activeContext()
         let record = record(from: context, memory: memory, cpuGPU: cpuGPU, llmUsage: llmUsage)
-        append(record, to: activityLogURL)
+        appendActivityRecord(record)
         return snapshot(current: record, error: nil)
+    }
+
+    static func currentClipboardDebugContext() -> ClipboardDebugContext {
+        let context = activeContext()
+        let provider = aiProviderIdentity(
+            tool: context.tool,
+            surface: context.surface,
+            bundleID: context.bundleID
+        ).map { $0 == "codex" ? "Codex" : "Claude" }
+        return ClipboardDebugContext(
+            app: context.app,
+            bundleID: context.bundleID,
+            site: context.site,
+            tool: context.tool,
+            surface: context.surface,
+            provider: provider
+        )
     }
 
     static func recordClipboardEvent(_ eventType: String) -> AIUsageSnapshot {
@@ -2388,7 +2696,10 @@ enum AIUsageReader {
         }
 
         let source = eventType == "paste" ? lastCopyRecord : nil
-        let hasFreshSource = source.map { now.timeIntervalSince($0.ts) <= 86_400 } ?? false
+        let hasFreshSource = source.map {
+            let age = now.timeIntervalSince($0.ts)
+            return age >= 0 && age <= transferPairingWindow
+        } ?? false
         let record = AITransferRecord(
             eventType: eventType,
             ts: now,
@@ -2414,7 +2725,7 @@ enum AIUsageReader {
             sourceTS: hasFreshSource ? source?.ts : nil,
             privacy: "no_clipboard_content"
         )
-        append(record, to: transfersLogURL)
+        appendTransferRecord(record)
         if eventType == "copy" { lastCopyRecord = record }
         lastTransferSignature = signature
         lastTransferAt = now
@@ -2433,28 +2744,26 @@ enum AIUsageReader {
         let record = record(from: context, memory: memory, cpuGPU: cpuGPU, llmUsage: llmUsage)
         let cleanNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
         let screenshotPath = includeScreenshot ? captureScreenshot(at: record.ts) : nil
-        append(record, to: activityLogURL)
-        append(
-            MaxxMomentRecord(
-                ts: record.ts,
-                app: record.app,
-                bundleID: record.bundleID,
-                site: record.site,
-                tool: record.tool,
-                surface: record.surface,
-                useCase: record.useCase,
-                sentiment: sentiment,
-                screenshotPath: screenshotPath,
-                memoryPressurePercent: record.memoryPressurePercent,
-                memoryUsedPercent: record.memoryUsedPercent,
-                cpuUserPercent: record.cpuUserPercent,
-                cpuSystemPercent: record.cpuSystemPercent,
-                codexFiveHourRemainingPercent: record.codexFiveHourRemainingPercent,
-                codexWeeklyRemainingPercent: record.codexWeeklyRemainingPercent,
-                note: cleanNote.isEmpty ? sentiment : cleanNote
-            ),
-            to: momentsLogURL
+        let moment = MaxxMomentRecord(
+            ts: record.ts,
+            app: record.app,
+            bundleID: record.bundleID,
+            site: record.site,
+            tool: record.tool,
+            surface: record.surface,
+            useCase: record.useCase,
+            sentiment: sentiment,
+            screenshotPath: screenshotPath,
+            memoryPressurePercent: record.memoryPressurePercent,
+            memoryUsedPercent: record.memoryUsedPercent,
+            cpuUserPercent: record.cpuUserPercent,
+            cpuSystemPercent: record.cpuSystemPercent,
+            codexFiveHourRemainingPercent: record.codexFiveHourRemainingPercent,
+            codexWeeklyRemainingPercent: record.codexWeeklyRemainingPercent,
+            note: cleanNote.isEmpty ? sentiment : cleanNote
         )
+        appendActivityRecord(record)
+        appendMomentRecord(moment)
         return snapshot(current: record, error: nil)
     }
 
@@ -2521,7 +2830,7 @@ enum AIUsageReader {
             <p>\(html(context))</p>
             <p>This page opens immediately so the menu bar does not wait on live usage data. It will refresh automatically as soon as the full Hub is ready.</p>
             <div class="bar"><span></span></div>
-            <small>Reading local metadata only. Clipboard contents and typed text are not stored.</small>
+            <small>Copied images may be stored locally for up to 24 hours. Text clipboard contents and typed text are not stored.</small>
           </main>
         </body>
         </html>
@@ -2600,7 +2909,7 @@ enum AIUsageReader {
             copyEventsToday: todayTransfers.filter { $0.eventType == "copy" }.count,
             pasteEventsToday: todayTransfers.filter { $0.eventType == "paste" }.count,
             topCopiedFrom: counters(transfers.filter { $0.eventType == "copy" }.map(transferSourceLabel), limit: 4),
-            topPastedInto: counters(transfers.filter { $0.eventType == "paste" && $0.sourceTool != nil }.map(transferDestinationLabel), limit: 4),
+            topPastedInto: counters(transfers.filter(isReliablePasteTransfer).map(transferDestinationLabel), limit: 4),
             transferFlows: transferFlows,
             momentsToday: moments.filter { $0.ts >= startOfDay }.count,
             lastMomentAt: moments.map(\.ts).max(),
@@ -2661,7 +2970,7 @@ enum AIUsageReader {
             copyEventsToday: todayTransfers.filter { $0.eventType == "copy" }.count,
             pasteEventsToday: todayTransfers.filter { $0.eventType == "paste" }.count,
             topCopiedFrom: counters(providerTransfers.filter { $0.eventType == "copy" }.map(transferSourceLabel), limit: 4),
-            topPastedInto: counters(providerTransfers.filter { $0.eventType == "paste" }.map(transferDestinationLabel), limit: 4),
+            topPastedInto: counters(providerTransfers.filter(isReliablePasteTransfer).map(transferDestinationLabel), limit: 4),
             transferFlows: topTransferFlows(providerTransfers)
         )
     }
@@ -2838,7 +3147,7 @@ enum AIUsageReader {
     }
 
     private static func topTransferFlows(_ transfers: [AITransferRecord]) -> [AITransferFlow] {
-        let pasteEvents = transfers.filter { $0.eventType == "paste" && $0.sourceTool != nil }
+        let pasteEvents = transfers.filter(isReliablePasteTransfer)
         var counts: [String: (source: String, destination: String, useCase: String, count: Int)] = [:]
         for event in pasteEvents {
             let source = event.sourceSurface ?? event.sourceTool ?? event.sourceSite ?? event.sourceApp ?? "Unknown"
@@ -2852,6 +3161,51 @@ enum AIUsageReader {
             .sorted { lhs, rhs in lhs.count == rhs.count ? lhs.destination < rhs.destination : lhs.count > rhs.count }
             .prefix(8)
             .map { AITransferFlow(source: $0.source, destination: $0.destination, useCase: $0.useCase, count: $0.count, confidence: "High") }
+    }
+
+    private static func isReliablePasteTransfer(_ record: AITransferRecord) -> Bool {
+        guard record.eventType == "paste",
+              record.sourceTool != nil,
+              let sourceTS = record.sourceTS else {
+            return false
+        }
+        let delay = record.ts.timeIntervalSince(sourceTS)
+        guard delay >= 0, delay <= transferPairingWindow else { return false }
+        return !isSameAIProviderTransfer(record)
+    }
+
+    private static func isSameAIProviderTransfer(_ record: AITransferRecord) -> Bool {
+        let source = aiProviderIdentity(
+            tool: record.sourceTool,
+            surface: record.sourceSurface,
+            bundleID: record.sourceBundleID
+        )
+        let destination = aiProviderIdentity(
+            tool: record.tool,
+            surface: record.surface,
+            bundleID: record.bundleID
+        )
+        return source != nil && source == destination
+    }
+
+    private static func aiProviderIdentity(
+        tool: String?,
+        surface: String?,
+        bundleID: String?
+    ) -> String? {
+        if bundleID?.caseInsensitiveCompare("com.openai.codex") == .orderedSame {
+            return "codex"
+        }
+        let value = [tool, surface, bundleID]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: " ")
+        if value.contains("claude") || value.contains("anthropic") {
+            return "claude"
+        }
+        if value.contains("codex") {
+            return "codex"
+        }
+        return nil
     }
 
     private static func transferSourceLabel(_ record: AITransferRecord) -> String {
@@ -2870,15 +3224,81 @@ enum AIUsageReader {
     }
 
     private static func recentActivityRecords(days: Int) -> [AIActivityRecord] {
-        readJSONLines(AIActivityRecord.self, from: activityLogURL, days: days)
+        recordCacheLock.lock()
+        if activityRecordCache == nil {
+            activityRecordCache = readJSONLines(
+                AIActivityRecord.self,
+                from: activityLogURL,
+                days: recordCacheRetentionDays
+            )
+        }
+        let now = Date()
+        let retentionCutoff = now.addingTimeInterval(-Double(recordCacheRetentionDays) * 86_400)
+        let retainedRecords = (activityRecordCache ?? []).filter { $0.ts >= retentionCutoff }
+        activityRecordCache = retainedRecords
+        let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
+        let records = retainedRecords.filter { $0.ts >= cutoff }
+        recordCacheLock.unlock()
+        return records
     }
 
     private static func recentMomentRecords(days: Int) -> [MaxxMomentRecord] {
-        readJSONLines(MaxxMomentRecord.self, from: momentsLogURL, days: days)
+        recordCacheLock.lock()
+        if momentRecordCache == nil {
+            momentRecordCache = readJSONLines(
+                MaxxMomentRecord.self,
+                from: momentsLogURL,
+                days: recordCacheRetentionDays
+            )
+        }
+        let now = Date()
+        let retentionCutoff = now.addingTimeInterval(-Double(recordCacheRetentionDays) * 86_400)
+        let retainedRecords = (momentRecordCache ?? []).filter { $0.ts >= retentionCutoff }
+        momentRecordCache = retainedRecords
+        let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
+        let records = retainedRecords.filter { $0.ts >= cutoff }
+        recordCacheLock.unlock()
+        return records
     }
 
     private static func recentTransferRecords(days: Int) -> [AITransferRecord] {
-        readJSONLines(AITransferRecord.self, from: transfersLogURL, days: days)
+        recordCacheLock.lock()
+        if transferRecordCache == nil {
+            transferRecordCache = readJSONLines(
+                AITransferRecord.self,
+                from: transfersLogURL,
+                days: recordCacheRetentionDays
+            )
+        }
+        let now = Date()
+        let retentionCutoff = now.addingTimeInterval(-Double(recordCacheRetentionDays) * 86_400)
+        let retainedRecords = (transferRecordCache ?? []).filter { $0.ts >= retentionCutoff }
+        transferRecordCache = retainedRecords
+        let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
+        let records = retainedRecords.filter { $0.ts >= cutoff }
+        recordCacheLock.unlock()
+        return records
+    }
+
+    private static func appendActivityRecord(_ record: AIActivityRecord) {
+        recordCacheLock.lock()
+        append(record, to: activityLogURL)
+        activityRecordCache?.append(record)
+        recordCacheLock.unlock()
+    }
+
+    private static func appendMomentRecord(_ record: MaxxMomentRecord) {
+        recordCacheLock.lock()
+        append(record, to: momentsLogURL)
+        momentRecordCache?.append(record)
+        recordCacheLock.unlock()
+    }
+
+    private static func appendTransferRecord(_ record: AITransferRecord) {
+        recordCacheLock.lock()
+        append(record, to: transfersLogURL)
+        transferRecordCache?.append(record)
+        recordCacheLock.unlock()
     }
 
     private static func recentQuotaHistory() -> [LLMQuotaHistorySample] {
@@ -2920,18 +3340,28 @@ enum AIUsageReader {
         let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { line in
-                guard let data = String(line).data(using: .utf8),
-                      let record = try? decoder.decode(T.self, from: data) else {
-                    return nil
-                }
-                if let activity = record as? AIActivityRecord { return activity.ts >= cutoff ? record : nil }
-                if let moment = record as? MaxxMomentRecord { return moment.ts >= cutoff ? record : nil }
-                if let transfer = record as? AITransferRecord { return transfer.ts >= cutoff ? record : nil }
-                return record
+        var records: [T] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+            guard let lineData = String(line).data(using: .utf8),
+                  let record = try? decoder.decode(T.self, from: lineData) else {
+                continue
             }
+            let timestamp: Date?
+            if let activity = record as? AIActivityRecord {
+                timestamp = activity.ts
+            } else if let moment = record as? MaxxMomentRecord {
+                timestamp = moment.ts
+            } else if let transfer = record as? AITransferRecord {
+                timestamp = transfer.ts
+            } else {
+                timestamp = nil
+            }
+            if let timestamp, timestamp < cutoff {
+                break
+            }
+            records.append(record)
+        }
+        return records.reversed()
     }
 
     private static func append<T: Encodable>(_ value: T, to url: URL?) {
@@ -3026,7 +3456,7 @@ enum AIUsageReader {
         let topTools = counters(aiRecords.compactMap(canonicalTool), limit: 8)
         let todayTools = counters(todayAIRecords.compactMap(canonicalTool), limit: 8)
         let useCases = counters(aiRecords.map(\.useCase), limit: 8)
-        let outputDestinations = counters(transfers.filter { $0.eventType == "paste" && $0.sourceTool != nil }.map(transferDestinationLabel), limit: 8)
+        let outputDestinations = counters(transfers.filter(isReliablePasteTransfer).map(transferDestinationLabel), limit: 8)
         let totalAISeconds = inferredAISeconds(aiRecords)
         let sessionCount = sessions(from: records).count
         let todaySessionCount = sessions(from: todayAIRecords).count
@@ -3072,7 +3502,7 @@ enum AIUsageReader {
             <div class="grid">
               \(card("AI sessions today", "\(todaySessionCount)", "\(sessionCount) in 7 days"))
               \(card("AI time", duration(totalAISeconds), "sample-inferred · 7 days"))
-              \(card("AI transfers", "\(transfers.filter { $0.eventType == "paste" && $0.sourceTool != nil }.count)", "confirmed destinations"))
+              \(card("AI transfers", "\(transfers.filter(isReliablePasteTransfer).count)", "recent cross-app destinations"))
               \(card("Insight events today", "\(insightEventCount)", "sessions · copy/paste"))
               \(card("Active", html(latest?.tool ?? latest?.app ?? "Unknown"), html(latest?.surface ?? latest?.site ?? "latest sample")))
               \(card("AI runway", runwayValue.isEmpty ? "—" : html(runwayValue), runwayLabel))
@@ -3138,7 +3568,7 @@ enum AIUsageReader {
         let flows = topTransferFlows(providerTransfers)
         let destinations = counters(
             providerTransfers
-                .filter { $0.eventType == "paste" && $0.sourceTool != nil }
+                .filter(isReliablePasteTransfer)
                 .map(transferDestinationLabel),
             limit: 8
         )
@@ -3632,26 +4062,30 @@ enum LLMUsageReader {
     private struct ClaudeTranscript {
         let session: LLMUsageSession
         let modelEvents: [ClaudeModelUsageEvent]
+        /// Cleaned first prompt, set only when nothing better than it was available as a title.
+        let untitledPrompt: String?
     }
 
     private final class HTTPResultBox: @unchecked Sendable {
         private let lock = NSLock()
         private var data: Data?
         private var statusCode: Int?
+        private var retryAfter: String?
         private var errorDescription: String?
 
         func set(data: Data?, response: URLResponse?, error: Error?) {
             lock.lock()
             self.data = data
             self.statusCode = (response as? HTTPURLResponse)?.statusCode
+            self.retryAfter = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")
             self.errorDescription = error?.localizedDescription
             lock.unlock()
         }
 
-        func snapshot() -> (data: Data?, statusCode: Int?, errorDescription: String?) {
+        func snapshot() -> (data: Data?, statusCode: Int?, errorDescription: String?, retryAfter: String?) {
             lock.lock()
             defer { lock.unlock() }
-            return (data, statusCode, errorDescription)
+            return (data, statusCode, errorDescription, retryAfter)
         }
     }
 
@@ -3876,7 +4310,87 @@ enum LLMUsageReader {
         let thread_name: String?
     }
 
-    static func read() -> LLMUsageSnapshot {
+    /// "Check now": refreshes only the Claude card from the usage endpoint, reusing the rest of `snapshot`
+    /// (the full read rescans every local transcript and can take minutes). Returns why no request was made, if none was.
+    static func checkClaudeNow(in snapshot: LLMUsageSnapshot) -> (snapshot: LLMUsageSnapshot, skipped: String?) {
+        let now = Date()
+        let before = ClaudeUsagePollingState.load(from: claudeCacheURL)
+        var skipped = before?.manualCheckBlockReason(at: now)
+        var updated = snapshot
+        let claudeSessions = (snapshot.recentSessions + snapshot.topWeeklySessions).filter { $0.provider == "Claude" }
+        applyClaudeLimits(
+            to: &updated, lastActivity: claudeSessions.compactMap(\.updatedAt).max(),
+            hasClaudeSessions: !claudeSessions.isEmpty, manual: true
+        )
+        // Every click ends with a visible outcome: if no new reading arrived, say why (e.g. an expired sign-in).
+        let after = ClaudeUsagePollingState.load(from: claudeCacheURL)
+        if skipped == nil, after?.fetchedAt == nil || after?.fetchedAt == before?.fetchedAt {
+            skipped = updated.providerErrors["Claude"] ?? "Claude did not return a new reading."
+        }
+        return (updated, skipped)
+    }
+
+    private static func applyClaudeLimits(
+        to snapshot: inout LLMUsageSnapshot, lastActivity: Date?, hasClaudeSessions: Bool, manual: Bool
+    ) {
+        snapshot.limits.removeAll { $0.name == "Claude" }
+        snapshot.providerErrors["Claude"] = nil
+        let now = Date()
+        let tapped = ClaudeStatusLineLimits.read()?.current(at: now)
+        let tappedLimit = tapped.flatMap { claudeLimit(fromStatusLine: $0, now: now) }
+        let claudeCredential = ClaudeCredentialManager.shared.read()
+        if let token = claudeCredential.accessToken {
+            // A fresh status line capture is live; the endpoint is then only refreshed hourly for the per-model weeklies.
+            let tappedIsFresh = tappedLimit != nil && tapped?.isFresh(at: now) == true
+            switch readClaudeLimits(
+                accessToken: token,
+                minimumRefreshAge: tappedIsFresh ? 3_600 : 0,
+                lastActivity: lastActivity,
+                // A just-refreshed sign-in reads usage right away (429 cooldowns still apply).
+                manual: manual || claudeCredential.refreshed
+            ) {
+            case .success(var limits, let warning):
+                if let tappedLimit, tappedIsFresh || isNewer(tappedLimit, than: limits.first { $0.name == "Claude" }) {
+                    limits.removeAll { $0.name == "Claude" }
+                    limits.insert(tappedLimit, at: 0)
+                    snapshot.providerErrors["Claude"] = tappedIsFresh ? nil : warning
+                } else {
+                    snapshot.providerErrors["Claude"] = warning
+                }
+                snapshot.limits.append(contentsOf: limits)
+            case .failure(let message), .unauthorized(let message):
+                if let tappedLimit {
+                    snapshot.limits.append(tappedLimit)
+                    snapshot.providerErrors["Claude"] = tappedIsFresh ? nil : message
+                } else {
+                    snapshot.providerErrors["Claude"] = message
+                }
+            }
+        } else {
+            // Without a usable token, keep showing the last reading (marked with its check time) until its windows reset.
+            var limits = lastKnownClaudeLimits(at: now)
+            if let tappedLimit, isNewer(tappedLimit, than: limits.first { $0.name == "Claude" }) {
+                limits.removeAll { $0.name == "Claude" }
+                limits.insert(tappedLimit, at: 0)
+            }
+            let tappedIsFresh = tappedLimit != nil && tapped?.isFresh(at: now) == true
+            if !limits.isEmpty {
+                snapshot.limits.append(contentsOf: limits)
+                if !tappedIsFresh {
+                    snapshot.providerErrors["Claude"] = "Showing the last Claude usage MaxxBar read. "
+                        + (claudeCredential.error ?? "Run claude auth login in Terminal for live updates.")
+                }
+            } else if hasClaudeSessions || claudeAccountExists() {
+                snapshot.providerErrors["Claude"] = claudeCredential.error ?? "Live limits require a Claude Code OAuth sign-in; local Claude sessions are still captured."
+            }
+        }
+        snapshot.error = snapshot.providerErrors.isEmpty
+            ? nil
+            : snapshot.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
+    }
+
+    /// `checkClaudeNow` asks the Claude usage endpoint immediately unless a cooldown is active or it was read under 30s ago.
+    static func read(checkClaudeNow: Bool = false) -> LLMUsageSnapshot {
         let codexLocal = readLocalCodexUsage()
         let claudeLocal = readLocalClaudeUsage()
         let local = mergedLocalUsage(codexLocal, claudeLocal)
@@ -3890,23 +4404,15 @@ enum LLMUsageReader {
             hasClaudeSessions: !claudeLocal.recentSessions.isEmpty
         )
 
-        if let token = readClaudeAccessToken() {
-            switch readClaudeLimits(accessToken: token) {
-            case .success(let limits):
-                snapshot.limits.append(contentsOf: limits)
-            case .failure(let message):
-                snapshot.providerErrors["Claude"] = message
-            }
-        } else if !claudeLocal.recentSessions.isEmpty || claudeAccountExists() {
-            snapshot.providerErrors["Claude"] = "Live limits require a Claude Code OAuth sign-in; local Claude sessions are still captured."
-        }
-
+        // Record the Codex error first: applyClaudeLimits rebuilds `error` from providerErrors.
         if let codexError = snapshot.error {
             snapshot.providerErrors["Codex"] = codexError
         }
-        snapshot.error = snapshot.providerErrors.isEmpty
-            ? nil
-            : snapshot.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
+        let claudeActivity = (claudeLocal.recentSessions + claudeLocal.topWeeklySessions).compactMap(\.updatedAt).max()
+        applyClaudeLimits(
+            to: &snapshot, lastActivity: claudeActivity,
+            hasClaudeSessions: !claudeLocal.recentSessions.isEmpty, manual: checkClaudeNow
+        )
         return snapshot
     }
 
@@ -4115,54 +4621,211 @@ enum LLMUsageReader {
     }
 
     private enum ClaudeLimitReadResult {
-        case success([LLMUsageLimit])
+        case success([LLMUsageLimit], warning: String?)
         case failure(String)
+        case unauthorized(String)
     }
 
-    private static func readClaudeLimits(accessToken: String) -> ClaudeLimitReadResult {
+    private static let claudePollingLock = NSLock()
+    private static var claudeCacheURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/MaxxBar/claude-usage-cache.json")
+    }
+
+    private static func claudeLimit(fromStatusLine tapped: ClaudeStatusLineLimits, now: Date) -> LLMUsageLimit? {
+        func window(_ payload: ClaudeStatusLineLimits.Window?, label: String, seconds: Int) -> LLMUsageWindow? {
+            guard let payload else { return nil }
+            let used = min(max(Int(payload.usedPercent.rounded()), 0), 100)
+            return LLMUsageWindow(
+                label: label,
+                usedPercent: used,
+                remainingPercent: 100 - used,
+                resetAt: payload.resetAt,
+                windowSeconds: seconds
+            )
+        }
+        var limit = LLMUsageLimit(
+            name: "Claude",
+            primary: window(tapped.fiveHour, label: "5h", seconds: 18_000),
+            secondary: window(tapped.sevenDay, label: "Weekly", seconds: 604_800)
+        )
+        guard !limit.windows.isEmpty else { return nil }
+        // Mark older captures as previously checked readings.
+        limit.cachedAt = ClaudeUsagePollingState.staleMarker(checkedAt: tapped.capturedAt, now: now)
+        limit.checkedAt = tapped.capturedAt
+        return limit
+    }
+
+    private static func isNewer(_ limit: LLMUsageLimit, than other: LLMUsageLimit?) -> Bool {
+        guard let other else { return true }
+        // Compare actual check times; cachedAt is only set once a reading is over five minutes old.
+        let mine = limit.checkedAt ?? limit.cachedAt ?? .distantPast
+        let theirs = other.checkedAt ?? other.cachedAt ?? .distantFuture
+        return mine > theirs
+    }
+
+    /// Token refreshes would change a token fingerprint, so prefer the stable account ID.
+    private static func claudeCredentialID(accessToken: String) -> String {
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
+        if let data = try? Data(contentsOf: url),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let account = root["oauthAccount"] as? [String: Any],
+           let uuid = account["accountUuid"] as? String,
+           !uuid.isEmpty {
+            return "account:\(uuid)"
+        }
+        return SHA256.hash(data: Data(accessToken.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func readClaudeLimits(
+        accessToken: String, minimumRefreshAge: TimeInterval = 0, lastActivity: Date? = nil, manual: Bool = false
+    ) -> ClaudeLimitReadResult {
+        let result = fetchClaudeLimits(
+            accessToken: accessToken, minimumRefreshAge: minimumRefreshAge, lastActivity: lastActivity, manual: manual
+        )
+        guard case .unauthorized = result else { return result }
+        // A revoked or early-expiring access token can fail before its recorded expiry.
+        // Renew once and retry once, after the polling lock has been released.
+        let refreshed = ClaudeCredentialManager.shared.read(rejectedAccessToken: accessToken)
+        guard let newToken = refreshed.accessToken, newToken != accessToken else {
+            return .failure(refreshed.error ?? "Claude rejected its access token and automatic renewal failed; run claude auth login --claudeai.")
+        }
+        let retried = fetchClaudeLimits(accessToken: newToken, minimumRefreshAge: 0, renewedCredential: true)
+        if case .unauthorized = retried {
+            return .failure("Claude rejected its renewed access token; run claude auth login --claudeai once.")
+        }
+        return retried
+    }
+
+    /// A reset passing does not establish the new window's remaining quota, so passed windows are dropped.
+    private static func currentClaudeLimits(from response: ClaudeUsageResponse, fetchedAt: Date?, now: Date) -> [LLMUsageLimit] {
+        var limits = claudeLimits(from: response)
+        for index in limits.indices {
+            if let reset = limits[index].primary?.resetAt, reset <= now { limits[index].primary = nil }
+            if let reset = limits[index].secondary?.resetAt, reset <= now { limits[index].secondary = nil }
+            limits[index].cachedAt = ClaudeUsagePollingState.staleMarker(checkedAt: fetchedAt, now: now)
+            limits[index].checkedAt = fetchedAt
+        }
+        limits.removeAll { $0.windows.isEmpty }
+        return limits
+    }
+
+    /// The last saved usage response, read without a token or network request.
+    private static func lastKnownClaudeLimits(at now: Date) -> [LLMUsageLimit] {
+        claudePollingLock.lock()
+        defer { claudePollingLock.unlock() }
+        guard let state = ClaudeUsagePollingState.load(from: claudeCacheURL),
+              let data = state.usableData(at: now),
+              let response = try? JSONDecoder().decode(ClaudeUsageResponse.self, from: data) else {
+            return []
+        }
+        return currentClaudeLimits(from: response, fetchedAt: state.fetchedAt, now: now)
+    }
+
+    private static func fetchClaudeLimits(
+        accessToken: String, minimumRefreshAge: TimeInterval, lastActivity: Date? = nil, manual: Bool = false,
+        renewedCredential: Bool = false
+    ) -> ClaudeLimitReadResult {
+        // Serialize reads and persist the cooldown so reopening the app cannot bypass it.
+        claudePollingLock.lock()
+        defer { claudePollingLock.unlock() }
+        let now = Date()
+        let credentialID = claudeCredentialID(accessToken: accessToken)
+        var state = ClaudeUsagePollingState.load(from: claudeCacheURL)
+            ?? ClaudeUsagePollingState(credentialID: credentialID)
+        state.switchCredential(to: credentialID)
+        state.decayFloor(at: now)
+        if renewedCredential, state.lastError == "Claude access token was rejected" {
+            state.nextAllowedAt = .distantPast
+            state.lastError = nil
+        }
+        defer {
+            if let data = try? JSONEncoder().encode(state) {
+                try? FileManager.default.createDirectory(
+                    at: claudeCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true
+                )
+                try? data.write(to: claudeCacheURL, options: .atomic)
+            }
+        }
+
+        func cachedResult() -> ClaudeLimitReadResult {
+            let retry = state.nextAllowedAt.formatted(date: .omitted, time: .shortened)
+            let warning = state.lastError.map { "\($0). Retrying after \(retry)." }
+            guard let data = state.usableData(at: now),
+                  let response = try? JSONDecoder().decode(ClaudeUsageResponse.self, from: data) else {
+                return .failure(warning ?? "Waiting for the next usage refresh after \(retry).")
+            }
+            let limits = currentClaudeLimits(from: response, fetchedAt: state.fetchedAt, now: now)
+            guard !limits.isEmpty else {
+                return .failure(warning ?? "Previous Claude windows have reset; waiting for fresh usage.")
+            }
+            return .success(limits, warning: warning)
+        }
+
+        // Adaptive schedule: 2 min while Claude is in use, 5 min normally, 15 min when idle; never under the 429 floor.
+        let interval = max(state.refreshInterval(lastActivity: lastActivity, at: now), minimumRefreshAge)
+        guard manual ? state.allowsManualCheck(at: now) : state.isDue(at: now, interval: interval) else {
+            return cachedResult()
+        }
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         request.httpMethod = "GET"
+        request.timeoutInterval = 4
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let semaphore = DispatchSemaphore(value: 0)
         let resultBox = HTTPResultBox()
-        URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
             resultBox.set(data: data, response: response, error: error)
             semaphore.signal()
-        }.resume()
-
-        guard semaphore.wait(timeout: .now() + 4) != .timedOut else {
-            return .failure("usage request timed out")
+        }
+        task.resume()
+        guard semaphore.wait(timeout: .now() + 5) != .timedOut else {
+            task.cancel()
+            state.failed(status: nil, retryAfter: nil, message: "Usage request timed out", at: now)
+            return cachedResult()
         }
         let result = resultBox.snapshot()
-        if let error = result.errorDescription {
-            return .failure(error)
+        guard result.errorDescription == nil, result.statusCode == 200, let data = result.data else {
+            let message: String
+            switch result.statusCode {
+            case 429: message = "Claude usage requests are temporarily rate-limited (HTTP 429)"
+            case 401: message = "Claude access token was rejected"
+            case 403: message = "Claude usage access is forbidden; verify your account permissions in Claude Code"
+            default: message = result.errorDescription ?? result.statusCode.map { "Usage returned HTTP \($0)" } ?? "Usage unavailable"
+            }
+            state.failed(status: result.statusCode, retryAfter: result.retryAfter, message: message, at: now)
+            if result.statusCode == 401 { return .unauthorized(message) }
+            return cachedResult()
         }
-        guard result.statusCode == 200, let data = result.data else {
-            return .failure(result.statusCode.map { "usage returned HTTP \($0)" } ?? "usage unavailable")
+        guard let response = try? JSONDecoder().decode(ClaudeUsageResponse.self, from: data),
+              !claudeLimits(from: response).isEmpty else {
+            state.failed(status: nil, retryAfter: nil, message: "Usage response contained no readable limit windows", at: now)
+            return cachedResult()
         }
-        guard let response = try? JSONDecoder().decode(ClaudeUsageResponse.self, from: data) else {
-            return .failure("could not parse usage response")
-        }
+        state.succeeded(data: data, at: now)
+        var limits = claudeLimits(from: response)
+        for index in limits.indices { limits[index].checkedAt = now }
+        return .success(limits, warning: nil)
+    }
 
+    private static func claudeLimits(from response: ClaudeUsageResponse) -> [LLMUsageLimit] {
         var limits: [LLMUsageLimit] = []
         let general = LLMUsageLimit(
             name: "Claude",
             primary: claudeWindow(response.five_hour, label: "5h", seconds: 18_000),
             secondary: claudeWindow(response.seven_day, label: "Weekly", seconds: 604_800)
         )
-        if !general.windows.isEmpty {
-            limits.append(general)
-        }
+        if !general.windows.isEmpty { limits.append(general) }
         if let opus = claudeWindow(response.seven_day_opus, label: "Weekly", seconds: 604_800) {
             limits.append(LLMUsageLimit(name: "Claude Opus", primary: nil, secondary: opus))
         }
         if let sonnet = claudeWindow(response.seven_day_sonnet, label: "Weekly", seconds: 604_800) {
             limits.append(LLMUsageLimit(name: "Claude Sonnet", primary: nil, secondary: sonnet))
         }
-        return limits.isEmpty ? .failure("usage response contained no limit windows") : .success(limits)
+        return limits
     }
 
     private static func claudeWindow(
@@ -4181,47 +4844,21 @@ enum LLMUsageReader {
         )
     }
 
+    // Shared formatters: building one per timestamp dominated the Claude transcript scan.
+    // ISO8601DateFormatter is thread-safe once configured, and these are never mutated after creation.
+    nonisolated(unsafe) private static let fractionalISO8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    nonisolated(unsafe) private static let standardISO8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     private static func iso8601Date(_ value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: value) { return date }
-        let standard = ISO8601DateFormatter()
-        standard.formatOptions = [.withInternetDateTime]
-        return standard.date(from: value)
-    }
-
-    private static func readClaudeAccessToken() -> String? {
-        let credentialsURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".claude/.credentials.json")
-        if let data = try? Data(contentsOf: credentialsURL),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let oauth = object["claudeAiOauth"] as? [String: Any],
-           let token = oauth["accessToken"] as? String,
-           !token.isEmpty {
-            return token
-        }
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        task.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let output = Pipe()
-        task.standardOutput = output
-        task.standardError = Pipe()
-        do {
-            try task.run()
-        } catch {
-            return nil
-        }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        guard task.terminationStatus == 0,
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = object["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String,
-              !token.isEmpty else {
-            return nil
-        }
-        return token
+        fractionalISO8601.date(from: value) ?? standardISO8601.date(from: value)
     }
 
     private static func claudeAccountExists() -> Bool {
@@ -4310,19 +4947,21 @@ enum LLMUsageReader {
             }
         }
 
-        let transcripts = urls.compactMap(claudeTranscript)
+        let sidecarTitles = claudeSidecarTitles()
+        let generatedTitles = loadClaudeGeneratedTitles()
+        let transcripts = urls.compactMap {
+            claudeTranscript(from: $0, sidecarTitles: sidecarTitles, generatedTitles: generatedTitles)
+        }
+        scheduleClaudeTitleGeneration(for: transcripts, cached: generatedTitles)
         let sessions = uniqueSessions(transcripts.map(\.session))
         let modelEvents = uniqueClaudeModelEvents(transcripts.flatMap(\.modelEvents))
         let now = Date()
         func usageWindow(label: String, seconds: TimeInterval) -> LLMLocalUsageWindow {
-            let matching = sessions.filter { session in
-                guard let updatedAt = session.updatedAt ?? session.createdAt else { return false }
-                return now.timeIntervalSince(updatedAt) <= seconds
-            }
+            let matching = modelEvents.filter { now.timeIntervalSince($0.timestamp ?? .distantPast) <= seconds }
             return LLMLocalUsageWindow(
                 label: label,
                 tokens: matching.reduce(0) { $0 + $1.tokens },
-                threads: matching.count
+                threads: Set(matching.map(\.sessionID)).count
             )
         }
         let windows = [
@@ -4392,10 +5031,15 @@ enum LLMUsageReader {
         }
     }
 
-    private static func claudeTranscript(from url: URL) -> ClaudeTranscript? {
+    private static func claudeTranscript(
+        from url: URL,
+        sidecarTitles: [String: String],
+        generatedTitles: [String: String]
+    ) -> ClaudeTranscript? {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         var sessionID = url.deletingPathExtension().lastPathComponent
         var title: String?
+        var summary: String?
         var preview: String?
         var cwd: String?
         var model: String?
@@ -4409,6 +5053,8 @@ enum LLMUsageReader {
             if let value = object["sessionId"] as? String, !value.isEmpty { sessionID = value }
             if let value = object["customTitle"] as? String, !value.isEmpty { title = value }
             if title == nil, let value = object["aiTitle"] as? String, !value.isEmpty { title = value }
+            if (object["type"] as? String) == "summary",
+               let value = object["summary"] as? String, !value.isEmpty { summary = value }
             if let value = object["cwd"] as? String, !value.isEmpty { cwd = value }
             let eventTimestamp = (object["timestamp"] as? String).flatMap(iso8601Date)
             if let date = eventTimestamp {
@@ -4420,7 +5066,7 @@ enum LLMUsageReader {
             if preview == nil,
                (object["type"] as? String) == "user",
                (message["role"] as? String) == "user" {
-                preview = claudeMessageText(message["content"])
+                preview = claudeMessageText(message["content"]).flatMap(claudePromptText)
             }
             guard (object["type"] as? String) == "assistant",
                   let usage = message["usage"] as? [String: Any] else { continue }
@@ -4428,6 +5074,7 @@ enum LLMUsageReader {
             let input = uint64(usage["input_tokens"])
             let cacheCreated = uint64(usage["cache_creation_input_tokens"])
             let cacheRead = uint64(usage["cache_read_input_tokens"])
+            let cacheCreated1h = uint64((usage["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"])
             let output = uint64(usage["output_tokens"])
             let key = (object["requestId"] as? String) ?? (object["uuid"] as? String) ?? "line-\(index)"
             requestUsage[key] = (
@@ -4437,26 +5084,29 @@ enum LLMUsageReader {
                     outputTokens: output,
                     reasoningOutputTokens: 0,
                     totalTokens: input + cacheCreated + cacheRead + output,
-                    turnCount: 1
+                    turnCount: 1,
+                    cacheWriteInputTokens: cacheCreated,
+                    cacheWrite1hInputTokens: cacheCreated1h
                 ),
                 compactText(message["model"] as? String ?? "", fallback: "Claude model unavailable"),
                 eventTimestamp
             )
         }
 
-        let totals = requestUsage.values.map(\.usage).reduce(
-            LLMTokenUsageSummary(inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, turnCount: 0)
-        ) { result, usage in
-            LLMTokenUsageSummary(
-                inputTokens: result.inputTokens + usage.inputTokens,
-                cachedInputTokens: result.cachedInputTokens + usage.cachedInputTokens,
-                outputTokens: result.outputTokens + usage.outputTokens,
-                reasoningOutputTokens: 0,
-                totalTokens: result.totalTokens + usage.totalTokens,
-                turnCount: result.turnCount + 1
+        let totals = LLMTokenUsageSummary(calls: requestUsage.values.map { value in
+            LLMTokenCall(
+                timestamp: value.timestamp,
+                inputTokens: value.usage.inputTokens,
+                cachedInputTokens: value.usage.cachedInputTokens,
+                cacheWriteInputTokens: value.usage.cacheWriteInputTokens,
+                cacheWrite1hInputTokens: value.usage.cacheWrite1hInputTokens,
+                outputTokens: value.usage.outputTokens
             )
-        }
+        })
         guard createdAt != nil || updatedAt != nil || totals.totalTokens > 0 else { return nil }
+        if let cwd, cwd.hasPrefix(claudeTitlerDirectory.path) { return nil }
+        let realTitle = title ?? summary ?? sidecarTitles[sessionID]
+        let generatedTitle = generatedTitles[sessionID].flatMap { $0.isEmpty ? nil : "Thread: \($0)" }
         let cleanPreview = compactText(preview ?? "", fallback: "No prompt preview stored")
         let dominantModel = Dictionary(grouping: requestUsage.values, by: \.modelName)
             .map { (model: $0.key, tokens: $0.value.reduce(UInt64(0)) { $0 + $1.usage.totalTokens }) }
@@ -4464,7 +5114,7 @@ enum LLMUsageReader {
         let session = LLMUsageSession(
             id: sessionID,
             provider: "Claude",
-            title: compactText(title ?? preview ?? "", fallback: "Claude session"),
+            title: compactText(realTitle ?? generatedTitle ?? preview ?? "", fallback: "Claude session"),
             projectName: projectName(from: cwd ?? ""),
             modelName: dominantModel ?? compactText(model ?? "", fallback: "Claude model unavailable"),
             preview: trimmed(cleanPreview, maxLength: 500),
@@ -4483,7 +5133,108 @@ enum LLMUsageReader {
                 timestamp: value.timestamp ?? updatedAt
             )
         }
-        return ClaudeTranscript(session: session, modelEvents: events)
+        return ClaudeTranscript(session: session, modelEvents: events, untitledPrompt: realTitle == nil ? preview : nil)
+    }
+
+    private static let claudeTitleQueue = DispatchQueue(label: "MaxxBar.ClaudeTitles", qos: .utility)
+    nonisolated(unsafe) private static var claudeTitleGenerationRunning = false
+    nonisolated(unsafe) private static var claudeTitleAuthFailedAt: Date?
+
+    private static var claudeGeneratedTitlesURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support/MaxxBar/claude-session-titles.json")
+    }
+
+    private static var claudeTitlerDirectory: URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support/MaxxBar/titler", isDirectory: true)
+    }
+
+    /// Short titles made by the Claude CLI for untitled sessions, keyed by session id; "" marks a failed attempt.
+    private static func loadClaudeGeneratedTitles() -> [String: String] {
+        guard let data = try? Data(contentsOf: claudeGeneratedTitlesURL),
+              let titles = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return titles
+    }
+
+    /// Titles up to three recent untitled sessions in the background; they show up on a later refresh.
+    private static func scheduleClaudeTitleGeneration(for transcripts: [ClaudeTranscript], cached: [String: String]) {
+        let cutoff = Date().addingTimeInterval(-7 * 24 * 60 * 60)
+        let pending = transcripts
+            .filter { $0.untitledPrompt != nil && cached[$0.session.id] == nil && ($0.session.updatedAt ?? .distantPast) >= cutoff }
+            .sorted { ($0.session.updatedAt ?? .distantPast) > ($1.session.updatedAt ?? .distantPast) }
+            .prefix(3)
+            .compactMap { transcript in transcript.untitledPrompt.map { (id: transcript.session.id, prompt: $0) } }
+        guard !pending.isEmpty, let binary = claudeBinaryPath() else { return }
+        claudeTitleQueue.async {
+            guard !claudeTitleGenerationRunning else { return }
+            if let failedAt = claudeTitleAuthFailedAt, Date().timeIntervalSince(failedAt) < 60 * 60 { return }
+            claudeTitleGenerationRunning = true
+            defer { claudeTitleGenerationRunning = false }
+            var titles = loadClaudeGeneratedTitles()
+            for item in pending where titles[item.id] == nil {
+                guard let result = generateClaudeTitle(for: item.prompt, binary: binary) else {
+                    claudeTitleAuthFailedAt = Date()
+                    break
+                }
+                titles[item.id] = result
+                if let data = try? JSONEncoder().encode(titles) {
+                    try? data.write(to: claudeGeneratedTitlesURL, options: .atomic)
+                }
+            }
+        }
+    }
+
+    private static func claudeBinaryPath() -> String? {
+        let home = NSHomeDirectory()
+        return ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", "\(home)/.claude/local/claude"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Returns a sanitized title, "" when the call fails, or nil when the CLI isn't signed in (so it's retried later).
+    private static func generateClaudeTitle(for prompt: String, binary: String) -> String? {
+        try? FileManager.default.createDirectory(at: claudeTitlerDirectory, withIntermediateDirectories: true)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: binary)
+        task.arguments = ["-p", "--model", "haiku", "--no-session-persistence", "--tools", ""]
+        task.currentDirectoryURL = claudeTitlerDirectory
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        task.environment = environment
+        let input = Pipe()
+        let output = Pipe()
+        task.standardInput = input
+        task.standardOutput = output
+        task.standardError = output
+        do {
+            try task.run()
+        } catch {
+            return ""
+        }
+        let request = "Write a 3-5 word title in sentence case for this task. Reply with the title only.\n\n" + String(prompt.prefix(1500))
+        input.fileHandleForWriting.write(Data(request.utf8))
+        try? input.fileHandleForWriting.close()
+        let timeout = DispatchWorkItem { if task.isRunning { task.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 30, execute: timeout)
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        timeout.cancel()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        if text.localizedCaseInsensitiveContains("authenticate") || text.localizedCaseInsensitiveContains("/login") { return nil }
+        guard task.terminationReason == .exit, task.terminationStatus == 0 else { return "" }
+        return sanitizedClaudeTitle(text)
+    }
+
+    private static func sanitizedClaudeTitle(_ text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+        var title = line
+            .replacingOccurrences(of: "^(#+|\\*+|title:)\\s*", with: "", options: [.regularExpression, .caseInsensitive])
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`*“”‘’ ").union(.whitespaces))
+        while let last = title.last, ".!?,;:".contains(last) { title.removeLast() }
+        title = title.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`*“”‘’ "))
+        return title.count <= 60 ? title : String(title.prefix(57)).trimmingCharacters(in: .whitespaces) + "..."
     }
 
     private static func claudeMessageText(_ value: Any?) -> String? {
@@ -4497,6 +5248,63 @@ enum LLMUsageReader {
             return block["text"] as? String
         }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
+    }
+
+    private static let claudeWrapperPrefixes = [
+        "<system-reminder>", "<command-", "<local-command", "<wake", "<task-notification>"
+    ]
+
+    /// Turns a raw first prompt into readable text: skips hook/system wrappers and
+    /// unwraps coordinator relay envelopes down to the person's words or the note.
+    private static func claudePromptText(_ text: String) -> String? {
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if claudeWrapperPrefixes.contains(where: { body.hasPrefix($0) }) { return nil }
+        if body.contains("<relay") || body.contains("<coordinator-relay>") {
+            body = claudeTagContent(in: body, pattern: "<cited\\b[^>]*author=\"user\"[^>]*>([\\s\\S]*?)</cited>")
+                ?? claudeTagContent(in: body, pattern: "<note>([\\s\\S]*?)</note>")
+                ?? body
+        }
+        let clean = body
+            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? nil : clean
+    }
+
+    private static func claudeTagContent(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        let content = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+        return content.isEmpty ? nil : content
+    }
+
+    /// Titles the Claude desktop app keeps beside its Code sessions, keyed by CLI session id.
+    private static func claudeSidecarTitles() -> [String: String] {
+        let root = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support/Claude/claude-code-sessions", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsPackageDescendants, .skipsHiddenFiles]
+        ) else { return [:] }
+        var titles: [String: String] = [:]
+        for case let url as URL in enumerator
+        where url.pathExtension == "json" && url.lastPathComponent.hasPrefix("local_") {
+            guard let data = try? Data(contentsOf: url),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessionID = object["cliSessionId"] as? String,
+                  let title = (object["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty,
+                  !title.hasPrefix("Remote Control session") else { continue }
+            titles[sessionID] = title
+        }
+        return titles
     }
 
     private static func uint64(_ value: Any?) -> UInt64 {
@@ -4705,22 +5513,67 @@ enum LLMUsageReader {
         return titles
     }
 
+    /// Per-rollout parse state. Rollout files are append-only, so each refresh reads only the new lines.
+    private final class CodexRolloutCache: @unchecked Sendable {
+        struct Entry {
+            var parsedOffset: UInt64 = 0
+            var calls: [LLMTokenCall] = []
+            var totals: [String: UInt64]?
+        }
+
+        let lock = NSLock()
+        var entries: [String: Entry] = [:]
+    }
+
+    private static let codexRolloutCache = CodexRolloutCache()
+
     private static func tokenUsageSummary(from rolloutPath: String) -> LLMTokenUsageSummary? {
         let path = rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty,
-              FileManager.default.fileExists(atPath: path) else {
+              let handle = FileHandle(forReadingAtPath: path) else {
             return nil
         }
+        defer {
+            try? handle.close()
+        }
 
-        var latestInputTokens: UInt64 = 0
-        var latestCachedInputTokens: UInt64 = 0
-        var latestOutputTokens: UInt64 = 0
-        var latestReasoningOutputTokens: UInt64 = 0
-        var latestTotalTokens: UInt64 = 0
-        var turnCount = 0
-        var foundUsage = false
+        codexRolloutCache.lock.lock()
+        defer {
+            codexRolloutCache.lock.unlock()
+        }
+        var entry = codexRolloutCache.entries[path] ?? CodexRolloutCache.Entry()
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        if fileSize < entry.parsedOffset {
+            entry = CodexRolloutCache.Entry()
+        }
+        if fileSize > entry.parsedOffset {
+            try? handle.seek(toOffset: entry.parsedOffset)
+            let data = handle.readDataToEndOfFile()
+            if let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) {
+                let complete = data[data.startIndex...lastNewline]
+                entry.parsedOffset += UInt64(complete.count)
+                parseCodexTokenEvents(String(decoding: complete, as: UTF8.self), into: &entry)
+            }
+        }
+        codexRolloutCache.entries[path] = entry
 
-        for line in tokenUsageLines(from: path) {
+        guard let totals = entry.totals else { return nil }
+
+        var summary = LLMTokenUsageSummary(calls: entry.calls)
+        summary.inputTokens = totals["input_tokens"] ?? 0
+        summary.cachedInputTokens = totals["cached_input_tokens"] ?? 0
+        summary.cacheWriteInputTokens = totals["cache_write_input_tokens"] ?? 0
+        summary.outputTokens = totals["output_tokens"] ?? 0
+        summary.reasoningOutputTokens = totals["reasoning_output_tokens"] ?? 0
+        summary.totalTokens = totals["total_tokens"] ?? 0
+        if summary.totalTokens == 0 {
+            summary.totalTokens = summary.inputTokens + summary.outputTokens + summary.reasoningOutputTokens
+        }
+        return summary
+    }
+
+    private static func parseCodexTokenEvents(_ text: String, into entry: inout CodexRolloutCache.Entry) {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) where line.contains("\"token_count\"") {
             guard let data = String(line).data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let payload = object["payload"] as? [String: Any],
@@ -4729,52 +5582,20 @@ enum LLMUsageReader {
                 continue
             }
 
-            if info["last_token_usage"] is [String: Any] {
-                turnCount += 1
+            if let last = info["last_token_usage"] as? [String: Any] {
+                entry.calls.append(LLMTokenCall(
+                    timestamp: (object["timestamp"] as? String).flatMap(iso8601Date),
+                    inputTokens: tokenValue(last, "input_tokens"),
+                    cachedInputTokens: tokenValue(last, "cached_input_tokens"),
+                    cacheWriteInputTokens: tokenValue(last, "cache_write_input_tokens"),
+                    outputTokens: tokenValue(last, "output_tokens")
+                ))
             }
 
             let totalUsage = (info["total_token_usage"] as? [String: Any]) ?? info
-            latestInputTokens = tokenValue(totalUsage, "input_tokens")
-            latestCachedInputTokens = tokenValue(totalUsage, "cached_input_tokens")
-            latestOutputTokens = tokenValue(totalUsage, "output_tokens")
-            latestReasoningOutputTokens = tokenValue(totalUsage, "reasoning_output_tokens")
-            latestTotalTokens = tokenValue(totalUsage, "total_tokens")
-            foundUsage = true
+            entry.totals = ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
+                .reduce(into: [:]) { $0[$1] = tokenValue(totalUsage, $1) }
         }
-
-        guard foundUsage else { return nil }
-
-        if latestTotalTokens == 0 {
-            latestTotalTokens = latestInputTokens + latestOutputTokens + latestReasoningOutputTokens
-        }
-
-        return LLMTokenUsageSummary(
-            inputTokens: latestInputTokens,
-            cachedInputTokens: latestCachedInputTokens,
-            outputTokens: latestOutputTokens,
-            reasoningOutputTokens: latestReasoningOutputTokens,
-            totalTokens: latestTotalTokens,
-            turnCount: turnCount
-        )
-    }
-
-    private static func tokenUsageLines(from path: String) -> [Substring] {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
-        defer {
-            try? handle.close()
-        }
-
-        let fileSize = (try? handle.seekToEnd()) ?? 0
-        let maxBytes: UInt64 = 512 * 1024
-        let offset = fileSize > maxBytes ? fileSize - maxBytes : 0
-        try? handle.seek(toOffset: offset)
-        let data = handle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-
-        return Array(text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .filter { $0.contains("\"token_count\"") }
-            .suffix(60))
     }
 
     private static func tokenValue(_ dictionary: [String: Any], _ key: String) -> UInt64 {

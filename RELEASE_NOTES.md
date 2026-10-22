@@ -3,14 +3,18 @@
 ## v0.2.0 - 2026-07-10
 
 - Added a resizable menu-bar popover that remembers its last width and height.
+- Added a Clipboard tab with a live current-item marker, historical event queue, content-type metadata, and Claude/Codex flow debugging insights.
+- Added temporary local image history with lightweight thumbnails, click-to-open full-size PNGs, 24-hour retention, and 100-image / 250-MB caps.
+- Expanded clipboard-write detection beyond Cmd+C to pasteboard changes from menus, Copy buttons, and screenshot-to-clipboard; text and other non-image payloads remain unread and unstored.
 - Added detected Codex/Claude account and plan rows with today’s provider-attributed time and session share.
 - Strengthened weekly drawdown rendering with a continuous line and interactive point hover for timestamp and remaining percentage.
+- Tightened copy/paste flow attribution to recent 15-minute pairs and removed Claude-to-Claude and Codex-to-Codex self-flows from destinations.
 - Added seven-day model context and model-usage distribution to Insights in both the menu bar popover and MaxxBar Hub, with Codex/Claude filtering and token-share percentages.
 - Added Claude parity across Runway and Sessions: local Claude Code/Desktop/Cowork transcript discovery, per-session model and token/cache totals, combined local windows, provider labels, and live five-hour/weekly Claude limits when Claude Code OAuth is available.
 - Added explicit provider status so Claude sessions remain visible when Desktop authentication is present but a Claude Code OAuth credential is not.
 - Promoted MaxxBar from a compact runway utility into a fuller AI workflow companion.
 - Added the MaxxBar Hub with Overview, AI Insights, Runway, and Sessions destinations.
-- Added metadata-only AI output destination tracking for Cmd+C/Cmd+V flows without reading clipboard contents.
+- Added AI output destination tracking for Cmd+C/Cmd+V flows without reading text clipboard contents.
 - Added a shared AI taxonomy for tools, surfaces, sites, and broad use cases.
 - Added Start Deep Trace handoff into the Tracework Hub.
 - Updated the menu bar to show 5H runway, weekly reset day, and compact AI activity context.

@@ -62,7 +62,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSInputMonitoringUsageDescription</key>
-    <string>MaxxBar observes Command-C and Command-V shortcuts to record source and destination metadata. It never reads or stores clipboard contents or typed text.</string>
+    <string>MaxxBar observes Command-C and Command-V shortcuts to record source and destination metadata. Copied images may be stored locally for up to 24 hours; text clipboard contents and typed text are never stored.</string>
 </dict>
 </plist>
 PLIST

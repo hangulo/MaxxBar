@@ -15,6 +15,22 @@ enum MaxxBarLauncher {
             return
         }
 
+        if let verifyImageIndex = CommandLine.arguments.firstIndex(of: "--verify-clipboard-image-store"),
+           CommandLine.arguments.indices.contains(verifyImageIndex + 1) {
+            let sourcePath = CommandLine.arguments[verifyImageIndex + 1]
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: sourcePath)),
+                  let stored = ClipboardImageStore.save(
+                    ClipboardImagePayload(data: data, typeIdentifier: "public.image"),
+                    changeCount: 0
+                  ) else {
+                fputs("clipboard image verification failed\n", stderr)
+                exit(1)
+            }
+            print("clipboardImage=\(stored.imagePath)")
+            print("clipboardThumbnail=\(stored.thumbnailPath)")
+            return
+        }
+
         if let renderIndex = CommandLine.arguments.firstIndex(of: "--render-popover"),
            CommandLine.arguments.indices.contains(renderIndex + 1) {
             let path = CommandLine.arguments[renderIndex + 1]
@@ -78,6 +94,11 @@ enum MaxxBarLauncher {
             print("aiTimeToday=\(Int(aiUsage.timeTodaySeconds))")
             print("aiTopTools=\(aiUsage.topTools.map { "\($0.label)=\($0.count)" }.joined(separator: ","))")
             print("aiProviderStats=\(aiUsage.providerSummaries.map { "\($0.provider):\($0.sessionsToday)sessions/\(Int($0.timeTodaySeconds))s/\($0.transferFlows.count)flows" }.joined(separator: ","))")
+            let clipboard = ClipboardDebugReader.snapshot()
+            print("clipboardWritesToday=\(clipboard.writesToday)")
+            print("clipboardPastesToday=\(clipboard.pasteAttemptsToday)")
+            print("clipboardImageWritesToday=\(clipboard.imageWritesToday)")
+            print("clipboardKnownSourcePercent=\(clipboard.pasteSourceKnownPercent)")
             let sensors = SensorReader.read()
             print("sensorCPUTemp=\(sensors.cpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
             print("sensorGPUTemp=\(sensors.gpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
@@ -129,6 +150,8 @@ extension StatsPanel {
             self = .llmUsage
         case "moments", "maxxmoment", "maxx-moment", "maxxmoments", "maxx-moments":
             self = .llmUsage
+        case "clipboard", "clip", "pasteboard":
+            self = .clipboard
         default:
             self = .memory
         }
@@ -146,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var detachedWindow: NSWindow?
     private var timer: Timer?
     private let clipboardFlowMonitor = ClipboardFlowMonitor()
+    private let clipboardMetadataMonitor = ClipboardMetadataMonitor()
     private var currentPopoverPanel: StatsPanel = .runway
     private var currentPopoverSize = PopoverSizePreference.load()
 
@@ -158,11 +182,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         model.seedInitialMemorySnapshot()
         startClipboardFlowMonitor()
+        startClipboardMetadataMonitor()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.length = 104
+        item.length = 108
         if let button = item.button {
             button.title = ""
             button.toolTip = statusToolTip()
@@ -192,6 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 self.startClipboardFlowMonitor()
+                self.startClipboardMetadataMonitor()
                 if self.isDetailedUIVisible {
                     self.refreshInBackground()
                 } else {
@@ -221,8 +247,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func startClipboardMetadataMonitor() {
+        clipboardMetadataMonitor.start { [weak self] changeCount, itemCount, typeIdentifiers, observedChange, imagePayload in
+            if observedChange {
+                self?.model.recordClipboardChange(
+                    changeCount: changeCount,
+                    itemCount: itemCount,
+                    typeIdentifiers: typeIdentifiers,
+                    imagePayload: imagePayload
+                )
+            } else {
+                self?.model.recordCurrentClipboardState(
+                    changeCount: changeCount,
+                    itemCount: itemCount,
+                    typeIdentifiers: typeIdentifiers
+                )
+            }
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         clipboardFlowMonitor.stop()
+        clipboardMetadataMonitor.stop()
     }
 
     private func refreshInBackground() {
@@ -304,36 +350,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func statusTextLines() -> (top: String, bottom: String) {
-        guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first else {
-            return ("-- Day", "- -")
+        func quota(_ name: String) -> String {
+            guard let limit = model.llmUsage.limits.first(where: { $0.name == name }) else { return "--/--" }
+            let short = limit.shortWindow.map { String($0.remainingPercent) } ?? "--"
+            let weekly = limit.weeklyWindow.map { String($0.remainingPercent) } ?? "--"
+            return "\(short)/\(weekly)\(limit.cachedAt == nil ? "" : "~")"
         }
-
-        let shortWindow = codexLimit.shortWindow
-        let weeklyWindow = codexLimit.weeklyWindow
-        let aiLabel = "\(model.aiUsage.sessionsToday)|\(aiTimeLabel(model.aiUsage.timeTodaySeconds))"
-
-        if let shortWindow, let weeklyWindow {
-            return (
-                "\(hoursLeftLabel(shortWindow.resetAt)) \(weekdayLabel(weeklyWindow.resetAt)) AI",
-                "\(shortWindow.remainingPercent)% \(weeklyWindow.remainingPercent)% \(aiLabel)"
-            )
-        }
-
-        if let weeklyWindow {
-            return (
-                "\(weekdayLabel(weeklyWindow.resetAt)) AI",
-                "\(weeklyWindow.remainingPercent)% \(aiLabel)"
-            )
-        }
-
-        if let shortWindow {
-            return (
-                "\(hoursLeftLabel(shortWindow.resetAt)) AI",
-                "\(shortWindow.remainingPercent)% \(aiLabel)"
-            )
-        }
-
-        return ("-- AI", "- \(aiLabel)")
+        return ("Claude Codex", "\(quota("Claude")) \(quota("Codex"))")
     }
 
     private func aiTimeLabel(_ seconds: TimeInterval) -> String {
@@ -349,7 +372,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func statusToolTip() -> String {
         let usage = model.aiUsage
         return """
-        Codex 5h remaining · weekly remaining
+        Claude and Codex: 5h / weekly percent remaining (~ = last checked reading)
+        \(model.llmUsage.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "\n"))
         AI today: \(usage.sessionsToday) sessions · \(aiTimeLabel(usage.timeTodaySeconds)) inferred time
         \(usage.copyEventsToday) copy · \(usage.pasteEventsToday) paste · \(usage.insightEventsToday) insight events
         """
@@ -545,7 +569,7 @@ final class StatusTitleView: NSView {
     private func warningColorForColumn(at index: Int) -> NSColor? {
         guard index < 2,
               bottomItems.indices.contains(index),
-              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")) else {
+              let percent = bottomItems[index].replacingOccurrences(of: "~", with: "").split(separator: "/").compactMap { Int($0) }.min() else {
             return nil
         }
 
@@ -561,7 +585,7 @@ final class StatusTitleView: NSView {
     private func shouldUnderlineColumn(at index: Int) -> Bool {
         guard index < 2,
               bottomItems.indices.contains(index),
-              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")) else {
+              let percent = bottomItems[index].replacingOccurrences(of: "~", with: "").split(separator: "/").compactMap { Int($0) }.min() else {
             return false
         }
 
