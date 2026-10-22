@@ -5,3 +5,7 @@ DerivedData/
 Dist/
 Dist.noindex/
 .DS_Store
+
+# Local pre-git backups
+.energy-backup-*/
+.toggle-backup/
