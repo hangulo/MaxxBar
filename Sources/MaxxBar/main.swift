@@ -182,7 +182,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         model.seedInitialMemorySnapshot()
         startClipboardFlowMonitor()
-        startClipboardMetadataMonitor()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
@@ -217,13 +216,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 self.startClipboardFlowMonitor()
-                self.startClipboardMetadataMonitor()
                 if self.isDetailedUIVisible {
                     self.refreshInBackground()
                 } else {
                     self.refreshStatusInBackground()
                 }
-                self.refreshLLMUsageInBackground()
+                // While the popover is closed, only the quotas refresh; transcript and Codex scans wait for the popover.
+                self.refreshLLMUsageInBackground(refreshLocal: self.isDetailedUIVisible)
             }
         }
         timer?.tolerance = 5
@@ -268,7 +267,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         clipboardFlowMonitor.stop()
-        clipboardMetadataMonitor.stop()
     }
 
     private func refreshInBackground() {
@@ -287,8 +285,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func refreshLLMUsageInBackground(force: Bool = false) {
-        model.refreshLLMUsageInBackground(force: force) { [weak self] in
+    private func refreshLLMUsageInBackground(force: Bool = false, refreshLocal: Bool = true) {
+        model.refreshLLMUsageInBackground(force: force, refreshLocal: refreshLocal) { [weak self] in
             guard let self else { return }
             self.statusTitleView?.setLines(self.statusTextLines())
             self.statusItem?.button?.toolTip = self.statusToolTip()
@@ -316,7 +314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             refreshInBackground()
             if selectedPanel == .llmUsage || selectedPanel == .runway {
-                refreshLLMUsageInBackground()
+                refreshLLMUsageInBackground(force: true)
             }
         }
     }

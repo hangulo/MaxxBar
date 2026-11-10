@@ -160,7 +160,7 @@ enum StatsPanel: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static var visibleCases: [StatsPanel] {
-        [.runway, .llmUsage, .clipboard, .memory]
+        [.runway, .llmUsage, .memory]
     }
 }
 

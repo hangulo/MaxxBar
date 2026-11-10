@@ -812,6 +812,9 @@ final class MemoryModel: ObservableObject {
     private var previousLLMQuotaActivitySignature: LLMQuotaActivitySignature?
     private var isRefreshing = false
     private var isRefreshingStatus = false
+    /// The activity log samples the frontmost app (and asks Chrome/Arc for the tab); once a minute is enough.
+    private var lastActivityRecordAt: Date?
+    private static let activityRecordInterval: TimeInterval = 60
     private var isRefreshingLLMUsage = false
     private var claudeCheckID: UUID?
     private let claudeCheckQueue = DispatchQueue(label: "com.hector.MaxxBar.claude-check", qos: .userInitiated)
@@ -935,24 +938,31 @@ final class MemoryModel: ObservableObject {
         let previousPageOuts = previousCumulativePageOuts
         let currentCPUGPU = cpuGPU
         let currentLLMUsage = llmUsage
+        let now = Date()
+        let shouldRecordActivity = lastActivityRecordAt.map { now.timeIntervalSince($0) >= Self.activityRecordInterval } ?? true
+        if shouldRecordActivity { lastActivityRecordAt = now }
 
         DispatchQueue.global(qos: .utility).async {
             let stats = MemoryReader.read(includeProcesses: false, precisePressure: false)
             var displayStats = stats
             displayStats.pageIns = Self.deltaValue(from: previousPageIns, to: stats.cumulativePageIns)
             displayStats.pageOuts = Self.deltaValue(from: previousPageOuts, to: stats.cumulativePageOuts)
-            let aiUsage = AIUsageReader.recordAndRead(
-                memory: displayStats,
-                cpuGPU: currentCPUGPU,
-                llmUsage: currentLLMUsage
-            )
+            let aiUsage: AIUsageSnapshot? = shouldRecordActivity
+                ? AIUsageReader.recordAndRead(
+                    memory: displayStats,
+                    cpuGPU: currentCPUGPU,
+                    llmUsage: currentLLMUsage
+                )
+                : nil
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.previousCumulativePageIns = stats.cumulativePageIns
                 self.previousCumulativePageOuts = stats.cumulativePageOuts
                 self.snapshot = displayStats
-                self.aiUsage = aiUsage
+                if let aiUsage {
+                    self.aiUsage = aiUsage
+                }
                 self.history.append(stats.breakdown)
                 if self.history.count > 60 {
                     self.history.removeFirst(self.history.count - 60)
@@ -1013,7 +1023,8 @@ final class MemoryModel: ObservableObject {
     }
 
     func refreshLLMUsageInBackground(
-        force: Bool = false, checkClaudeNow: Bool = false, completion: (@MainActor @Sendable () -> Void)? = nil
+        force: Bool = false, checkClaudeNow: Bool = false, refreshLocal: Bool = true,
+        completion: (@MainActor @Sendable () -> Void)? = nil
     ) {
         guard !isRefreshingLLMUsage else { return }
         // 30s keeps the reader's 2-minute Claude schedule on time with the 15s app timer.
@@ -1026,7 +1037,7 @@ final class MemoryModel: ObservableObject {
 
         isRefreshingLLMUsage = true
         DispatchQueue.global(qos: .utility).async {
-            let usage = LLMUsageReader.read(checkClaudeNow: checkClaudeNow)
+            let usage = LLMUsageReader.read(checkClaudeNow: checkClaudeNow, refreshLocal: refreshLocal)
             Self.logFiveHourUsageWindow(from: usage)
             let refreshedAt = Date()
 
@@ -1088,7 +1099,8 @@ final class MemoryModel: ObservableObject {
     func recordClipboardEvent(_ eventType: String) {
         clipboardProcessingQueue.async { [weak self] in
             let clipboardDebug = ClipboardDebugReader.recordShortcut(eventType)
-            let aiUsage = eventType == "paste"
+            // Copies and pastes both come from the ⌘C/⌘V listener now that clipboard polling is gone.
+            let aiUsage = eventType == "paste" || eventType == "copy"
                 ? AIUsageReader.recordClipboardEvent(eventType)
                 : nil
             DispatchQueue.main.async { [weak self] in
@@ -4390,9 +4402,29 @@ enum LLMUsageReader {
     }
 
     /// `checkClaudeNow` asks the Claude usage endpoint immediately unless a cooldown is active or it was read under 30s ago.
-    static func read(checkClaudeNow: Bool = false) -> LLMUsageSnapshot {
-        let codexLocal = readLocalCodexUsage()
-        let claudeLocal = readLocalClaudeUsage()
+    /// Local scans (Claude transcripts, Codex sqlite) are the expensive part of a read. The menu bar only needs the
+    /// quotas, so while the popover is closed callers pass refreshLocal: false and reuse the last scan for a while.
+    nonisolated(unsafe) private static var cachedLocalUsage: (codex: LocalCodexUsage, claude: LocalCodexUsage, at: Date)?
+    private static let cachedLocalUsageLock = NSLock()
+    private static let localUsageMaxAge: TimeInterval = 10 * 60
+
+    private static func localUsage(refresh: Bool) -> (codex: LocalCodexUsage, claude: LocalCodexUsage) {
+        cachedLocalUsageLock.lock()
+        let cached = cachedLocalUsage
+        cachedLocalUsageLock.unlock()
+        if !refresh, let cached, Date().timeIntervalSince(cached.at) < localUsageMaxAge {
+            return (cached.codex, cached.claude)
+        }
+        let codex = readLocalCodexUsage()
+        let claude = readLocalClaudeUsage()
+        cachedLocalUsageLock.lock()
+        cachedLocalUsage = (codex, claude, Date())
+        cachedLocalUsageLock.unlock()
+        return (codex, claude)
+    }
+
+    static func read(checkClaudeNow: Bool = false, refreshLocal: Bool = true) -> LLMUsageSnapshot {
+        let (codexLocal, claudeLocal) = localUsage(refresh: refreshLocal)
         let local = mergedLocalUsage(codexLocal, claudeLocal)
         var snapshot = readCodexUsage(local: local)
         snapshot.weeklyModelUsage = local.modelUsage
@@ -4937,7 +4969,7 @@ enum LLMUsageReader {
         for root in roots where FileManager.default.fileExists(atPath: root.path) {
             guard let enumerator = FileManager.default.enumerator(
                 at: root,
-                includingPropertiesForKeys: [.isRegularFileKey],
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
                 options: [.skipsPackageDescendants]
             ) else { continue }
             for case let url as URL in enumerator where url.pathExtension == "jsonl" {
@@ -4946,6 +4978,10 @@ enum LLMUsageReader {
                 urls.append(url)
             }
         }
+        let livePaths = Set(urls.map(\.path))
+        claudeParsedFilesLock.lock()
+        claudeParsedFiles = claudeParsedFiles.filter { livePaths.contains($0.key) }
+        claudeParsedFilesLock.unlock()
 
         let sidecarTitles = claudeSidecarTitles()
         let generatedTitles = loadClaudeGeneratedTitles()
@@ -5031,11 +5067,40 @@ enum LLMUsageReader {
         }
     }
 
-    private static func claudeTranscript(
-        from url: URL,
-        sidecarTitles: [String: String],
-        generatedTitles: [String: String]
-    ) -> ClaudeTranscript? {
+    private struct ClaudeParsedFile {
+        var sessionID: String
+        var title: String?
+        var summary: String?
+        var preview: String?
+        var cwd: String?
+        var model: String?
+        var createdAt: Date?
+        var updatedAt: Date?
+        var requestUsage: [String: (usage: LLMTokenUsageSummary, modelName: String, timestamp: Date?)]
+    }
+
+    private struct ClaudeParsedFileStamp: Equatable {
+        let size: Int
+        let modified: Date
+    }
+
+    nonisolated(unsafe) private static var claudeParsedFiles: [String: (stamp: ClaudeParsedFileStamp, parsed: ClaudeParsedFile)] = [:]
+    private static let claudeParsedFilesLock = NSLock()
+
+    /// Parses a transcript once and reuses the result until the file's size or modification date changes.
+    private static func parsedClaudeFile(_ url: URL) -> ClaudeParsedFile? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        var stamp: ClaudeParsedFileStamp?
+        if let size = values?.fileSize, let modified = values?.contentModificationDate {
+            stamp = ClaudeParsedFileStamp(size: size, modified: modified)
+        }
+        if let stamp {
+            claudeParsedFilesLock.lock()
+            let hit = claudeParsedFiles[url.path]
+            claudeParsedFilesLock.unlock()
+            if let hit, hit.stamp == stamp { return hit.parsed }
+        }
+
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         var sessionID = url.deletingPathExtension().lastPathComponent
         var title: String?
@@ -5092,6 +5157,42 @@ enum LLMUsageReader {
                 eventTimestamp
             )
         }
+
+
+        let parsed = ClaudeParsedFile(
+            sessionID: sessionID,
+            title: title,
+            summary: summary,
+            preview: preview,
+            cwd: cwd,
+            model: model,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            requestUsage: requestUsage
+        )
+        if let stamp {
+            claudeParsedFilesLock.lock()
+            claudeParsedFiles[url.path] = (stamp, parsed)
+            claudeParsedFilesLock.unlock()
+        }
+        return parsed
+    }
+
+    private static func claudeTranscript(
+        from url: URL,
+        sidecarTitles: [String: String],
+        generatedTitles: [String: String]
+    ) -> ClaudeTranscript? {
+        guard let parsed = parsedClaudeFile(url) else { return nil }
+        let sessionID = parsed.sessionID
+        let title = parsed.title
+        let summary = parsed.summary
+        let preview = parsed.preview
+        let cwd = parsed.cwd
+        let model = parsed.model
+        let createdAt = parsed.createdAt
+        let updatedAt = parsed.updatedAt
+        let requestUsage = parsed.requestUsage
 
         let totals = LLMTokenUsageSummary(calls: requestUsage.values.map { value in
             LLMTokenCall(
