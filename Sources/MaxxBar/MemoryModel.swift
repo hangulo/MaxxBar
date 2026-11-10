@@ -5206,7 +5206,9 @@ enum LLMUsageReader {
         })
         guard createdAt != nil || updatedAt != nil || totals.totalTokens > 0 else { return nil }
         if let cwd, cwd.hasPrefix(claudeTitlerDirectory.path) { return nil }
-        let realTitle = title ?? summary ?? sidecarTitles[sessionID]
+        let realTitle = [title, summary, sidecarTitles[sessionID]]
+            .compactMap { $0 }
+            .first { !isPlaceholderClaudeTitle($0) }
         let generatedTitle = generatedTitles[sessionID].flatMap { $0.isEmpty ? nil : "Thread: \($0)" }
         let cleanPreview = compactText(preview ?? "", fallback: "No prompt preview stored")
         let dominantModel = Dictionary(grouping: requestUsage.values, by: \.modelName)
@@ -5385,6 +5387,12 @@ enum LLMUsageReader {
         return content.isEmpty ? nil : content
     }
 
+    /// Generic names the desktop app gives sessions started from a project; they say nothing about the work.
+    private static func isPlaceholderClaudeTitle(_ title: String) -> Bool {
+        let lower = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.hasPrefix("local session") || lower == "untitled" || lower == "new session"
+    }
+
     /// Titles the Claude desktop app keeps beside its Code sessions, keyed by CLI session id.
     private static func claudeSidecarTitles() -> [String: String] {
         let root = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
@@ -5402,7 +5410,8 @@ enum LLMUsageReader {
                   let sessionID = object["cliSessionId"] as? String,
                   let title = (object["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !title.isEmpty,
-                  !title.hasPrefix("Remote Control session") else { continue }
+                  !title.hasPrefix("Remote Control session"),
+                  !isPlaceholderClaudeTitle(title) else { continue }
             titles[sessionID] = title
         }
         return titles
