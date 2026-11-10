@@ -150,6 +150,45 @@ private struct PopoverResizeHandle: View {
     }
 }
 
+/// Which providers MaxxBar shows in the menu bar and on the Runway tab. Stored in UserDefaults; both default to on.
+enum ProviderVisibility {
+    static let showClaudeKey = "showClaudeProvider"
+    static let showCodexKey = "showCodexProvider"
+
+    static var showClaude: Bool { UserDefaults.standard.object(forKey: showClaudeKey) as? Bool ?? true }
+    static var showCodex: Bool { UserDefaults.standard.object(forKey: showCodexKey) as? Bool ?? true }
+
+    static var visibleProviders: [String] {
+        let names = [showClaude ? "Claude" : nil, showCodex ? "Codex" : nil].compactMap { $0 }
+        return names.isEmpty ? ["Claude", "Codex"] : names
+    }
+}
+
+struct ProviderVisibilityMenu: View {
+    @AppStorage(ProviderVisibility.showClaudeKey) private var showClaude = true
+    @AppStorage(ProviderVisibility.showCodexKey) private var showCodex = true
+
+    var body: some View {
+        Menu {
+            Toggle("Show Claude", isOn: $showClaude)
+                .disabled(showClaude && !showCodex)
+            Toggle("Show Codex", isOn: $showCodex)
+                .disabled(showCodex && !showClaude)
+        } label: {
+            Image(systemName: "eye")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 23, height: 20)
+                .background(Color.panelLift.opacity(0.92))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Show or hide Claude and Codex")
+    }
+}
+
 enum StatsPanel: String, CaseIterable, Identifiable {
     case runway = "Runway"
     case llmUsage = "Insights"
@@ -933,6 +972,8 @@ struct LLMRunwayPanelView: View {
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
     @State private var advancedExpanded = false
+    @AppStorage(ProviderVisibility.showClaudeKey) private var showClaude = true
+    @AppStorage(ProviderVisibility.showCodexKey) private var showCodex = true
 
     var body: some View {
         VStack(spacing: 7) {
@@ -974,7 +1015,13 @@ struct LLMRunwayPanelView: View {
         if !result.contains(where: { $0.name == "Claude" }), snapshot.providerErrors["Claude"] != nil {
             result.append(LLMUsageLimit(name: "Claude", primary: nil, secondary: nil))
         }
-        return result
+        return result.filter { limit in
+            switch limit.name {
+            case "Claude": return showClaude || !showCodex
+            case "Codex": return showCodex || !showClaude
+            default: return true
+            }
+        }
     }
 
     private func runwayTitle(for limit: LLMUsageLimit) -> String {
@@ -4103,6 +4150,8 @@ struct ActionBarView: View {
             VersionIndicatorView()
 
             Spacer()
+
+            ProviderVisibilityMenu()
 
             if let onOpenHub {
                 IconActionButton(systemName: "rectangle.3.group", help: "Open MaxxBar Hub", action: onOpenHub)

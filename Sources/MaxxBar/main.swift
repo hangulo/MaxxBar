@@ -203,12 +203,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusTitleView = titleView
         }
         statusItem = item
+        updateStatusTitle()
 
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentSize = currentPopoverSize
         popover.contentViewController = makePopoverContent(selectedPanel: .runway)
         self.popover = popover
+
+        // The Claude/Codex toggles in the popover write UserDefaults; redraw the menu bar when they change.
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.updateStatusTitle() }
+        }
 
         refreshStatusInBackground()
         refreshLLMUsageInBackground(force: true)
@@ -272,7 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshInBackground() {
         model.refreshInBackground { [weak self] in
             guard let self else { return }
-            self.statusTitleView?.setLines(self.statusTextLines())
+            self.updateStatusTitle()
             self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
@@ -280,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatusInBackground() {
         model.refreshStatusInBackground { [weak self] in
             guard let self else { return }
-            self.statusTitleView?.setLines(self.statusTextLines())
+            self.updateStatusTitle()
             self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
@@ -288,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshLLMUsageInBackground(force: Bool = false, refreshLocal: Bool = true) {
         model.refreshLLMUsageInBackground(force: force, refreshLocal: refreshLocal) { [weak self] in
             guard let self else { return }
-            self.statusTitleView?.setLines(self.statusTextLines())
+            self.updateStatusTitle()
             self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
@@ -347,6 +355,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return size
     }
 
+    /// Two providers: one column each (percent left 5h/week). One provider: a 5h column and a weekly column,
+    /// each with percent left on top and time until reset underneath.
+    private func updateStatusTitle() {
+        let names = ProviderVisibility.visibleProviders
+        guard names.count == 1 else {
+            statusTitleView?.setLines(statusTextLines())
+            return
+        }
+        let limit = model.llmUsage.limits.first { $0.name == names[0] }
+        let stale = limit?.cachedAt == nil ? "" : "~"
+        func column(_ label: String, _ window: LLMUsageWindow?) -> (top: String, bottom: String, percent: Int?) {
+            let percent = window?.remainingPercent
+            return ("\(label) \(percent.map { "\($0)%" } ?? "--")\(stale)", timeLeftLabel(window?.resetAt), percent)
+        }
+        let columns = [column("5H", limit?.shortWindow), column("WK", limit?.weeklyWindow)]
+        statusTitleView?.setColumns(
+            top: columns.map(\.top),
+            bottom: columns.map(\.bottom),
+            percents: columns.map(\.percent)
+        )
+    }
+
+    private func timeLeftLabel(_ resetAt: Date?) -> String {
+        guard let resetAt else { return "--" }
+        let minutes = max(Int(ceil(resetAt.timeIntervalSinceNow / 60)), 0)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return minutes % 60 == 0 ? "\(hours)h" : "\(hours)h\(minutes % 60)m" }
+        return hours % 24 == 0 ? "\(hours / 24)d" : "\(hours / 24)d\(hours % 24)h"
+    }
+
     private func statusTextLines() -> (top: String, bottom: String) {
         func quota(_ name: String) -> String {
             guard let limit = model.llmUsage.limits.first(where: { $0.name == name }) else { return "--/--" }
@@ -354,7 +393,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let weekly = limit.weeklyWindow.map { String($0.remainingPercent) } ?? "--"
             return "\(short)/\(weekly)\(limit.cachedAt == nil ? "" : "~")"
         }
-        return ("Claude Codex", "\(quota("Claude")) \(quota("Codex"))")
+        let names = ProviderVisibility.visibleProviders
+        return (names.joined(separator: " "), names.map(quota).joined(separator: " "))
     }
 
     private func aiTimeLabel(_ seconds: TimeInterval) -> String {
@@ -511,9 +551,21 @@ final class StatusTitleView: NSView {
 
     override var isFlipped: Bool { true }
 
+    private var columnPercents: [Int?] = []
+
     func setLines(_ lines: (top: String, bottom: String)) {
         topItems = lines.top.split(separator: " ").map(String.init)
         bottomItems = lines.bottom.split(separator: " ").map(String.init)
+        columnPercents = bottomItems.map {
+            $0.replacingOccurrences(of: "~", with: "").split(separator: "/").compactMap { Int($0) }.min()
+        }
+        needsDisplay = true
+    }
+
+    func setColumns(top: [String], bottom: [String], percents: [Int?]) {
+        topItems = top
+        bottomItems = bottom
+        columnPercents = percents
         needsDisplay = true
     }
 
@@ -565,9 +617,7 @@ final class StatusTitleView: NSView {
     }
 
     private func warningColorForColumn(at index: Int) -> NSColor? {
-        guard index < 2,
-              bottomItems.indices.contains(index),
-              let percent = bottomItems[index].replacingOccurrences(of: "~", with: "").split(separator: "/").compactMap { Int($0) }.min() else {
+        guard columnPercents.indices.contains(index), let percent = columnPercents[index] else {
             return nil
         }
 
@@ -581,9 +631,7 @@ final class StatusTitleView: NSView {
     }
 
     private func shouldUnderlineColumn(at index: Int) -> Bool {
-        guard index < 2,
-              bottomItems.indices.contains(index),
-              let percent = bottomItems[index].replacingOccurrences(of: "~", with: "").split(separator: "/").compactMap { Int($0) }.min() else {
+        guard columnPercents.indices.contains(index), let percent = columnPercents[index] else {
             return false
         }
 
