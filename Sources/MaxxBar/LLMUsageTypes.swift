@@ -1,0 +1,607 @@
+import Darwin
+import AppKit
+import Foundation
+import MachO
+import CryptoKit
+
+struct LLMUsageWindow: Equatable {
+    var label: String
+    var usedPercent: Int
+    var remainingPercent: Int
+    var resetAt: Date?
+    var windowSeconds: Int
+}
+
+struct LLMUsageLimit: Identifiable, Equatable {
+    var id: String { name }
+    var name: String
+    var primary: LLMUsageWindow?
+    var secondary: LLMUsageWindow?
+    var cachedAt: Date? = nil
+    /// When this reading was taken, for display; set for Claude readings whether live or cached.
+    var checkedAt: Date? = nil
+    /// Where the reading came from: "statusline" (Claude Code's own rate_limits), "endpoint" (a live usage request),
+    /// or "cache" (the last saved endpoint response).
+    var source: String? = nil
+
+    var windows: [LLMUsageWindow] {
+        [primary, secondary].compactMap { $0 }
+    }
+
+    var shortWindow: LLMUsageWindow? {
+        windows.first { $0.windowSeconds < 604_800 }
+    }
+
+    var weeklyWindow: LLMUsageWindow? {
+        windows.first { $0.windowSeconds >= 604_800 }
+    }
+}
+
+struct LLMResetCreditExpiration: Identifiable, Equatable {
+    var id: String { "\(Int(expiresAt.timeIntervalSince1970))-\(count)" }
+    var count: Int
+    var expiresAt: Date
+}
+
+struct LLMLocalUsageWindow: Identifiable, Equatable {
+    var id: String { label }
+    var label: String
+    var tokens: UInt64
+    var threads: Int
+}
+
+struct LLMUsageSession: Identifiable, Equatable {
+    var id: String
+    var provider: String
+    var title: String
+    var projectName: String
+    var modelName: String
+    var preview: String
+    var rolloutPath: String
+    var tokens: UInt64
+    var tokenUsage: LLMTokenUsageSummary?
+    var createdAt: Date?
+    var updatedAt: Date?
+
+    var detail: String {
+        "\(provider) • \(projectName) • \(modelName)"
+    }
+}
+
+/// One model request. `inputTokens` is the whole prompt, including cache reads and cache writes.
+struct LLMTokenCall: Equatable {
+    static let rebuildMinimumPromptTokens: UInt64 = 30_000
+
+    var timestamp: Date?
+    var inputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var cacheWriteInputTokens: UInt64 = 0
+    var cacheWrite1hInputTokens: UInt64 = 0
+    var outputTokens: UInt64
+
+    /// A near-full cache rebuild: at least half of a 30K+ prompt was not read from cache.
+    var isCacheRebuild: Bool {
+        guard inputTokens >= Self.rebuildMinimumPromptTokens else { return false }
+        let uncached = inputTokens - min(cachedInputTokens, inputTokens)
+        return uncached * 2 >= inputTokens
+    }
+}
+
+struct LLMTokenWindowUsage: Equatable {
+    var inputTokens: UInt64 = 0
+    var cachedInputTokens: UInt64 = 0
+    var cacheWriteInputTokens: UInt64 = 0
+    var cacheWrite1hInputTokens: UInt64 = 0
+    var outputTokens: UInt64 = 0
+    var callCount = 0
+    var rebuildCount = 0
+
+    var totalTokens: UInt64 {
+        inputTokens + outputTokens
+    }
+
+    func costBreakdown(for modelName: String) -> LLMCostBreakdown {
+        LLMTokenPricing.rates(for: modelName).breakdown(
+            inputTokens: inputTokens,
+            cachedInputTokens: cachedInputTokens,
+            cacheWriteInputTokens: cacheWriteInputTokens,
+            cacheWrite1hInputTokens: cacheWrite1hInputTokens,
+            outputTokens: outputTokens
+        )
+    }
+}
+
+extension LLMTokenWindowUsage {
+    init<Calls: Sequence>(calls: Calls) where Calls.Element == LLMTokenCall {
+        for call in calls {
+            inputTokens += call.inputTokens
+            cachedInputTokens += call.cachedInputTokens
+            cacheWriteInputTokens += call.cacheWriteInputTokens
+            cacheWrite1hInputTokens += call.cacheWrite1hInputTokens
+            outputTokens += call.outputTokens
+            callCount += 1
+            if call.isCacheRebuild {
+                rebuildCount += 1
+            }
+        }
+    }
+}
+
+struct LLMCostBreakdown: Equatable {
+    var freshInput: Double
+    var cacheWrite: Double
+    var cacheRead: Double
+    var output: Double
+
+    var total: Double {
+        freshInput + cacheWrite + cacheRead + output
+    }
+}
+
+struct LLMTokenUsageSummary: Equatable {
+    var inputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var outputTokens: UInt64
+    var reasoningOutputTokens: UInt64
+    var totalTokens: UInt64
+    var turnCount: Int
+    var cacheWriteInputTokens: UInt64 = 0
+    var cacheWrite1hInputTokens: UInt64 = 0
+    var rebuildCount = 0
+    var peakContextTokens: UInt64 = 0
+    var last24h: LLMTokenWindowUsage? = nil
+
+    var nonCachedInputTokens: UInt64 {
+        inputTokens >= cachedInputTokens ? inputTokens - cachedInputTokens : 0
+    }
+
+    var freshInputTokens: UInt64 {
+        nonCachedInputTokens - min(cacheWriteInputTokens, nonCachedInputTokens)
+    }
+
+    var cacheHitPercent: Int {
+        guard inputTokens > 0 else { return 0 }
+        return Int((Double(cachedInputTokens) / Double(inputTokens) * 100).rounded())
+    }
+
+    var lifetime: LLMTokenWindowUsage {
+        LLMTokenWindowUsage(
+            inputTokens: inputTokens,
+            cachedInputTokens: cachedInputTokens,
+            cacheWriteInputTokens: cacheWriteInputTokens,
+            cacheWrite1hInputTokens: cacheWrite1hInputTokens,
+            outputTokens: outputTokens,
+            callCount: turnCount,
+            rebuildCount: rebuildCount
+        )
+    }
+
+    func costBreakdown(for modelName: String) -> LLMCostBreakdown {
+        lifetime.costBreakdown(for: modelName)
+    }
+
+    func estimatedCost(for modelName: String) -> Double {
+        costBreakdown(for: modelName).total
+    }
+
+    func pricingLabel(for modelName: String) -> String {
+        LLMTokenPricing.rates(for: modelName).label
+    }
+}
+
+extension LLMTokenUsageSummary {
+    /// Lifetime totals from per-request calls; `last24h` covers only calls in the 24 hours before `now`.
+    init(calls: [LLMTokenCall], now: Date = Date()) {
+        let lifetime = LLMTokenWindowUsage(calls: calls)
+        self.init(
+            inputTokens: lifetime.inputTokens,
+            cachedInputTokens: lifetime.cachedInputTokens,
+            outputTokens: lifetime.outputTokens,
+            reasoningOutputTokens: 0,
+            totalTokens: lifetime.totalTokens,
+            turnCount: lifetime.callCount,
+            cacheWriteInputTokens: lifetime.cacheWriteInputTokens,
+            cacheWrite1hInputTokens: lifetime.cacheWrite1hInputTokens,
+            rebuildCount: lifetime.rebuildCount,
+            peakContextTokens: calls.map(\.inputTokens).max() ?? 0,
+            last24h: LLMTokenWindowUsage(calls: calls.filter { ($0.timestamp ?? .distantPast) >= now.addingTimeInterval(-86_400) })
+        )
+    }
+}
+
+struct LLMTokenPricing: Equatable {
+    static let gpt55 = LLMTokenPricing(label: "gpt-5.5 API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 30.0)
+    static let gpt54 = LLMTokenPricing(label: "gpt-5.4 API", freshInputDollarsPerMillion: 2.5, cachedInputDollarsPerMillion: 0.25, outputDollarsPerMillion: 15.0)
+    static let gpt54Mini = LLMTokenPricing(label: "gpt-5.4-mini API", freshInputDollarsPerMillion: 0.75, cachedInputDollarsPerMillion: 0.075, outputDollarsPerMillion: 4.5)
+    static let gpt54Nano = LLMTokenPricing(label: "gpt-5.4-nano API", freshInputDollarsPerMillion: 0.20, cachedInputDollarsPerMillion: 0.02, outputDollarsPerMillion: 1.25)
+    static let gpt53Codex = LLMTokenPricing(label: "gpt-5.3-codex API", freshInputDollarsPerMillion: 1.75, cachedInputDollarsPerMillion: 0.175, outputDollarsPerMillion: 14.0)
+    static let gpt51Codex = LLMTokenPricing(label: "gpt-5.1-codex API", freshInputDollarsPerMillion: 1.25, cachedInputDollarsPerMillion: 0.125, outputDollarsPerMillion: 10.0)
+    static let codexMini = LLMTokenPricing(label: "codex-mini API", freshInputDollarsPerMillion: 1.5, cachedInputDollarsPerMillion: 0.375, outputDollarsPerMillion: 6.0)
+    static let claudeFable5 = LLMTokenPricing(label: "Claude Fable 5 API", freshInputDollarsPerMillion: 10.0, cachedInputDollarsPerMillion: 1.0, outputDollarsPerMillion: 50.0)
+    static let claudeOpus = LLMTokenPricing(label: "Claude Opus API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 25.0)
+    static let claudeSonnet5 = LLMTokenPricing(label: "Claude Sonnet 5 API (intro)", freshInputDollarsPerMillion: 2.0, cachedInputDollarsPerMillion: 0.2, outputDollarsPerMillion: 10.0)
+    static let claudeSonnet = LLMTokenPricing(label: "Claude Sonnet API", freshInputDollarsPerMillion: 3.0, cachedInputDollarsPerMillion: 0.3, outputDollarsPerMillion: 15.0)
+    static let claudeHaiku = LLMTokenPricing(label: "Claude Haiku API", freshInputDollarsPerMillion: 1.0, cachedInputDollarsPerMillion: 0.1, outputDollarsPerMillion: 5.0)
+
+    var label: String
+    var freshInputDollarsPerMillion: Double
+    var cachedInputDollarsPerMillion: Double
+    var outputDollarsPerMillion: Double
+
+    static func rates(for modelName: String) -> LLMTokenPricing {
+        let model = modelName.lowercased()
+        if model.contains("fable") || model.contains("mythos") {
+            return .claudeFable5
+        }
+        if model.contains("opus") {
+            return .claudeOpus
+        }
+        if model.contains("sonnet-5") || model.contains("sonnet 5") {
+            return .claudeSonnet5
+        }
+        if model.contains("sonnet") {
+            return .claudeSonnet
+        }
+        if model.contains("haiku") {
+            return .claudeHaiku
+        }
+        if model.hasPrefix("codex-mini") {
+            return .codexMini
+        }
+        if model.hasPrefix("gpt-5.3-codex") || model.hasPrefix("gpt-5.2-codex") {
+            return .gpt53Codex
+        }
+        if model.hasPrefix("gpt-5.1-codex") || model.hasPrefix("gpt-5-codex") {
+            return .gpt51Codex
+        }
+        if model.hasPrefix("gpt-5.4-mini") {
+            return .gpt54Mini
+        }
+        if model.hasPrefix("gpt-5.4-nano") {
+            return .gpt54Nano
+        }
+        if model.hasPrefix("gpt-5.4") {
+            return .gpt54
+        }
+        if model.hasPrefix("gpt-5.5") {
+            return .gpt55
+        }
+        var fallback = LLMTokenPricing.gpt55
+        fallback.label = "gpt-5.5 API rates (model has no known price)"
+        return fallback
+    }
+
+    func estimatedCost(
+        freshInputTokens: UInt64,
+        cachedInputTokens: UInt64,
+        outputTokens: UInt64
+    ) -> Double {
+        dollars(for: freshInputTokens, rate: freshInputDollarsPerMillion)
+            + dollars(for: cachedInputTokens, rate: cachedInputDollarsPerMillion)
+            + dollars(for: outputTokens, rate: outputDollarsPerMillion)
+    }
+
+    /// Cache writes bill at 1.25x base input for the 5-minute cache and 2x for the 1-hour cache.
+    func breakdown(
+        inputTokens: UInt64,
+        cachedInputTokens: UInt64,
+        cacheWriteInputTokens: UInt64,
+        cacheWrite1hInputTokens: UInt64,
+        outputTokens: UInt64
+    ) -> LLMCostBreakdown {
+        let uncached = inputTokens - min(cachedInputTokens, inputTokens)
+        let writes = min(cacheWriteInputTokens, uncached)
+        let writes1h = min(cacheWrite1hInputTokens, writes)
+        return LLMCostBreakdown(
+            freshInput: dollars(for: uncached - writes, rate: freshInputDollarsPerMillion),
+            cacheWrite: dollars(for: writes - writes1h, rate: freshInputDollarsPerMillion * 1.25)
+                + dollars(for: writes1h, rate: freshInputDollarsPerMillion * 2),
+            cacheRead: dollars(for: cachedInputTokens, rate: cachedInputDollarsPerMillion),
+            output: dollars(for: outputTokens, rate: outputDollarsPerMillion)
+        )
+    }
+
+    private func dollars(for tokens: UInt64, rate: Double) -> Double {
+        Double(tokens) / 1_000_000 * rate
+    }
+}
+
+struct LLMTokenCostEstimate: Identifiable, Equatable {
+    static let freshInputDollarsPerMillion = LLMTokenPricing.gpt55.freshInputDollarsPerMillion
+    static let cachedInputDollarsPerMillion = LLMTokenPricing.gpt55.cachedInputDollarsPerMillion
+    static let outputDollarsPerMillion = LLMTokenPricing.gpt55.outputDollarsPerMillion
+
+    var id: String { label }
+    var label: String
+    var sessionCount: Int
+    var inputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var outputTokens: UInt64
+    var totalTokens: UInt64
+    var windowStartedAt: Date
+    var windowEndedAt: Date
+
+    var freshInputTokens: UInt64 {
+        inputTokens >= cachedInputTokens ? inputTokens - cachedInputTokens : 0
+    }
+
+    var cacheHitPercent: Int {
+        guard inputTokens > 0 else { return 0 }
+        return Int((Double(cachedInputTokens) / Double(inputTokens) * 100).rounded())
+    }
+
+    var estimatedCost: Double {
+        LLMTokenPricing.gpt55.estimatedCost(
+            freshInputTokens: freshInputTokens,
+            cachedInputTokens: cachedInputTokens,
+            outputTokens: outputTokens
+        )
+    }
+}
+
+struct LLMUsageWindowLogEntry: Codable, Equatable {
+    var recordedAt: Date
+    /// Missing in lines written before provider support; those lines are Codex.
+    var provider: String? = nil
+    var windowLabel: String
+    var windowStartedAt: Date
+    var windowEndedAt: Date
+    var sessionCount: Int
+    var totalInputTokens: UInt64
+    var cachedInputTokens: UInt64
+    var freshInputTokens: UInt64
+    var outputTokens: UInt64
+    var totalTokens: UInt64
+    var cacheHitPercent: Int
+    var estimatedCostUSD: Double
+    var freshInputDollarsPerMillion: Double
+    var cachedInputDollarsPerMillion: Double
+    var outputDollarsPerMillion: Double
+
+    init(recordedAt: Date = Date(), provider: String? = nil, estimate: LLMTokenCostEstimate) {
+        self.recordedAt = recordedAt
+        self.provider = provider
+        self.windowLabel = estimate.label
+        self.windowStartedAt = estimate.windowStartedAt
+        self.windowEndedAt = estimate.windowEndedAt
+        self.sessionCount = estimate.sessionCount
+        self.totalInputTokens = estimate.inputTokens
+        self.cachedInputTokens = estimate.cachedInputTokens
+        self.freshInputTokens = estimate.freshInputTokens
+        self.outputTokens = estimate.outputTokens
+        self.totalTokens = estimate.totalTokens
+        self.cacheHitPercent = estimate.cacheHitPercent
+        self.estimatedCostUSD = estimate.estimatedCost
+        self.freshInputDollarsPerMillion = LLMTokenCostEstimate.freshInputDollarsPerMillion
+        self.cachedInputDollarsPerMillion = LLMTokenCostEstimate.cachedInputDollarsPerMillion
+        self.outputDollarsPerMillion = LLMTokenCostEstimate.outputDollarsPerMillion
+    }
+}
+
+/// One point of quota history. The first four fields predate Claude support and hold Codex values
+/// (`planType` is the Codex plan). Every later field is optional so files written by older builds still decode.
+struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
+    var id = UUID()
+    var sampledAt: Date
+    var primaryRemainingPercent: Int?
+    var weeklyRemainingPercent: Int?
+    var planType: String? = nil
+    var claudeWeeklyRemainingPercent: Int? = nil
+    var claudeFiveHourRemainingPercent: Int? = nil
+    /// The Claude plan at the time of the sample, for example "Max 5x". A plan change starts a new drawdown segment.
+    var claudePlanType: String? = nil
+    /// Where the Claude reading came from (see `LLMUsageLimit.source`).
+    var claudeSource: String? = nil
+    var codexFiveHourResetAt: Date? = nil
+    var codexWeeklyResetAt: Date? = nil
+    var claudeFiveHourResetAt: Date? = nil
+    var claudeWeeklyResetAt: Date? = nil
+
+    func fiveHourRemainingPercent(for provider: String) -> Int? {
+        provider == "Claude" ? claudeFiveHourRemainingPercent : primaryRemainingPercent
+    }
+
+    func weeklyRemainingPercent(for provider: String) -> Int? {
+        provider == "Claude" ? claudeWeeklyRemainingPercent : weeklyRemainingPercent
+    }
+
+    func plan(for provider: String) -> String? {
+        provider == "Claude" ? claudePlanType : planType
+    }
+
+    func weeklyResetAt(for provider: String) -> Date? {
+        provider == "Claude" ? claudeWeeklyResetAt : codexWeeklyResetAt
+    }
+}
+
+struct LLMQuotaActivitySignature: Equatable {
+    var primaryRemainingPercent: Int?
+    var weeklyRemainingPercent: Int?
+    var planType: String?
+    var claudeWeeklyRemainingPercent: Int?
+    var claudeFiveHourRemainingPercent: Int?
+    var claudePlanType: String?
+    var localFiveHourTokens: UInt64
+    var localWeeklyTokens: UInt64
+    var localWeeklyThreads: Int
+    var latestSessionUpdateSecond: Int?
+
+    init(usage: LLMUsageSnapshot) {
+        let codex = usage.limits.first { $0.name == "Codex" }
+        let claude = usage.limits.first { $0.name == "Claude" }
+        self.primaryRemainingPercent = codex?.shortWindow?.remainingPercent
+        self.weeklyRemainingPercent = codex?.weeklyWindow?.remainingPercent
+        self.claudeWeeklyRemainingPercent = claude?.weeklyWindow?.remainingPercent
+        self.claudeFiveHourRemainingPercent = claude?.shortWindow?.remainingPercent
+        self.claudePlanType = usage.claudePlanType
+        self.planType = usage.planType
+        self.localFiveHourTokens = usage.localFiveHourTokens
+        self.localWeeklyTokens = usage.localWeeklyTokens
+        self.localWeeklyThreads = usage.localWeeklyThreads
+        self.latestSessionUpdateSecond = (usage.recentSessions + usage.topWeeklySessions)
+            .compactMap(\.updatedAt)
+            .map { Int($0.timeIntervalSince1970) }
+            .max()
+    }
+}
+
+struct LLMUsageSnapshot: Equatable {
+    var email: String?
+    var planType: String?
+    var limits: [LLMUsageLimit]
+    var creditsBalance: String?
+    var resetCreditCount: Int?
+    var resetCreditExpirations: [LLMResetCreditExpiration]
+    var lastUpdated: Date?
+    var localFiveHourTokens: UInt64
+    var localWeeklyTokens: UInt64
+    var localWeeklyThreads: Int
+    var localWindows: [LLMLocalUsageWindow]
+    var costEstimates: [LLMTokenCostEstimate]
+    var recentSessions: [LLMUsageSession]
+    var topWeeklySessions: [LLMUsageSession]
+    var error: String?
+    var providerErrors: [String: String] = [:]
+    var weeklyModelUsage: [LLMModelUsageTotal] = []
+    var dailyModelUsage: [LLMModelUsageTotal] = []
+    var providerAccounts: [LLMProviderAccount] = []
+
+    /// The Claude plan from the local Claude profile. `planType` above is the Codex plan.
+    var claudePlanType: String? {
+        providerAccounts.first { $0.provider == "Claude" }?.planName
+    }
+}
+
+struct LLMProviderAccount: Identifiable, Equatable {
+    var id: String { provider.lowercased() }
+    let provider: String
+    let email: String?
+    let displayName: String?
+    let organizationName: String?
+    let planName: String?
+}
+
+struct LLMModelUsageTotal: Equatable {
+    let provider: String
+    let modelName: String
+    let tokens: UInt64
+    let sessionCount: Int
+}
+
+struct LLMModelUsage: Identifiable, Equatable {
+    var id: String { "\(provider.lowercased())|\(modelName.lowercased())" }
+    let provider: String
+    let modelName: String
+    let tokens: UInt64
+    let sessionCount: Int
+    let sharePercent: Int
+}
+
+struct LLMModelUsageSummary: Equatable {
+    let models: [LLMModelUsage]
+    let totalTokens: UInt64
+    let sessionCount: Int
+    let distributionBasis: String
+}
+
+extension LLMUsageSnapshot {
+    func modelUsageSummary(provider: String? = nil, lastSeconds: TimeInterval = 604_800) -> LLMModelUsageSummary {
+        struct Aggregate {
+            var provider: String
+            var modelName: String
+            var tokens: UInt64
+            var sessionCount: Int
+        }
+
+        var aggregates: [String: Aggregate] = [:]
+        let recordedModelUsage = lastSeconds <= 86_400 ? dailyModelUsage : weeklyModelUsage
+        let selectedRecordedModelUsage = recordedModelUsage.filter {
+            provider == nil || $0.provider.caseInsensitiveCompare(provider!) == .orderedSame
+        }
+        let recordedProviders = Set(selectedRecordedModelUsage.map { $0.provider.lowercased() })
+
+        for total in selectedRecordedModelUsage {
+            let key = "\(total.provider.lowercased())|\(total.modelName.lowercased())"
+            aggregates[key] = Aggregate(
+                provider: total.provider,
+                modelName: total.modelName,
+                tokens: total.tokens,
+                sessionCount: total.sessionCount
+            )
+        }
+
+        // A provider-specific reader can fail independently (for example, after a
+        // local database schema change). Keep the other provider's exact totals,
+        // then fill only the missing provider from discovered sessions.
+        if selectedRecordedModelUsage.isEmpty || provider == nil {
+            let cutoff = Date().addingTimeInterval(-lastSeconds)
+            var seen = Set<String>()
+            let sessions = (recentSessions + topWeeklySessions).filter { session in
+                guard seen.insert("\(session.provider.lowercased()):\(session.id)").inserted else { return false }
+                if let provider,
+                   session.provider.caseInsensitiveCompare(provider) != .orderedSame {
+                    return false
+                }
+                if recordedProviders.contains(session.provider.lowercased()) {
+                    return false
+                }
+                guard let timestamp = session.updatedAt ?? session.createdAt else { return true }
+                return timestamp >= cutoff
+            }
+            for session in sessions {
+                let modelName = session.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = modelName.isEmpty ? "Model unavailable" : modelName
+                let key = "\(session.provider.lowercased())|\(displayName.lowercased())"
+                var aggregate = aggregates[key] ?? Aggregate(
+                    provider: session.provider,
+                    modelName: displayName,
+                    tokens: 0,
+                    sessionCount: 0
+                )
+                aggregate.tokens += session.tokenUsage?.totalTokens ?? session.tokens
+                aggregate.sessionCount += 1
+                aggregates[key] = aggregate
+            }
+        }
+
+        let sorted = aggregates.values.sorted {
+            if $0.tokens != $1.tokens { return $0.tokens > $1.tokens }
+            if $0.sessionCount != $1.sessionCount { return $0.sessionCount > $1.sessionCount }
+            return $0.modelName.localizedCaseInsensitiveCompare($1.modelName) == .orderedAscending
+        }
+        let totalTokens = sorted.reduce(UInt64(0)) { $0 + $1.tokens }
+        let totalSessions = sorted.reduce(0) { $0 + $1.sessionCount }
+        let usesTokenShare = totalTokens > 0
+        let weights = sorted.map { usesTokenShare ? Double($0.tokens) : Double($0.sessionCount) }
+        let totalWeight = weights.reduce(0, +)
+        let rawShares = weights.map { totalWeight > 0 ? $0 / totalWeight * 100 : 0 }
+        var shares = rawShares.map { Int($0.rounded(.down)) }
+        let pointsToAssign = max(0, 100 - shares.reduce(0, +))
+        let fractionalOrder = rawShares.indices.sorted {
+            let lhs = rawShares[$0] - Double(shares[$0])
+            let rhs = rawShares[$1] - Double(shares[$1])
+            return lhs == rhs ? $0 < $1 : lhs > rhs
+        }
+        if !fractionalOrder.isEmpty {
+            for index in 0..<pointsToAssign {
+                shares[fractionalOrder[index % fractionalOrder.count]] += 1
+            }
+        }
+
+        let models = sorted.enumerated().map { index, aggregate in
+            LLMModelUsage(
+                provider: aggregate.provider,
+                modelName: aggregate.modelName,
+                tokens: aggregate.tokens,
+                sessionCount: aggregate.sessionCount,
+                sharePercent: shares[index]
+            )
+        }
+        return LLMModelUsageSummary(
+            models: models,
+            totalTokens: totalTokens,
+            sessionCount: totalSessions,
+            distributionBasis: usesTokenShare ? "recorded tokens" : "sessions"
+        )
+    }
+}
