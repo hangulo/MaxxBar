@@ -15,6 +15,22 @@ enum MaxxBarLauncher {
             return
         }
 
+        if let verifyImageIndex = CommandLine.arguments.firstIndex(of: "--verify-clipboard-image-store"),
+           CommandLine.arguments.indices.contains(verifyImageIndex + 1) {
+            let sourcePath = CommandLine.arguments[verifyImageIndex + 1]
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: sourcePath)),
+                  let stored = ClipboardImageStore.save(
+                    ClipboardImagePayload(data: data, typeIdentifier: "public.image"),
+                    changeCount: 0
+                  ) else {
+                fputs("clipboard image verification failed\n", stderr)
+                exit(1)
+            }
+            print("clipboardImage=\(stored.imagePath)")
+            print("clipboardThumbnail=\(stored.thumbnailPath)")
+            return
+        }
+
         if let renderIndex = CommandLine.arguments.firstIndex(of: "--render-popover"),
            CommandLine.arguments.indices.contains(renderIndex + 1) {
             let path = CommandLine.arguments[renderIndex + 1]
@@ -78,6 +94,11 @@ enum MaxxBarLauncher {
             print("aiTimeToday=\(Int(aiUsage.timeTodaySeconds))")
             print("aiTopTools=\(aiUsage.topTools.map { "\($0.label)=\($0.count)" }.joined(separator: ","))")
             print("aiProviderStats=\(aiUsage.providerSummaries.map { "\($0.provider):\($0.sessionsToday)sessions/\(Int($0.timeTodaySeconds))s/\($0.transferFlows.count)flows" }.joined(separator: ","))")
+            let clipboard = ClipboardDebugReader.snapshot()
+            print("clipboardWritesToday=\(clipboard.writesToday)")
+            print("clipboardPastesToday=\(clipboard.pasteAttemptsToday)")
+            print("clipboardImageWritesToday=\(clipboard.imageWritesToday)")
+            print("clipboardKnownSourcePercent=\(clipboard.pasteSourceKnownPercent)")
             let sensors = SensorReader.read()
             print("sensorCPUTemp=\(sensors.cpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
             print("sensorGPUTemp=\(sensors.gpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
@@ -129,6 +150,8 @@ extension StatsPanel {
             self = .llmUsage
         case "moments", "maxxmoment", "maxx-moment", "maxxmoments", "maxx-moments":
             self = .llmUsage
+        case "clipboard", "clip", "pasteboard":
+            self = .clipboard
         default:
             self = .memory
         }
@@ -145,7 +168,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var detachedWindow: NSWindow?
     private var timer: Timer?
+    private var lastVisibleProviders = ProviderVisibility.visibleProviders
+    private var pauseReasons = Set<String>()
     private let clipboardFlowMonitor = ClipboardFlowMonitor()
+    private let clipboardMetadataMonitor = ClipboardMetadataMonitor()
     private var currentPopoverPanel: StatsPanel = .runway
     private var currentPopoverSize = PopoverSizePreference.load()
 
@@ -162,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.length = 104
+        item.length = 108
         if let button = item.button {
             button.title = ""
             button.toolTip = statusToolTip()
@@ -179,6 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusTitleView = titleView
         }
         statusItem = item
+        updateStatusTitle()
 
         let popover = NSPopover()
         popover.behavior = .transient
@@ -186,21 +213,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = makePopoverContent(selectedPanel: .runway)
         self.popover = popover
 
-        refreshStatusInBackground()
-        refreshLLMUsageInBackground(force: true)
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        // The Claude/Codex toggles in the popover write UserDefaults; redraw the menu bar when they change.
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.startClipboardFlowMonitor()
-                if self.isDetailedUIVisible {
-                    self.refreshInBackground()
-                } else {
-                    self.refreshStatusInBackground()
+                self.updateStatusTitle()
+                // A provider that was just shown has not been read, and a hidden one is no longer polled: refresh now.
+                let visible = ProviderVisibility.visibleProviders
+                if visible != self.lastVisibleProviders {
+                    self.lastVisibleProviders = visible
+                    self.refreshLLMUsageInBackground(force: true)
                 }
-                self.refreshLLMUsageInBackground()
             }
         }
-        timer?.tolerance = 5
+
+        refreshStatusInBackground()
+        refreshLLMUsageInBackground(force: true)
+        startRefreshTimer()
+        observeLockAndSleep()
 
         if shouldVerifyPopoverAction {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -215,9 +247,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func startRefreshTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.startClipboardFlowMonitor()
+                if self.isDetailedUIVisible {
+                    self.refreshInBackground()
+                } else {
+                    self.refreshStatusInBackground()
+                }
+                // While the popover is closed, only the quotas refresh; transcript and Codex scans wait for the popover.
+                self.refreshLLMUsageInBackground(refreshLocal: self.isDetailedUIVisible)
+            }
+        }
+        timer?.tolerance = 5
+    }
+
+    /// Nothing is sampled or polled while the screen is locked, the display sleeps, or the Mac sleeps.
+    /// One refresh runs on return so the menu bar is current right away.
+    private func observeLockAndSleep() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        let distributed = DistributedNotificationCenter.default()
+        let pauses: [(NotificationCenter, Notification.Name)] = [
+            (workspace, NSWorkspace.willSleepNotification),
+            (workspace, NSWorkspace.screensDidSleepNotification),
+            (distributed, Notification.Name("com.apple.screenIsLocked"))
+        ]
+        let resumes: [(NotificationCenter, Notification.Name)] = [
+            (workspace, NSWorkspace.didWakeNotification),
+            (workspace, NSWorkspace.screensDidWakeNotification),
+            (distributed, Notification.Name("com.apple.screenIsUnlocked"))
+        ]
+        for (center, name) in pauses {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.pauseRefreshing(name) }
+            }
+        }
+        for (center, name) in resumes {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.resumeRefreshing(name) }
+            }
+        }
+    }
+
+    private func pauseRefreshing(_ reason: Notification.Name) {
+        pauseReasons.insert(reason.rawValue)
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func resumeRefreshing(_ reason: Notification.Name) {
+        switch reason {
+        case NSWorkspace.didWakeNotification: pauseReasons.remove(NSWorkspace.willSleepNotification.rawValue)
+        case NSWorkspace.screensDidWakeNotification: pauseReasons.remove(NSWorkspace.screensDidSleepNotification.rawValue)
+        default: pauseReasons.remove("com.apple.screenIsLocked")
+        }
+        // Waking the display at the lock screen is not a return: wait for the unlock.
+        guard pauseReasons.isEmpty, timer == nil else { return }
+        startRefreshTimer()
+        refreshStatusInBackground()
+        refreshLLMUsageInBackground(force: true, refreshLocal: false)
+    }
+
     private func startClipboardFlowMonitor() {
         clipboardFlowMonitor.start { [weak self] eventType in
             self?.model.recordClipboardEvent(eventType)
+        }
+    }
+
+    private func startClipboardMetadataMonitor() {
+        clipboardMetadataMonitor.start { [weak self] changeCount, itemCount, typeIdentifiers, observedChange, imagePayload in
+            if observedChange {
+                self?.model.recordClipboardChange(
+                    changeCount: changeCount,
+                    itemCount: itemCount,
+                    typeIdentifiers: typeIdentifiers,
+                    imagePayload: imagePayload
+                )
+            } else {
+                self?.model.recordCurrentClipboardState(
+                    changeCount: changeCount,
+                    itemCount: itemCount,
+                    typeIdentifiers: typeIdentifiers
+                )
+            }
         }
     }
 
@@ -228,7 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshInBackground() {
         model.refreshInBackground { [weak self] in
             guard let self else { return }
-            self.statusTitleView?.setLines(self.statusTextLines())
+            self.updateStatusTitle()
             self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
@@ -236,15 +351,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatusInBackground() {
         model.refreshStatusInBackground { [weak self] in
             guard let self else { return }
-            self.statusTitleView?.setLines(self.statusTextLines())
+            self.updateStatusTitle()
             self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
 
-    private func refreshLLMUsageInBackground(force: Bool = false) {
-        model.refreshLLMUsageInBackground(force: force) { [weak self] in
+    private func refreshLLMUsageInBackground(force: Bool = false, refreshLocal: Bool = true) {
+        model.refreshLLMUsageInBackground(force: force, refreshLocal: refreshLocal) { [weak self] in
             guard let self else { return }
-            self.statusTitleView?.setLines(self.statusTextLines())
+            self.updateStatusTitle()
             self.statusItem?.button?.toolTip = self.statusToolTip()
         }
     }
@@ -270,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             refreshInBackground()
             if selectedPanel == .llmUsage || selectedPanel == .runway {
-                refreshLLMUsageInBackground()
+                refreshLLMUsageInBackground(force: true)
             }
         }
     }
@@ -303,37 +418,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return size
     }
 
+    /// Two providers: one column each (percent left 5h/week). One provider: a 5h column and a weekly column,
+    /// each with percent left on top and time until reset underneath.
+    private func updateStatusTitle() {
+        let names = ProviderVisibility.visibleProviders
+        guard names.count == 1 else {
+            statusTitleView?.setLines(statusTextLines())
+            return
+        }
+        let limit = model.llmUsage.limits.first { $0.name == names[0] }
+        let stale = limit?.cachedAt == nil ? "" : "~"
+        func column(_ label: String, _ window: LLMUsageWindow?) -> (top: String, bottom: String, percent: Int?) {
+            let percent = window?.remainingPercent
+            return ("\(label) \(percent.map { "\($0)%" } ?? "--")\(stale)", timeLeftLabel(window?.resetAt), percent)
+        }
+        let columns = [column("5H", limit?.shortWindow), column("WK", limit?.weeklyWindow)]
+        statusTitleView?.setColumns(
+            top: columns.map(\.top),
+            bottom: columns.map(\.bottom),
+            percents: columns.map(\.percent)
+        )
+    }
+
+    private func timeLeftLabel(_ resetAt: Date?) -> String {
+        guard let resetAt else { return "--" }
+        let minutes = max(Int(ceil(resetAt.timeIntervalSinceNow / 60)), 0)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return minutes % 60 == 0 ? "\(hours)h" : "\(hours)h\(minutes % 60)m" }
+        return hours % 24 == 0 ? "\(hours / 24)d" : "\(hours / 24)d\(hours % 24)h"
+    }
+
     private func statusTextLines() -> (top: String, bottom: String) {
-        guard let codexLimit = model.llmUsage.limits.first(where: { $0.name == "Codex" }) ?? model.llmUsage.limits.first else {
-            return ("-- Day", "- -")
+        func quota(_ name: String) -> String {
+            guard let limit = model.llmUsage.limits.first(where: { $0.name == name }) else { return "--/--" }
+            let short = limit.shortWindow.map { String($0.remainingPercent) } ?? "--"
+            let weekly = limit.weeklyWindow.map { String($0.remainingPercent) } ?? "--"
+            return "\(short)/\(weekly)\(limit.cachedAt == nil ? "" : "~")"
         }
-
-        let shortWindow = codexLimit.shortWindow
-        let weeklyWindow = codexLimit.weeklyWindow
-        let aiLabel = "\(model.aiUsage.sessionsToday)|\(aiTimeLabel(model.aiUsage.timeTodaySeconds))"
-
-        if let shortWindow, let weeklyWindow {
-            return (
-                "\(hoursLeftLabel(shortWindow.resetAt)) \(weekdayLabel(weeklyWindow.resetAt)) AI",
-                "\(shortWindow.remainingPercent)% \(weeklyWindow.remainingPercent)% \(aiLabel)"
-            )
-        }
-
-        if let weeklyWindow {
-            return (
-                "\(weekdayLabel(weeklyWindow.resetAt)) AI",
-                "\(weeklyWindow.remainingPercent)% \(aiLabel)"
-            )
-        }
-
-        if let shortWindow {
-            return (
-                "\(hoursLeftLabel(shortWindow.resetAt)) AI",
-                "\(shortWindow.remainingPercent)% \(aiLabel)"
-            )
-        }
-
-        return ("-- AI", "- \(aiLabel)")
+        let names = ProviderVisibility.visibleProviders
+        return (names.joined(separator: " "), names.map(quota).joined(separator: " "))
     }
 
     private func aiTimeLabel(_ seconds: TimeInterval) -> String {
@@ -349,7 +473,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func statusToolTip() -> String {
         let usage = model.aiUsage
         return """
-        Codex 5h remaining · weekly remaining
+        Claude and Codex: 5h / weekly percent remaining (~ = last checked reading)
+        \(model.llmUsage.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "\n"))
         AI today: \(usage.sessionsToday) sessions · \(aiTimeLabel(usage.timeTodaySeconds)) inferred time
         \(usage.copyEventsToday) copy · \(usage.pasteEventsToday) paste · \(usage.insightEventsToday) insight events
         """
@@ -415,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Memory"
+        window.title = "MaxxBar"
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 290, height: 595)
         window.contentViewController = NSHostingController(
@@ -489,9 +614,21 @@ final class StatusTitleView: NSView {
 
     override var isFlipped: Bool { true }
 
+    private var columnPercents: [Int?] = []
+
     func setLines(_ lines: (top: String, bottom: String)) {
         topItems = lines.top.split(separator: " ").map(String.init)
         bottomItems = lines.bottom.split(separator: " ").map(String.init)
+        columnPercents = bottomItems.map {
+            $0.replacingOccurrences(of: "~", with: "").split(separator: "/").compactMap { Int($0) }.min()
+        }
+        needsDisplay = true
+    }
+
+    func setColumns(top: [String], bottom: [String], percents: [Int?]) {
+        topItems = top
+        bottomItems = bottom
+        columnPercents = percents
         needsDisplay = true
     }
 
@@ -543,9 +680,7 @@ final class StatusTitleView: NSView {
     }
 
     private func warningColorForColumn(at index: Int) -> NSColor? {
-        guard index < 2,
-              bottomItems.indices.contains(index),
-              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")) else {
+        guard columnPercents.indices.contains(index), let percent = columnPercents[index] else {
             return nil
         }
 
@@ -559,9 +694,7 @@ final class StatusTitleView: NSView {
     }
 
     private func shouldUnderlineColumn(at index: Int) -> Bool {
-        guard index < 2,
-              bottomItems.indices.contains(index),
-              let percent = Int(bottomItems[index].replacingOccurrences(of: "%", with: "")) else {
+        guard columnPercents.indices.contains(index), let percent = columnPercents[index] else {
             return false
         }
 

@@ -14,20 +14,32 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 
 ## What It Does
 
-- Shows a two-line menu bar status for 5H runway, weekly reset day, and AI activity captured today.
-- Opens a Runway-first popover with live Codex and Claude limits when authenticated, reset credits, local quota history, drawdown insight, cache-token detail, combined token/session totals, and recent session timelines.
+- Shows Claude and Codex runway in the menu bar. With one provider shown, it gets a 5h column and a weekly column, each with percent left and time until reset. With both shown, each gets a 5h / weekly column. A `~` marks a previously checked reading.
+- Lets you pick which provider you track with the eye menu in the popover. The first shown provider (Claude when shown) is the primary one: the drawdown insight and its pace line follow it. A hidden provider is not polled or scanned at all.
+- Opens a Runway-first popover with live Claude and Codex limits when authenticated, reset credits, local quota history, a drawdown insight with a plan-aware burn rate, cache-token detail, combined token/session totals, and recent session timelines.
 - Provides an Insights tab with detected provider accounts/plans, today’s time and session share, a seven-day model mix and token distribution, output destinations, copy/paste flow metadata, before/after workflow paths, and recent Codex and Claude session context.
 - Generates a separate MaxxBar Hub with Tracework-aligned navigation for Overview, AI Insights, Runway, and Sessions.
-- Tracks Cmd+C/Cmd+V output flows as metadata only: app/site/title context, never clipboard contents or typed text.
-- Keeps Memory visible with pressure, memory breakdown, top processes, swap, and grouped/raw process views.
+- Keeps Memory visible with pressure, memory breakdown, top processes, swap, and a compact CPU/GPU temperature and fan RPM card beneath Swap.
 - Includes deeper CPU/GPU, sensor, and network panels for advanced/debug builds.
 - Installs a local app bundle and recreates the Desktop shortcut so the launcher points at the latest local build.
 
 ## Popover Tabs
 
-- Runway: live Codex and Claude limits, resets, local drawdown, and a combined session timeline.
+- Runway: live Claude and Codex limits, resets, weekly drawdown, the drawdown insight for your primary provider, and a combined session timeline.
 - Insights: models used, token-share distribution, AI usage patterns, output destinations, and AI workflow paths.
-- Memory: pressure, memory mix, top apps/processes, and swap.
+- Memory: pressure, memory mix, top apps/processes, swap, and sensors.
+
+The Clipboard and CPU/GPU tabs still exist in the code but are not in the tab bar.
+
+## Tracking Claude Or Codex
+
+Use the eye menu in the popover to show or hide each provider. You can hide one but not both. Hiding a provider stops everything MaxxBar does for it: no usage request, no Keychain or token read, and no transcript or sqlite scan. Showing it again refreshes right away.
+
+Quota history (`llm-quota-history.json`) records, for each sample, the Claude and Codex 5h and weekly percent left, each window's reset time, the plan for each provider, and where the Claude reading came from (`statusline`, `endpoint`, or `cache`). The Claude plan comes from the rate limit tier in `~/.claude.json`, for example `Max 5x`. A plan change rescales every percentage (the same usage is a smaller share of a bigger allowance), so the drawdown insight starts a new segment at a plan change instead of reading it as a reset, and its pace line only uses samples taken since the last reset or plan change. Files written by older builds still load; their samples simply lack the newer fields.
+
+## Energy
+
+MaxxBar stops sampling and polling while the screen is locked, the display is asleep, or the Mac is asleep, and refreshes once when you return. Lock screen samples are not written to the activity log. While the popover is closed only the quotas refresh. The Claude credential is reused until its own expiry instead of being read from the Keychain on every refresh, transcripts older than 8 days are skipped, a growing transcript is parsed from where the last pass stopped, and the activity logs are read from the end back to the 7 day cutoff.
 
 Drag the lower-right grip to resize the popover; MaxxBar stores the last width and height locally and restores them at the next open or launch. The bottom action bar opens the MaxxBar Hub, starts Deep Trace in Tracework when available, opens the popover as a window, relaunches the app, or quits. Dense chart/help titles use a short hover delay and can be clicked to pin the explanation; bottom action icons and the compact version label show immediate labels.
 
@@ -55,7 +67,7 @@ APP_VERSION=0.2.0 BUILD_VERSION=0710.1200 Scripts/build-app.sh
 Scripts/install-app.sh
 ```
 
-The install script builds a fresh local app bundle, copies it to `~/Applications/MaxxBar.app`, signs it ad hoc, and recreates the Desktop shortcut so it points at the local install instead of an iCloud-hosted build artifact from another laptop.
+The install script builds a fresh release (optimized) app bundle, copies it to `~/Applications/MaxxBar.app`, signs it ad hoc, and recreates the Desktop shortcut so it points at the local install instead of an iCloud-hosted build artifact from another laptop.
 
 ## Useful Verification Commands
 
@@ -63,11 +75,23 @@ The install script builds a fresh local app bundle, copies it to `~/Applications
 swift run MaxxBar -- --sample
 swift run MaxxBar -- --render-popover Artifacts/screenshot-llm.png runway
 swift run MaxxBar -- --render-popover Artifacts/screenshot-insights.png insights
+swift run MaxxBar -- --render-popover Artifacts/screenshot-clipboard.png clipboard
 swift run MaxxBar -- --render-popover Artifacts/screenshot-memory.png memory
 swift run MaxxBar -- --write-ai-report
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popout-action
 ```
+
+## Tests
+
+The tests are small programs compiled with `swiftc`:
+
+```sh
+Scripts/test-claude-polling.sh
+Scripts/test-claude-credentials.sh
+```
+
+On a Mac where the default SDK does not match the toolchain, prefix commands with `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`.
 
 ## Data And Privacy
 
@@ -83,21 +107,34 @@ This ChatGPT usage endpoint is undocumented and is not a stable, officially supp
 
 MaxxBar discovers local Claude Code and Claude Desktop/Cowork transcripts under `~/.claude/projects` and Claude's local-agent session directory. It reads session metadata and the token-usage fields Claude already stores locally: provider, title, project, model, timestamps, input, cache creation/read, and output totals. Prompt previews are limited to the locally stored first user message; MaxxBar does not upload transcript content.
 
-The Insights account label comes from Claude’s local `~/.claude.json` profile metadata (email, display name, organization, and seat tier). Codex account email and plan come from the live usage response described above. These labels remain inside MaxxBar’s local UI and reports.
+The Insights account label comes from Claude’s local `~/.claude.json` profile metadata (email, display name, organization, and rate limit or seat tier). The file is parsed once per change. Codex account email and plan come from the live usage response described above. These labels remain inside MaxxBar’s local UI and reports.
 
-For live five-hour and weekly Claude runway, MaxxBar uses the existing Claude Code OAuth credential from `~/.claude/.credentials.json` or the `Claude Code-credentials` macOS Keychain item and sends it only to `https://api.anthropic.com/api/oauth/usage`. The token is not copied into MaxxBar data or reports. This endpoint is used by Claude Code but is not a stable public API. Claude Desktop/Cowork authentication alone may not expose a Claude Code OAuth credential; in that state MaxxBar still captures local Claude sessions and shows a provider-status note until Claude Code is signed in.
+For live five-hour and weekly Claude runway, MaxxBar uses the existing Claude Code OAuth credential from `~/.claude/.credentials.json` or the `Claude Code-credentials` macOS Keychain item and sends it only to `https://api.anthropic.com/api/oauth/usage`. The token is not copied into MaxxBar data or reports. It is kept in memory until its own expiry, or until Claude rejects it, so the Keychain is not read on every refresh. This endpoint is used by Claude Code but is not a stable public API. Claude Desktop/Cowork authentication alone may not expose a Claude Code OAuth credential; in that state MaxxBar still captures local Claude sessions and shows a provider-status note until Claude Code is signed in.
+
+Claude Code keep-alive: when Claude Code's stored access token has expired (or Claude rejects it), MaxxBar runs one tiny `claude -p "ok" --model haiku` request from an empty temporary folder, with no tools, MCP servers, slash commands, settings or saved session, and a 60-second limit. Claude Code refreshes and saves its own sign-in as part of that request; MaxxBar never writes the Keychain and never runs `claude auth login`. MaxxBar then checks that the Keychain holds a complete credential with a later expiry and reads usage right away. A failed attempt is retried once after 10 minutes; after that the card says to open `claude` or run `claude auth login`, and nothing runs again until the credential changes. Cost: one Haiku request roughly every 8 hours. Turn it off with `defaults write com.hector.MaxxBar ClaudeKeepAlive -bool false`. Each attempt is logged (times, exit code, expiry times; never tokens or CLI output) to `~/Library/Application Support/MaxxBar/claude-keepalive.log`. Without a usable token, MaxxBar keeps showing the last usage it read, marked with its check time, until those windows reset.
+
+For live Claude runway without extra network requests, run `Scripts/install-claude-statusline-tap.sh` once. It points Claude Code's status line at a small tap that saves the `rate_limits` Claude Code already receives (5h and weekly usage) to `~/Library/Application Support/MaxxBar/claude-statusline.json`, then runs your previous status line command so its output is unchanged. MaxxBar prefers a capture from the last 30 minutes; while one exists it asks the usage endpoint at most hourly, only for the Opus and Sonnet weekly windows. Undo with `Scripts/install-claude-statusline-tap.sh --uninstall`.
+
+Otherwise, Claude usage refreshes from the endpoint at most every fifteen minutes. HTTP 429 responses trigger an increasing cooldown (five minutes to one hour), honoring longer `Retry-After` delays. The last successful usage response and cooldown are saved locally across restarts, with the Claude account ID (or a credential fingerprint) but no OAuth token. The cooldown survives Claude Code's token refreshes. Cached readings show their check time; windows whose reset has passed are omitted, and readings older than 24 hours are discarded.
 
 Local files are stored under:
 
 ```text
+~/Library/Application Support/MaxxBar/claude-auth-retry.json
+~/Library/Application Support/MaxxBar/claude-usage-cache.json
 ~/Library/Application Support/MaxxBar/llm-quota-history.json
 ~/Library/Application Support/MaxxBar/ai-activity.jsonl
 ~/Library/Application Support/MaxxBar/ai-transfers.jsonl
+~/Library/Application Support/MaxxBar/clipboard-metadata.jsonl
+~/Library/Application Support/MaxxBar/clipboard-images/
+~/Library/Application Support/MaxxBar/llm-5h-usage-windows.jsonl
 ~/Library/Application Support/MaxxBar/maxxbar-hub.html
 ```
 
-The AI logs are local-only metadata. Copy/paste events include app/site/title context and a static `no_clipboard_content` privacy marker, never clipboard contents. MaxxBar does not store OCR output, typed text, or cloud uploads.
+The AI and clipboard logs are local-only metadata. Since the 10 November energy pass, copies are recorded from Cmd+C only; the pasteboard poller that also caught menu, Copy button, and screenshot copies is off. The 5h usage log appends a line only when the window's numbers change. When a clipboard write contains an image, MaxxBar saves a full-size local PNG plus a small thumbnail for up to 24 hours, capped at 100 images and 250 MB; clicking the thumbnail opens the saved PNG. It does not store text or other non-image clipboard payloads. On launch, it records an origin-unknown metadata baseline so “Current clipboard” remains distinct from historical writes.
+
+Paste attempts currently mean observed Cmd+V. macOS does not provide a general notification when another app reads the pasteboard, so right-click and menu-driven pastes cannot always be counted or attributed. A displayed output flow requires an observed clipboard write followed by a paste within 15 minutes; Claude-to-Claude and Codex-to-Codex pairs are excluded while Claude↔Codex and AI-to-other-app flows remain. MaxxBar does not store text clipboard contents, OCR output, typed text, or cloud uploads; temporary copied-image files remain local.
 
 ## Known Limits
 
-Some low-level hardware data requires privileged or private telemetry that this app does not currently collect directly, including CPU/GPU die temperatures, fan RPM, GPU frequency, SSD thermals, and per-process network attribution. The app marks unavailable values clearly rather than inventing data. A native helper target remains available for privileged sensor collection work.
+CPU/GPU temperatures and fan RPM are read locally through a read-only AppleSMC connection when available, with the existing native-helper cache and public battery telemetry as additional sources. Direct CPU temperature reports the warmest supported CPU sensor. Temperature labels respect the existing temperature-unit preference. Sensor keys vary by Mac; unavailable readings display a dash. GPU frequency, SSD thermals, and per-process network attribution remain limited. A native helper target remains available for privileged sensor collection work.

@@ -12,7 +12,8 @@ DESKTOP_LINK="$HOME/Desktop/$APP_NAME.app"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR" "$INSTALL_DIR"
 
-APP_DIR="$STAGING_APP" "$ROOT_DIR/Scripts/build-app.sh"
+# The installed app is an optimized build; set CONFIGURATION=debug to install a debug build.
+APP_DIR="$STAGING_APP" CONFIGURATION="${CONFIGURATION:-release}" "$ROOT_DIR/Scripts/build-app.sh"
 
 rm -rf "$INSTALL_APP"
 ditto "$STAGING_APP" "$INSTALL_APP"

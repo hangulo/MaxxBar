@@ -2,6 +2,10 @@
 
 The app uses its own native helper and public system telemetry for sensor collection.
 
+## Direct readings (2026-10-15)
+
+The Memory tab now has a compact Sensors card below Swap. `LocalSMCSensors.swift` opens a read-only AppleSMC connection for fan RPM and supported CPU/GPU temperature keys, without a daemon or privileged install. Verified on the local Mac with two live fan readings and CPU/GPU temperatures. The reader accepts only finite, plausible values; unavailable keys return nil. CPU uses the warmest available supported CPU sensor; fan speeds remain separate. Existing fresh helper-cache values take precedence. Older collector notes below describe the previous helper-only path.
+
 ## Target Data
 
 Top-priority values:
