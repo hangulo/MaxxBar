@@ -300,9 +300,10 @@ private func quotaPaceText(_ values: [LLMQuotaValue], since start: Int) -> Strin
     let hoursLeft = Double(last.remainingPercent) / (perDay / 24)
     let emptyAt = last.sampledAt.addingTimeInterval(hoursLeft * 3_600)
     if let resetAt = last.resetAt, emptyAt >= resetAt {
-        return "Pace \(rate) since \(quotaDayTime(first.sampledAt)). Lasts until the reset."
+        // Times already end in "a.m." or "p.m.", so the sentence ends there without another period.
+        return "Pace \(rate) since \(quotaDayTime(first.sampledAt)); lasts until the reset"
     }
-    return "Pace \(rate) since \(quotaDayTime(first.sampledAt)). Runs out around \(quotaDayTime(emptyAt))."
+    return "Pace \(rate) since \(quotaDayTime(first.sampledAt)); runs out around \(quotaDayTime(emptyAt))"
 }
 
 private func appendDrawdownMilestone(_ milestone: LLMQuotaMilestone, to milestones: inout [LLMQuotaMilestone]) {
