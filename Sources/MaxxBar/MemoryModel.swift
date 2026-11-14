@@ -2739,8 +2739,16 @@ enum AIUsageReader {
     static func recordAndRead(memory: MemorySnapshot, cpuGPU: CPUGPUSnapshot, llmUsage: LLMUsageSnapshot) -> AIUsageSnapshot {
         let context = activeContext()
         let record = record(from: context, memory: memory, cpuGPU: cpuGPU, llmUsage: llmUsage)
+        // A locked Mac reports loginwindow as the front app; those samples are noise, not activity.
+        guard !isLockScreen(record) else {
+            return snapshot(current: nil, error: nil)
+        }
         appendActivityRecord(record)
         return snapshot(current: record, error: nil)
+    }
+
+    private static func isLockScreen(_ record: AIActivityRecord) -> Bool {
+        record.bundleID == "com.apple.loginwindow" || record.app == "loginwindow"
     }
 
     static func currentClipboardDebugContext() -> ClipboardDebugContext {
@@ -3318,7 +3326,7 @@ enum AIUsageReader {
         }
         let now = Date()
         let retentionCutoff = now.addingTimeInterval(-Double(recordCacheRetentionDays) * 86_400)
-        let retainedRecords = (activityRecordCache ?? []).filter { $0.ts >= retentionCutoff }
+        let retainedRecords = (activityRecordCache ?? []).filter { $0.ts >= retentionCutoff && !isLockScreen($0) }
         activityRecordCache = retainedRecords
         let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
         let records = retainedRecords.filter { $0.ts >= cutoff }
@@ -3415,35 +3423,49 @@ enum AIUsageReader {
         }
     }
 
+    /// Reads the file backwards in 1 MB chunks and stops at the first record older than the cutoff,
+    /// so a large log costs only its recent tail instead of a full read at every launch.
     private static func readJSONLines<T: Decodable>(_ type: T.Type, from url: URL?, days: Int) -> [T] {
-        guard let url,
-              let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else {
+        guard let url, let handle = try? FileHandle(forReadingFrom: url) else {
             return []
         }
+        defer { try? handle.close() }
         let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         var records: [T] = []
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
-            guard let lineData = String(line).data(using: .utf8),
-                  let record = try? decoder.decode(T.self, from: lineData) else {
-                continue
+        var offset = (try? handle.seekToEnd()) ?? 0
+        var carry = Data()
+        let chunkSize: UInt64 = 1 << 20
+        reading: while offset > 0 {
+            let start = offset >= chunkSize ? offset - chunkSize : 0
+            guard (try? handle.seek(toOffset: start)) != nil,
+                  let chunk = try? handle.read(upToCount: Int(offset - start)) else { break }
+            offset = start
+            var buffer = chunk
+            buffer.append(carry)
+            var lines = buffer.split(separator: 0x0A, omittingEmptySubsequences: true).map { Data($0) }
+            // The first piece may be a partial line; keep it for the next chunk unless this is the file start.
+            carry = offset > 0 && !lines.isEmpty ? lines.removeFirst() : Data()
+            for lineData in lines.reversed() {
+                guard let record = try? decoder.decode(T.self, from: lineData) else {
+                    continue
+                }
+                let timestamp: Date?
+                if let activity = record as? AIActivityRecord {
+                    timestamp = activity.ts
+                } else if let moment = record as? MaxxMomentRecord {
+                    timestamp = moment.ts
+                } else if let transfer = record as? AITransferRecord {
+                    timestamp = transfer.ts
+                } else {
+                    timestamp = nil
+                }
+                if let timestamp, timestamp < cutoff {
+                    break reading
+                }
+                records.append(record)
             }
-            let timestamp: Date?
-            if let activity = record as? AIActivityRecord {
-                timestamp = activity.ts
-            } else if let moment = record as? MaxxMomentRecord {
-                timestamp = moment.ts
-            } else if let transfer = record as? AITransferRecord {
-                timestamp = transfer.ts
-            } else {
-                timestamp = nil
-            }
-            if let timestamp, timestamp < cutoff {
-                break
-            }
-            records.append(record)
         }
         return records.reversed()
     }

@@ -169,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var detachedWindow: NSWindow?
     private var timer: Timer?
     private var lastVisibleProviders = ProviderVisibility.visibleProviders
+    private var pauseReasons = Set<String>()
     private let clipboardFlowMonitor = ClipboardFlowMonitor()
     private let clipboardMetadataMonitor = ClipboardMetadataMonitor()
     private var currentPopoverPanel: StatsPanel = .runway
@@ -230,6 +231,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         refreshStatusInBackground()
         refreshLLMUsageInBackground(force: true)
+        startRefreshTimer()
+        observeLockAndSleep()
+
+        if shouldVerifyPopoverAction {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.verifyPopoverAction()
+            }
+        }
+
+        if shouldVerifyPopOutAction {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.verifyPopOutAction()
+            }
+        }
+    }
+
+    private func startRefreshTimer() {
+        timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -244,18 +263,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         timer?.tolerance = 5
+    }
 
-        if shouldVerifyPopoverAction {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.verifyPopoverAction()
+    /// Nothing is sampled or polled while the screen is locked, the display sleeps, or the Mac sleeps.
+    /// One refresh runs on return so the menu bar is current right away.
+    private func observeLockAndSleep() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        let distributed = DistributedNotificationCenter.default()
+        let pauses: [(NotificationCenter, Notification.Name)] = [
+            (workspace, NSWorkspace.willSleepNotification),
+            (workspace, NSWorkspace.screensDidSleepNotification),
+            (distributed, Notification.Name("com.apple.screenIsLocked"))
+        ]
+        let resumes: [(NotificationCenter, Notification.Name)] = [
+            (workspace, NSWorkspace.didWakeNotification),
+            (workspace, NSWorkspace.screensDidWakeNotification),
+            (distributed, Notification.Name("com.apple.screenIsUnlocked"))
+        ]
+        for (center, name) in pauses {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.pauseRefreshing(name) }
             }
         }
-
-        if shouldVerifyPopOutAction {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.verifyPopOutAction()
+        for (center, name) in resumes {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.resumeRefreshing(name) }
             }
         }
+    }
+
+    private func pauseRefreshing(_ reason: Notification.Name) {
+        pauseReasons.insert(reason.rawValue)
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func resumeRefreshing(_ reason: Notification.Name) {
+        switch reason {
+        case NSWorkspace.didWakeNotification: pauseReasons.remove(NSWorkspace.willSleepNotification.rawValue)
+        case NSWorkspace.screensDidWakeNotification: pauseReasons.remove(NSWorkspace.screensDidSleepNotification.rawValue)
+        default: pauseReasons.remove("com.apple.screenIsLocked")
+        }
+        // Waking the display at the lock screen is not a return: wait for the unlock.
+        guard pauseReasons.isEmpty, timer == nil else { return }
+        startRefreshTimer()
+        refreshStatusInBackground()
+        refreshLLMUsageInBackground(force: true, refreshLocal: false)
     }
 
     private func startClipboardFlowMonitor() {
