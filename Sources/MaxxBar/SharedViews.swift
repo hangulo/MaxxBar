@@ -70,7 +70,7 @@ private func amps(_ value: Double?) -> String {
     return String(format: "%.1f A", value)
 }
 
-private func watts(_ value: Double?) -> String {
+func watts(_ value: Double?) -> String {
     guard let value else { return "-" }
     return String(format: "%.1f W", value)
 }

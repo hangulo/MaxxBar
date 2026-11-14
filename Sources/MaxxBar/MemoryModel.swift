@@ -110,9 +110,19 @@ final class MemoryModel: ObservableObject {
         sampleLLMQuotaIfNeeded(force: true)
     }
 
+    /// True while the CPU/GPU tab is on screen; process and GPU detail is only collected then.
+    private var isPerformanceVisible = false
+
+    func setPerformanceVisible(_ visible: Bool) {
+        guard visible != isPerformanceVisible else { return }
+        isPerformanceVisible = visible
+        if visible { refreshInBackground() }
+    }
+
     func refreshInBackground(completion: (@MainActor @Sendable () -> Void)? = nil) {
         guard !isRefreshing else { return }
         isRefreshing = true
+        let includeDetail = isPerformanceVisible
 
         let previousPageIns = previousCumulativePageIns
         let previousPageOuts = previousCumulativePageOuts
@@ -124,7 +134,8 @@ final class MemoryModel: ObservableObject {
                 previousPageIns: previousPageIns,
                 previousPageOuts: previousPageOuts,
                 previousCPUInfo: previousCPUInfo,
-                llmUsage: currentLLMUsage
+                llmUsage: currentLLMUsage,
+                includeDetail: includeDetail
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -301,14 +312,15 @@ final class MemoryModel: ObservableObject {
         previousPageIns: UInt64?,
         previousPageOuts: UInt64?,
         previousCPUInfo: CPUReader.CPULoadInfo?,
-        llmUsage: LLMUsageSnapshot
+        llmUsage: LLMUsageSnapshot,
+        includeDetail: Bool
     ) -> RefreshResult {
         let stats = MemoryReader.read()
         var displayStats = stats
         displayStats.pageIns = deltaValue(from: previousPageIns, to: stats.cumulativePageIns)
         displayStats.pageOuts = deltaValue(from: previousPageOuts, to: stats.cumulativePageOuts)
         let sensors = SensorReader.read()
-        let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
+        let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors, includeDetail: includeDetail)
         let aiUsage = AIUsageReader.recordAndRead(
             memory: displayStats,
             cpuGPU: cpuResult.snapshot,

@@ -105,14 +105,22 @@ struct CPUGPUPanelView: View {
     @State private var processScale = CPUProcessScale.systemShare
 
     var body: some View {
-        VStack(spacing: 7) {
-            CPUHistoryCard(snapshot: snapshot)
-            CoreRingsView(snapshot: snapshot)
-            CPUProcessesView(processes: snapshot.processes, scale: $processScale)
-            SensorSummaryRingsView(snapshot: sensors)
-            MetricCard(title: "TEMPERATURE", rows: temperatureRows)
-            MetricCard(title: "UPTIME", rows: [MetricRow(label: "", value: snapshot.uptime)])
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 7) {
+                ThermalStateCard(sensors: sensors)
+                SensorSummaryRingsView(snapshot: sensors)
+                CPUHistoryCard(snapshot: snapshot)
+                CoreRingsView(snapshot: snapshot)
+                GPUCard(snapshot: snapshot)
+                CPUProcessesView(processes: snapshot.processes, scale: $processScale)
+                MetricCard(title: "TEMPERATURE", rows: temperatureRows + fanRows)
+                MetricCard(title: "UPTIME", rows: [MetricRow(label: "", value: snapshot.uptime)])
+            }
         }
+    }
+
+    private var fanRows: [MetricRow] {
+        sensors.fanReadings.map { MetricRow(label: $0.label, value: "\($0.rpm.formatted()) rpm") }
     }
 
     private var temperatureRows: [MetricRow] {
@@ -122,6 +130,66 @@ struct CPUGPUPanelView: View {
 
         return sensors.temperatureReadings.map { reading in
             MetricRow(label: reading.label, value: temperature(reading.celsius))
+        }
+    }
+}
+
+/// macOS's own throttling signal, plus power draw: the first thing to check when a local model slows down.
+struct ThermalStateCard: View {
+    let sensors: SensorSnapshot
+
+    var body: some View {
+        let state = ProcessInfo.processInfo.thermalState
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("THERMAL")
+                    .sectionTitle()
+                Spacer()
+                Text(label(state))
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(color(state))
+            }
+            Text(detail(state))
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.white.opacity(0.6))
+            if sensors.power != nil || sensors.batteryTemperature != nil {
+                HStack {
+                    Text("Power draw")
+                    Spacer()
+                    Text(watts(sensors.power)).monospacedDigit()
+                }
+                .font(.system(size: 12, weight: .regular))
+            }
+        }
+        .sectionStyle()
+        .help("Thermal state comes from macOS. Fair means fans are working; Serious and Critical mean the Mac is slowing itself down to cool off.")
+    }
+
+    private func label(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "Normal"
+        case .fair: return "Warm"
+        case .serious: return "Throttling"
+        case .critical: return "Critical"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func detail(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "Running at full speed."
+        case .fair: return "Fans are working; no slowdown yet."
+        case .serious: return "macOS is slowing the CPU and GPU to cool down."
+        case .critical: return "Heavy throttling. Expect much slower local models."
+        @unknown default: return ""
+        }
+    }
+
+    private func color(_ state: ProcessInfo.ThermalState) -> Color {
+        switch state {
+        case .nominal: return .white
+        case .fair: return .compressedYellow
+        default: return .wiredPink
         }
     }
 }
@@ -565,7 +633,7 @@ struct GPUCard: View {
                 Text("GPU")
                     .sectionTitle()
                 Spacer()
-                Text(snapshot.fps.map { "\($0) FPS" } ?? "Requires helper")
+                Text(snapshot.fps.map { "\($0) FPS" } ?? (snapshot.gpuPercent.map { "\($0)% busy" } ?? "Unavailable"))
                     .font(.system(size: 13.5, weight: .semibold))
             }
             HStack {
