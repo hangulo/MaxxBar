@@ -408,6 +408,14 @@ struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     func weeklyResetAt(for provider: String) -> Date? {
         provider == "Claude" ? claudeWeeklyResetAt : codexWeeklyResetAt
     }
+
+    func fiveHourRemainingPercent(for provider: String) -> Int? {
+        provider == "Claude" ? claudeFiveHourRemainingPercent : primaryRemainingPercent
+    }
+
+    func fiveHourResetAt(for provider: String) -> Date? {
+        provider == "Claude" ? claudeFiveHourResetAt : codexFiveHourResetAt
+    }
 }
 
 struct LLMQuotaActivitySignature: Equatable {

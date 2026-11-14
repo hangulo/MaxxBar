@@ -148,6 +148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        LaunchAtLogin.applyDefaultIfNeeded()
+        LogRetention.runIfDue()
         model.seedInitialMemorySnapshot()
         startClipboardFlowMonitor()
 
@@ -213,11 +215,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 15 seconds while the popover or window is showing live stats; otherwise once a minute, which is all
+    /// the menu bar countdown and the 60 second activity sample need.
+    private var desiredRefreshInterval: TimeInterval { isDetailedUIVisible ? 15 : 60 }
+
     private func startRefreshTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        let interval = desiredRefreshInterval
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                if self.desiredRefreshInterval != interval {
+                    self.startRefreshTimer()
+                }
+                self.updateStatusTitle()
                 self.startClipboardFlowMonitor()
                 if self.isDetailedUIVisible {
                     self.refreshInBackground()
@@ -330,6 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             currentPopoverPanel = selectedPanel
             popover.contentViewController = makePopoverContent(selectedPanel: selectedPanel)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            if timer != nil, pauseReasons.isEmpty { startRefreshTimer() }
             refreshInBackground()
             if selectedPanel == .llmUsage || selectedPanel == .runway {
                 refreshLLMUsageInBackground(force: true)
@@ -373,18 +385,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusTitleView?.setLines(statusTextLines())
             return
         }
-        let limit = model.llmUsage.limits.first { $0.name == names[0] }
+        let provider = names[0]
+        let limit = model.llmUsage.limits.first { $0.name == provider }
         let stale = limit?.cachedAt == nil ? "" : "~"
-        func column(_ label: String, _ window: LLMUsageWindow?) -> (top: String, bottom: String, percent: Int?) {
+        let plan = provider == "Claude" ? model.llmUsage.claudePlanType : model.llmUsage.planType
+        // The bottom line switches from time until reset to time until empty only when, at the current
+        // burn rate, the window runs out before it resets.
+        func column(
+            _ label: String, _ window: LLMUsageWindow?, weekly: Bool
+        ) -> (top: String, bottom: String, percent: Int?, runningOut: Bool) {
             let percent = window?.remainingPercent
-            return ("\(label) \(percent.map { "\($0)%" } ?? "--")\(stale)", timeLeftLabel(window?.resetAt), percent)
+            let top = "\(label) \(percent.map { "\($0)%" } ?? "--")\(stale)"
+            guard let window, let emptyAt = forecastEmpty(provider: provider, window: window, plan: plan, weekly: weekly) else {
+                return (top, timeLeftLabel(window?.resetAt), percent, false)
+            }
+            return (top, weekly ? emptyDayLabel(emptyAt) : "out \(shortDuration(until: emptyAt))", percent, true)
         }
-        let columns = [column("5H", limit?.shortWindow), column("WK", limit?.weeklyWindow)]
+        let columns = [
+            column("5H", limit?.shortWindow, weekly: false),
+            column("WK", limit?.weeklyWindow, weekly: true)
+        ]
         statusTitleView?.setColumns(
             top: columns.map(\.top),
             bottom: columns.map(\.bottom),
-            percents: columns.map(\.percent)
+            percents: columns.map(\.percent),
+            runningOut: columns.map(\.runningOut)
         )
+    }
+
+    private func forecastEmpty(provider: String, window: LLMUsageWindow, plan: String?, weekly: Bool) -> Date? {
+        let history = model.llmQuotaHistory.suffix(weekly ? 1_000 : 120).compactMap { sample -> RunwayForecast.Reading? in
+            let percent = weekly ? sample.weeklyRemainingPercent(for: provider) : sample.fiveHourRemainingPercent(for: provider)
+            guard let percent else { return nil }
+            return RunwayForecast.Reading(
+                at: sample.sampledAt,
+                remainingPercent: percent,
+                resetAt: weekly ? sample.weeklyResetAt(for: provider) : sample.fiveHourResetAt(for: provider),
+                plan: sample.plan(for: provider)
+            )
+        }
+        let current = RunwayForecast.Reading(
+            at: model.llmUsage.lastUpdated ?? Date(), remainingPercent: window.remainingPercent,
+            resetAt: window.resetAt, plan: plan
+        )
+        let readings = history.filter { $0.at < current.at } + [current]
+        return RunwayForecast.emptyAt(readings, minimumSpan: weekly ? 6 * 3_600 : 15 * 60)
+    }
+
+    private func shortDuration(until date: Date) -> String {
+        let minutes = max(Int(date.timeIntervalSinceNow / 60), 0)
+        return minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h\(minutes % 60 == 0 ? "" : String(minutes % 60))"
+    }
+
+    /// "Thu 2p": the day and hour the week runs out at this pace.
+    private func emptyDayLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE"
+        let hour = Calendar.current.component(.hour, from: date)
+        let suffix = hour < 12 ? "a" : "p"
+        return "\(formatter.string(from: date)) \(hour % 12 == 0 ? 12 : hour % 12)\(suffix)"
     }
 
     private func timeLeftLabel(_ resetAt: Date?) -> String {
@@ -539,6 +598,7 @@ final class StatusTitleView: NSView {
     override var isFlipped: Bool { true }
 
     private var columnPercents: [Int?] = []
+    private var columnsRunningOut: [Bool] = []
 
     func setLines(_ lines: (top: String, bottom: String)) {
         topItems = lines.top.split(separator: " ").map(String.init)
@@ -549,10 +609,11 @@ final class StatusTitleView: NSView {
         needsDisplay = true
     }
 
-    func setColumns(top: [String], bottom: [String], percents: [Int?]) {
+    func setColumns(top: [String], bottom: [String], percents: [Int?], runningOut: [Bool] = []) {
         topItems = top
         bottomItems = bottom
         columnPercents = percents
+        columnsRunningOut = runningOut
         needsDisplay = true
     }
 
@@ -604,13 +665,14 @@ final class StatusTitleView: NSView {
     }
 
     private func warningColorForColumn(at index: Int) -> NSColor? {
+        let runningOut = columnsRunningOut.indices.contains(index) && columnsRunningOut[index]
         guard columnPercents.indices.contains(index), let percent = columnPercents[index] else {
-            return nil
+            return runningOut ? amberUsageColor : nil
         }
 
         if percent < 15 {
             return lowUsageColor
-        } else if percent < 25 {
+        } else if percent < 25 || runningOut {
             return amberUsageColor
         }
 
