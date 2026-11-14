@@ -4,50 +4,6 @@ import Foundation
 import MachO
 import CryptoKit
 
-extension NetworkSnapshot {
-    static let empty = NetworkSnapshot(
-        location: "Automatic",
-        interfaceName: nil,
-        interfaceDisplayName: "Not Connected",
-        publicIP: nil,
-        ipAddresses: [],
-        ethernetConnected: false,
-        pingTarget: "example.com",
-        pingMilliseconds: nil,
-        uploadBytesPerSecond: 0,
-        downloadBytesPerSecond: 0,
-        history: Array(repeating: NetworkSample(uploadBytesPerSecond: 0, downloadBytesPerSecond: 0), count: 48),
-        processes: []
-    )
-
-    static var demo: NetworkSnapshot {
-        var samples: [NetworkSample] = []
-        for index in 0..<48 {
-            let upload = UInt64(80_000 + (index * 37 % 140) * 3_000)
-            let download = UInt64(70_000 + (index * 53 % 160) * 3_200)
-            samples.append(NetworkSample(uploadBytesPerSecond: upload, downloadBytesPerSecond: download))
-        }
-
-        return NetworkSnapshot(
-            location: "Automatic",
-            interfaceName: "en0",
-            interfaceDisplayName: "AirPort Network",
-            publicIP: "11.22.33.44",
-            ipAddresses: ["192.168.6.36"],
-            ethernetConnected: false,
-            pingTarget: "example.com",
-            pingMilliseconds: 22,
-            uploadBytesPerSecond: 467_000,
-            downloadBytesPerSecond: 496_000,
-            history: samples,
-            processes: [
-                NetworkProcess(name: "macOS", path: "/System/Library/CoreServices/Finder.app", appPath: "/System/Library/CoreServices/Finder.app", uploadBytesPerSecond: 8_800_000, downloadBytesPerSecond: 8_800_000),
-                NetworkProcess(name: "Safari", path: "/Applications/Safari.app", appPath: "/Applications/Safari.app", uploadBytesPerSecond: 120_000, downloadBytesPerSecond: 540_000)
-            ]
-        )
-    }
-}
-
 extension Array where Element == LLMQuotaHistorySample {
     static let demo: [LLMQuotaHistorySample] = [
         LLMQuotaHistorySample(sampledAt: Date().addingTimeInterval(-6_000 * 80), primaryRemainingPercent: 99, weeklyRemainingPercent: 84, planType: "plus", claudeWeeklyRemainingPercent: 90),
@@ -233,9 +189,6 @@ extension AIUsageSnapshot {
         topCopiedFrom: [],
         topPastedInto: [],
         transferFlows: [],
-        momentsToday: 0,
-        lastMomentAt: nil,
-        recentMoments: [],
         lastError: nil
     )
 
@@ -284,26 +237,6 @@ extension AIUsageSnapshot {
         transferFlows: [
             AITransferFlow(source: "Codex client", destination: "Xcode", useCase: "Coding", count: 4, confidence: "High"),
             AITransferFlow(source: "ChatGPT web", destination: "Google Docs", useCase: "Docs / writing", count: 2, confidence: "High")
-        ],
-        momentsToday: 2,
-        lastMomentAt: Date().addingTimeInterval(-1_800),
-        recentMoments: [
-            MaxxMomentSummary(
-                ts: Date().addingTimeInterval(-1_800),
-                sentiment: "Frustration",
-                app: "Codex",
-                surface: "Codex web",
-                note: "Missed local app context",
-                screenshotPath: nil
-            ),
-            MaxxMomentSummary(
-                ts: Date().addingTimeInterval(-7_200),
-                sentiment: "Delight",
-                app: "ChatGPT",
-                surface: "ChatGPT web",
-                note: "Found the right framing quickly",
-                screenshotPath: nil
-            )
         ],
         lastError: nil
     )

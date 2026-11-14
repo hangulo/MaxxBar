@@ -37,27 +37,6 @@ enum AIUsageReader {
         var claudeWeeklyRemainingPercent: Int? = nil
     }
 
-    struct MaxxMomentRecord: Codable {
-        var ts: Date
-        var app: String
-        var bundleID: String
-        var site: String?
-        var tool: String?
-        var surface: String?
-        var useCase: String
-        var sentiment: String?
-        var screenshotPath: String?
-        var memoryPressurePercent: Int
-        var memoryUsedPercent: Int
-        var cpuUserPercent: Int
-        var cpuSystemPercent: Int
-        var codexFiveHourRemainingPercent: Int?
-        var codexWeeklyRemainingPercent: Int?
-        var note: String
-        var claudeFiveHourRemainingPercent: Int? = nil
-        var claudeWeeklyRemainingPercent: Int? = nil
-    }
-
     struct AITransferRecord: Codable {
         var eventType: String
         var ts: Date
@@ -84,7 +63,6 @@ enum AIUsageReader {
     nonisolated(unsafe) private static var lastTransferSignature: String?
     nonisolated(unsafe) private static var lastTransferAt: Date?
     nonisolated(unsafe) private static var activityRecordCache: [AIActivityRecord]?
-    nonisolated(unsafe) private static var momentRecordCache: [MaxxMomentRecord]?
     nonisolated(unsafe) private static var transferRecordCache: [AITransferRecord]?
     private static let transferLock = NSLock()
     private static let recordCacheLock = NSLock()
@@ -104,23 +82,6 @@ enum AIUsageReader {
 
     private static func isLockScreen(_ record: AIActivityRecord) -> Bool {
         record.bundleID == "com.apple.loginwindow" || record.app == "loginwindow"
-    }
-
-    static func currentClipboardDebugContext() -> ClipboardDebugContext {
-        let context = activeContext()
-        let provider = aiProviderIdentity(
-            tool: context.tool,
-            surface: context.surface,
-            bundleID: context.bundleID
-        ).map { $0 == "codex" ? "Codex" : "Claude" }
-        return ClipboardDebugContext(
-            app: context.app,
-            bundleID: context.bundleID,
-            site: context.site,
-            tool: context.tool,
-            surface: context.surface,
-            provider: provider
-        )
     }
 
     static func recordClipboardEvent(_ eventType: String) -> AIUsageSnapshot {
@@ -174,51 +135,13 @@ enum AIUsageReader {
         return snapshot(current: recentActivityRecords(days: 7).max { $0.ts < $1.ts }, error: nil)
     }
 
-    static func captureMoment(
-        memory: MemorySnapshot,
-        cpuGPU: CPUGPUSnapshot,
-        llmUsage: LLMUsageSnapshot,
-        sentiment: String,
-        note: String,
-        includeScreenshot: Bool
-    ) -> AIUsageSnapshot {
-        let context = activeContext()
-        let record = record(from: context, memory: memory, cpuGPU: cpuGPU, llmUsage: llmUsage)
-        let cleanNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        let screenshotPath = includeScreenshot ? captureScreenshot(at: record.ts) : nil
-        let moment = MaxxMomentRecord(
-            ts: record.ts,
-            app: record.app,
-            bundleID: record.bundleID,
-            site: record.site,
-            tool: record.tool,
-            surface: record.surface,
-            useCase: record.useCase,
-            sentiment: sentiment,
-            screenshotPath: screenshotPath,
-            memoryPressurePercent: record.memoryPressurePercent,
-            memoryUsedPercent: record.memoryUsedPercent,
-            cpuUserPercent: record.cpuUserPercent,
-            cpuSystemPercent: record.cpuSystemPercent,
-            codexFiveHourRemainingPercent: record.codexFiveHourRemainingPercent,
-            codexWeeklyRemainingPercent: record.codexWeeklyRemainingPercent,
-            note: cleanNote.isEmpty ? sentiment : cleanNote,
-            claudeFiveHourRemainingPercent: record.claudeFiveHourRemainingPercent,
-            claudeWeeklyRemainingPercent: record.claudeWeeklyRemainingPercent
-        )
-        appendActivityRecord(record)
-        appendMomentRecord(moment)
-        return snapshot(current: record, error: nil)
-    }
-
     static func writeReport() -> URL? {
         guard let url = reportURL else { return nil }
         let records = recentActivityRecords(days: 7)
-        let moments = recentMomentRecords(days: 7)
         let transfers = recentTransferRecords(days: 7)
         let llmUsage = LLMUsageReader.read()
         let quotaHistory = recentQuotaHistory()
-        let html = reportHTML(records: records, moments: moments, transfers: transfers, llmUsage: llmUsage, quotaHistory: quotaHistory)
+        let html = reportHTML(records: records, transfers: transfers, llmUsage: llmUsage, quotaHistory: quotaHistory)
 
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -322,7 +245,6 @@ enum AIUsageReader {
 
     private static func snapshot(current: AIActivityRecord?, error: String?) -> AIUsageSnapshot {
         let records = recentActivityRecords(days: 7)
-        let moments = recentMomentRecords(days: 7)
         let transfers = recentTransferRecords(days: 7)
         let now = Date()
         let startOfDay = Calendar.current.startOfDay(for: now)
@@ -358,21 +280,6 @@ enum AIUsageReader {
             topCopiedFrom: counters(transfers.filter { $0.eventType == "copy" }.map(transferSourceLabel), limit: 4),
             topPastedInto: counters(transfers.filter(isReliablePasteTransfer).map(transferDestinationLabel), limit: 4),
             transferFlows: transferFlows,
-            momentsToday: moments.filter { $0.ts >= startOfDay }.count,
-            lastMomentAt: moments.map(\.ts).max(),
-            recentMoments: moments
-                .sorted { $0.ts > $1.ts }
-                .prefix(3)
-                .map {
-                    MaxxMomentSummary(
-                        ts: $0.ts,
-                        sentiment: $0.sentiment ?? "Frustration",
-                        app: $0.app,
-                        surface: $0.surface ?? $0.tool ?? $0.site,
-                        note: $0.note,
-                        screenshotPath: $0.screenshotPath
-                    )
-                },
             lastError: error,
             providerSummaries: ["Codex", "Claude"].map {
                 providerSummary(
@@ -489,10 +396,6 @@ enum AIUsageReader {
         let url = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : nil
         return (url?.isEmpty == true ? nil : url, title?.isEmpty == true ? nil : title)
-    }
-
-    private static func aiTool(appName: String, url: String?) -> (tool: String?, surface: String?) {
-        AITaxonomy.tool(appName: appName, url: url)
     }
 
     private static func siteLabel(_ url: String) -> String? {
@@ -689,25 +592,6 @@ enum AIUsageReader {
         return records
     }
 
-    private static func recentMomentRecords(days: Int) -> [MaxxMomentRecord] {
-        recordCacheLock.lock()
-        if momentRecordCache == nil {
-            momentRecordCache = readJSONLines(
-                MaxxMomentRecord.self,
-                from: momentsLogURL,
-                days: recordCacheRetentionDays
-            )
-        }
-        let now = Date()
-        let retentionCutoff = now.addingTimeInterval(-Double(recordCacheRetentionDays) * 86_400)
-        let retainedRecords = (momentRecordCache ?? []).filter { $0.ts >= retentionCutoff }
-        momentRecordCache = retainedRecords
-        let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
-        let records = retainedRecords.filter { $0.ts >= cutoff }
-        recordCacheLock.unlock()
-        return records
-    }
-
     private static func recentTransferRecords(days: Int) -> [AITransferRecord] {
         recordCacheLock.lock()
         if transferRecordCache == nil {
@@ -734,13 +618,6 @@ enum AIUsageReader {
         recordCacheLock.unlock()
     }
 
-    private static func appendMomentRecord(_ record: MaxxMomentRecord) {
-        recordCacheLock.lock()
-        append(record, to: momentsLogURL)
-        momentRecordCache?.append(record)
-        recordCacheLock.unlock()
-    }
-
     private static func appendTransferRecord(_ record: AITransferRecord) {
         recordCacheLock.lock()
         append(record, to: transfersLogURL)
@@ -756,26 +633,6 @@ enum AIUsageReader {
         }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         return samples.filter { $0.sampledAt >= cutoff }.sorted { $0.sampledAt < $1.sampledAt }
-    }
-
-    private static func captureScreenshot(at date: Date) -> String? {
-        guard let directory = supportDirectoryURL?.appendingPathComponent("maxx-moment-screenshots") else {
-            return nil
-        }
-
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let filename = "maxx-moment-\(Int(date.timeIntervalSince1970)).png"
-            let url = directory.appendingPathComponent(filename)
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            task.arguments = ["-x", url.path]
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0 && FileManager.default.fileExists(atPath: url.path) ? url.path : nil
-        } catch {
-            return nil
-        }
     }
 
     /// Reads the file backwards in 1 MB chunks and stops at the first record older than the cutoff,
@@ -809,8 +666,6 @@ enum AIUsageReader {
                 let timestamp: Date?
                 if let activity = record as? AIActivityRecord {
                     timestamp = activity.ts
-                } else if let moment = record as? MaxxMomentRecord {
-                    timestamp = moment.ts
                 } else if let transfer = record as? AITransferRecord {
                     timestamp = transfer.ts
                 } else {
@@ -869,10 +724,6 @@ enum AIUsageReader {
 
     static var activityLogURL: URL? {
         supportDirectoryURL?.appendingPathComponent("ai-activity.jsonl")
-    }
-
-    private static var momentsLogURL: URL? {
-        supportDirectoryURL?.appendingPathComponent("maxx-moments.jsonl")
     }
 
     static var transfersLogURL: URL? {

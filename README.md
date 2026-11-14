@@ -20,7 +20,7 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 - Provides an Insights tab with detected provider accounts/plans, today’s time and session share, a seven-day model mix and token distribution, output destinations, copy/paste flow metadata, before/after workflow paths, and recent Codex and Claude session context.
 - Generates a separate MaxxBar Hub with Tracework-aligned navigation for Overview, AI Insights, Runway, and Sessions.
 - Keeps Memory visible with pressure, memory breakdown, top processes, swap, and a compact CPU/GPU temperature and fan RPM card beneath Swap.
-- Includes deeper CPU/GPU, sensor, and network panels for advanced/debug builds.
+- Keeps a deeper CPU/GPU panel with sensor readings in the code (render it with `--render-popover <path> cpu`); it is not in the tab bar yet.
 - Installs a local app bundle and recreates the Desktop shortcut so the launcher points at the latest local build.
 
 ## Popover Tabs
@@ -29,7 +29,7 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 - Insights: models used, token-share distribution, AI usage patterns, output destinations, and AI workflow paths.
 - Memory: pressure, memory mix, top apps/processes, swap, and sensors.
 
-The Clipboard and CPU/GPU tabs still exist in the code but are not in the tab bar.
+The CPU/GPU tab still exists in the code but is not in the tab bar.
 
 ## Tracking Claude Or Codex
 
@@ -75,7 +75,6 @@ The install script builds a fresh release (optimized) app bundle, copies it to `
 swift run MaxxBar -- --sample
 swift run MaxxBar -- --render-popover Artifacts/screenshot-llm.png runway
 swift run MaxxBar -- --render-popover Artifacts/screenshot-insights.png insights
-swift run MaxxBar -- --render-popover Artifacts/screenshot-clipboard.png clipboard
 swift run MaxxBar -- --render-popover Artifacts/screenshot-memory.png memory
 swift run MaxxBar -- --write-ai-report
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
@@ -125,16 +124,14 @@ Local files are stored under:
 ~/Library/Application Support/MaxxBar/llm-quota-history.json
 ~/Library/Application Support/MaxxBar/ai-activity.jsonl
 ~/Library/Application Support/MaxxBar/ai-transfers.jsonl
-~/Library/Application Support/MaxxBar/clipboard-metadata.jsonl
-~/Library/Application Support/MaxxBar/clipboard-images/
 ~/Library/Application Support/MaxxBar/llm-5h-usage-windows.jsonl
 ~/Library/Application Support/MaxxBar/maxxbar-hub.html
 ```
 
-The AI and clipboard logs are local-only metadata. Since the 10 November energy pass, copies are recorded from Cmd+C only; the pasteboard poller that also caught menu, Copy button, and screenshot copies is off. The 5h usage log appends a line only when the window's numbers change. When a clipboard write contains an image, MaxxBar saves a full-size local PNG plus a small thumbnail for up to 24 hours, capped at 100 images and 250 MB; clicking the thumbnail opens the saved PNG. It does not store text or other non-image clipboard payloads. On launch, it records an origin-unknown metadata baseline so “Current clipboard” remains distinct from historical writes.
+The AI activity and copy/paste transfer logs are local-only metadata. Copies and pastes are recorded from Cmd+C and Cmd+V only; there is no pasteboard poller, and MaxxBar never reads or stores clipboard contents, including images. The 5h usage log appends a line only when the window's numbers change.
 
-Paste attempts currently mean observed Cmd+V. macOS does not provide a general notification when another app reads the pasteboard, so right-click and menu-driven pastes cannot always be counted or attributed. A displayed output flow requires an observed clipboard write followed by a paste within 15 minutes; Claude-to-Claude and Codex-to-Codex pairs are excluded while Claude↔Codex and AI-to-other-app flows remain. MaxxBar does not store text clipboard contents, OCR output, typed text, or cloud uploads; temporary copied-image files remain local.
+Paste attempts currently mean observed Cmd+V. macOS does not provide a general notification when another app reads the pasteboard, so right-click and menu-driven pastes cannot always be counted or attributed. A displayed output flow requires an observed clipboard write followed by a paste within 15 minutes; Claude-to-Claude and Codex-to-Codex pairs are excluded while Claude↔Codex and AI-to-other-app flows remain. MaxxBar does not store clipboard contents, OCR output, typed text, or cloud uploads.
 
 ## Known Limits
 
-CPU/GPU temperatures and fan RPM are read locally through a read-only AppleSMC connection when available, with the existing native-helper cache and public battery telemetry as additional sources. Direct CPU temperature reports the warmest supported CPU sensor. Temperature labels respect the existing temperature-unit preference. Sensor keys vary by Mac; unavailable readings display a dash. GPU frequency, SSD thermals, and per-process network attribution remain limited. A native helper target remains available for privileged sensor collection work.
+CPU/GPU temperatures and fan RPM are read locally through a read-only AppleSMC connection when available, with the existing native-helper cache and public battery telemetry as additional sources. Direct CPU temperature reports the warmest supported CPU sensor. Temperature labels respect the existing temperature-unit preference. Sensor keys vary by Mac; unavailable readings display a dash. GPU frequency and SSD thermals remain limited. A native helper target remains available for privileged sensor collection work.

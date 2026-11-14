@@ -61,8 +61,6 @@ struct MemoryPopoverView: View {
                     onPopOut: onPopOut,
                     onQuit: onQuit
                 )
-            case .clipboard:
-                ClipboardPanelView(snapshot: model.clipboardDebug)
             }
 
             ActionBarView(
@@ -195,7 +193,6 @@ struct ProviderVisibilityMenu: View {
 enum StatsPanel: String, CaseIterable, Identifiable {
     case runway = "Runway"
     case llmUsage = "Insights"
-    case clipboard = "Clipboard"
     case memory = "Memory"
     case cpuGPU = "CPU/GPU"
 

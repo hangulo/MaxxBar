@@ -397,10 +397,6 @@ struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var claudeFiveHourResetAt: Date? = nil
     var claudeWeeklyResetAt: Date? = nil
 
-    func fiveHourRemainingPercent(for provider: String) -> Int? {
-        provider == "Claude" ? claudeFiveHourRemainingPercent : primaryRemainingPercent
-    }
-
     func weeklyRemainingPercent(for provider: String) -> Int? {
         provider == "Claude" ? claudeWeeklyRemainingPercent : weeklyRemainingPercent
     }

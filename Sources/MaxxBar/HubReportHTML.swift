@@ -5,7 +5,7 @@ import MachO
 import CryptoKit
 
 extension AIUsageReader {
-    static func reportHTML(records: [AIActivityRecord], moments: [MaxxMomentRecord], transfers: [AITransferRecord], llmUsage: LLMUsageSnapshot, quotaHistory: [LLMQuotaHistorySample]) -> String {
+    static func reportHTML(records: [AIActivityRecord], transfers: [AITransferRecord], llmUsage: LLMUsageSnapshot, quotaHistory: [LLMQuotaHistorySample]) -> String {
         let aiRecords = records.filter { $0.tool != nil }
         let startOfDay = Calendar.current.startOfDay(for: Date())
         let todayAIRecords = aiRecords.filter { $0.ts >= startOfDay }
@@ -173,13 +173,6 @@ extension AIUsageReader {
         return "<div class=\"list\">" + rows.map { "<div><strong>\(html($0.label))</strong><span>\($0.count)</span></div>" }.joined() + "</div>"
     }
 
-    private static func pathRows(_ paths: [AIWorkflowPath]) -> String {
-        guard !paths.isEmpty else { return "<p class=\"sub\">No before -> AI -> after paths yet.</p>" }
-        return "<div class=\"paths\">" + paths.map {
-            "<div><strong>\(html($0.before)) -> \(html($0.surface)) -> \(html($0.after))</strong><em>\(html($0.useCase))</em><span>\($0.count)x</span></div>"
-        }.joined() + "</div>"
-    }
-
     private static func transferRows(_ flows: [AITransferFlow]) -> String {
         guard !flows.isEmpty else {
             let message = CGPreflightListenEventAccess()
@@ -200,14 +193,6 @@ extension AIUsageReader {
         return "<p class=\"sub\">Today’s leading surface is <strong>\(html(today))</strong>. Across seven days, <strong>\(html(week))</strong> leads, the most common inferred work is <strong>\(html(useCase))</strong>, and the top confirmed output destination is <strong>\(html(destination))</strong>.</p>"
     }
 
-    private static func sessionRows(_ sessions: [LLMUsageSession]) -> String {
-        guard !sessions.isEmpty else { return "<p class=\"sub\">No recent local Codex or Claude sessions found.</p>" }
-        return "<div class=\"list\">" + sessions.prefix(8).map {
-            let title = $0.title.isEmpty ? ($0.projectName.isEmpty ? "Untitled session" : $0.projectName) : $0.title
-            return "<div><strong>\(html(short(title)))</strong><span>\(html($0.provider)) · \(html($0.projectName)) · \(compactTokenCount($0.tokens)) tokens</span></div>"
-        }.joined() + "</div>"
-    }
-
     private static func compactTokenCount(_ tokens: UInt64) -> String {
         if tokens >= 1_000_000 { return String(format: "%.1fM", Double(tokens) / 1_000_000) }
         if tokens >= 1_000 { return String(format: "%.1fK", Double(tokens) / 1_000) }
@@ -216,15 +201,6 @@ extension AIUsageReader {
 
     private static func pageHeading(_ title: String, _ description: String) -> String {
         "<header class=\"page-head\"><span class=\"page-kicker\">MaxxBar Hub</span><h1>\(html(title))</h1><p>\(html(description))</p></header>"
-    }
-
-    private static func momentRows(_ moments: [MaxxMomentRecord]) -> String {
-        let recent = moments.sorted { $0.ts > $1.ts }.prefix(8)
-        guard !recent.isEmpty else { return "<p class=\"sub\">No Maxx Moments captured in the last seven days.</p>" }
-        return "<div class=\"moments\">" + recent.map { moment in
-            let context = moment.surface ?? moment.tool ?? moment.site ?? moment.app
-            return "<div class=\"moment\"><strong>\(html(moment.sentiment ?? "Moment"))</strong><div><strong>\(html(moment.note))</strong><span>\(html(context))</span></div><span>\(html(hubDate(moment.ts)))</span></div>"
-        }.joined() + "</div>"
     }
 
     private static func limitPanels(_ snapshot: LLMUsageSnapshot) -> String {
@@ -322,34 +298,6 @@ extension AIUsageReader {
           <div><dt>Estimated rate</dt><dd>\(html(usage?.pricingLabel(for: session.modelName) ?? "—"))</dd></div><div><dt>Started</dt><dd>\(html(session.createdAt.map(hubDate) ?? "—"))</dd></div><div><dt>Updated</dt><dd>\(html(session.updatedAt.map(hubDate) ?? "—"))</dd></div>\(contextLink)
         </dl>\(preview.map { "<p class=\"preview\">\(html($0))</p>" } ?? "")</div>
         """
-    }
-
-    private static func advancedSummary(_ snapshot: LLMUsageSnapshot) -> String {
-        "<div class=\"grid\">\(card("Plan", html(snapshot.planType ?? "Unknown"), html(snapshot.email ?? "account unavailable")))\(card("Limit groups", "\(snapshot.limits.count)", "live API"))\(card("Local windows", "\(snapshot.localWindows.count)", "token summaries"))\(card("Recent sessions", "\(snapshot.recentSessions.count)", "\(snapshot.topWeeklySessions.count) highest"))\(card("Reset credits", snapshot.resetCreditCount.map(String.init) ?? "—", html(snapshot.creditsBalance ?? "balance unavailable")))</div>"
-    }
-
-    private static func localWindowTable(_ windows: [LLMLocalUsageWindow]) -> String {
-        guard !windows.isEmpty else { return "<p class=\"sub\">No local usage windows available.</p>" }
-        return "<table class=\"data-table\"><thead><tr><th>Window</th><th class=\"num\">Tokens</th><th class=\"num\">Threads</th></tr></thead><tbody>" + windows.map { "<tr><td>\(html($0.label))</td><td class=\"num\">\(compactTokenCount($0.tokens))</td><td class=\"num\">\($0.threads)</td></tr>" }.joined() + "</tbody></table>"
-    }
-
-    private static func costEstimateTable(_ estimates: [LLMTokenCostEstimate]) -> String {
-        guard !estimates.isEmpty else { return "<p class=\"sub\">No local token cost estimates available.</p>" }
-        return "<table class=\"data-table\"><thead><tr><th>Window</th><th class=\"num\">Sessions</th><th class=\"num\">Fresh input</th><th class=\"num\">Cached input</th><th class=\"num\">Output</th><th class=\"num\">Cache</th><th class=\"num\">API est.</th></tr></thead><tbody>" + estimates.map { "<tr><td>\(html($0.label))</td><td class=\"num\">\($0.sessionCount)</td><td class=\"num\">\(compactTokenCount($0.freshInputTokens))</td><td class=\"num\">\(compactTokenCount($0.cachedInputTokens))</td><td class=\"num\">\(compactTokenCount($0.outputTokens))</td><td class=\"num\">\($0.cacheHitPercent)%</td><td class=\"num\">\(hubDollars($0.estimatedCost))</td></tr>" }.joined() + "</tbody></table>"
-    }
-
-    private static func availableDetail(_ snapshot: LLMUsageSnapshot) -> String {
-        let windows = snapshot.localWindows.map(\.label).joined(separator: ", ")
-        let rows = [
-            ("Live limits", "\(snapshot.limits.count) limit groups"),
-            ("Local windows", windows.isEmpty ? "None" : windows),
-            ("Session totals", "Title, model, project, tokens, cache, cost, timing, and IDs"),
-            ("Prompt detail", "Stored preview only"),
-            ("Per-prompt tokens", "Not stored locally"),
-            ("Last update", snapshot.lastUpdated.map(hubDate) ?? "Unavailable"),
-            ("Error", snapshot.error ?? "None")
-        ]
-        return "<div class=\"list\">" + rows.map { "<div><strong>\(html($0.0))</strong><span>\(html($0.1))</span></div>" }.joined() + "</div>"
     }
 
     private static func allSessions(_ snapshot: LLMUsageSnapshot) -> [LLMUsageSession] {

@@ -15,22 +15,6 @@ enum MaxxBarLauncher {
             return
         }
 
-        if let verifyImageIndex = CommandLine.arguments.firstIndex(of: "--verify-clipboard-image-store"),
-           CommandLine.arguments.indices.contains(verifyImageIndex + 1) {
-            let sourcePath = CommandLine.arguments[verifyImageIndex + 1]
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: sourcePath)),
-                  let stored = ClipboardImageStore.save(
-                    ClipboardImagePayload(data: data, typeIdentifier: "public.image"),
-                    changeCount: 0
-                  ) else {
-                fputs("clipboard image verification failed\n", stderr)
-                exit(1)
-            }
-            print("clipboardImage=\(stored.imagePath)")
-            print("clipboardThumbnail=\(stored.thumbnailPath)")
-            return
-        }
-
         if let renderIndex = CommandLine.arguments.firstIndex(of: "--render-popover"),
            CommandLine.arguments.indices.contains(renderIndex + 1) {
             let path = CommandLine.arguments[renderIndex + 1]
@@ -62,14 +46,6 @@ enum MaxxBarLauncher {
             print("processTotals=\(snapshot.processes.map { "\($0.name)=\(ByteFormat.memory($0.bytes))" }.joined(separator: ","))")
             print("processRows=\(snapshot.processRows.map { "\($0.name)=\(ByteFormat.memory($0.bytes))" }.joined(separator: ","))")
             print("processAppPaths=\(snapshot.processes.map { $0.appPath ?? "-" }.joined(separator: "|"))")
-            let firstNetwork = NetworkReader.read(previous: nil, history: [])
-            Thread.sleep(forTimeInterval: 1)
-            let secondNetwork = NetworkReader.read(previous: firstNetwork.counters, history: firstNetwork.snapshot.history)
-            let network = secondNetwork.snapshot
-            print("networkInterface=\(network.interfaceName ?? "-")")
-            print("networkUpload=\(ByteFormat.rate(network.uploadBytesPerSecond))")
-            print("networkDownload=\(ByteFormat.rate(network.downloadBytesPerSecond))")
-            print("networkIPs=\(network.ipAddresses.joined(separator: ","))")
             let llmUsage = LLMUsageReader.read()
             print("llmPlan=\(llmUsage.planType ?? "-")")
             print("llmEmail=\(llmUsage.email ?? "-")")
@@ -94,11 +70,6 @@ enum MaxxBarLauncher {
             print("aiTimeToday=\(Int(aiUsage.timeTodaySeconds))")
             print("aiTopTools=\(aiUsage.topTools.map { "\($0.label)=\($0.count)" }.joined(separator: ","))")
             print("aiProviderStats=\(aiUsage.providerSummaries.map { "\($0.provider):\($0.sessionsToday)sessions/\(Int($0.timeTodaySeconds))s/\($0.transferFlows.count)flows" }.joined(separator: ","))")
-            let clipboard = ClipboardDebugReader.snapshot()
-            print("clipboardWritesToday=\(clipboard.writesToday)")
-            print("clipboardPastesToday=\(clipboard.pasteAttemptsToday)")
-            print("clipboardImageWritesToday=\(clipboard.imageWritesToday)")
-            print("clipboardKnownSourcePercent=\(clipboard.pasteSourceKnownPercent)")
             let sensors = SensorReader.read()
             print("sensorCPUTemp=\(sensors.cpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
             print("sensorGPUTemp=\(sensors.gpuTemperature.map { String(format: "%.1f C", $0) } ?? "-")")
@@ -148,10 +119,6 @@ extension StatsPanel {
             self = .runway
         case "ai", "insights", "maxxinsights", "maxx-insights", "llm", "usage", "llmusage", "llm-usage":
             self = .llmUsage
-        case "moments", "maxxmoment", "maxx-moment", "maxxmoments", "maxx-moments":
-            self = .llmUsage
-        case "clipboard", "clip", "pasteboard":
-            self = .clipboard
         default:
             self = .memory
         }
@@ -171,7 +138,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastVisibleProviders = ProviderVisibility.visibleProviders
     private var pauseReasons = Set<String>()
     private let clipboardFlowMonitor = ClipboardFlowMonitor()
-    private let clipboardMetadataMonitor = ClipboardMetadataMonitor()
     private var currentPopoverPanel: StatsPanel = .runway
     private var currentPopoverSize = PopoverSizePreference.load()
 
@@ -317,25 +283,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startClipboardMetadataMonitor() {
-        clipboardMetadataMonitor.start { [weak self] changeCount, itemCount, typeIdentifiers, observedChange, imagePayload in
-            if observedChange {
-                self?.model.recordClipboardChange(
-                    changeCount: changeCount,
-                    itemCount: itemCount,
-                    typeIdentifiers: typeIdentifiers,
-                    imagePayload: imagePayload
-                )
-            } else {
-                self?.model.recordCurrentClipboardState(
-                    changeCount: changeCount,
-                    itemCount: itemCount,
-                    typeIdentifiers: typeIdentifiers
-                )
-            }
-        }
-    }
-
     func applicationWillTerminate(_ notification: Notification) {
         clipboardFlowMonitor.stop()
     }
@@ -478,29 +425,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AI today: \(usage.sessionsToday) sessions · \(aiTimeLabel(usage.timeTodaySeconds)) inferred time
         \(usage.copyEventsToday) copy · \(usage.pasteEventsToday) paste · \(usage.insightEventsToday) insight events
         """
-    }
-
-    private func hoursLeftLabel(_ resetAt: Date?) -> String {
-        guard let resetAt else { return "--" }
-        let seconds = max(resetAt.timeIntervalSinceNow, 0)
-        if seconds < 3_600 {
-            let minutes = max(Int(ceil(seconds / 60)), 0)
-            return "\(minutes)m"
-        }
-
-        let hours = seconds / 3_600
-        let rounded = (hours * 2).rounded() / 2
-        if rounded.rounded() == rounded {
-            return "\(Int(rounded))H"
-        }
-        return String(format: "%.1fH", rounded)
-    }
-
-    private func weekdayLabel(_ resetAt: Date?) -> String {
-        guard let resetAt else { return "Day" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEE"
-        return formatter.string(from: resetAt)
     }
 
     private func statusTitleForDebug() -> String {
