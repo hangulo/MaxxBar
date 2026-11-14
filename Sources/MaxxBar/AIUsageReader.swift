@@ -98,6 +98,16 @@ enum AIUsageReader {
             return snapshot(current: recentActivityRecords(days: 7).max { $0.ts < $1.ts }, error: nil)
         }
 
+        ClipboardMetadataLog.recordShortcut(eventType, context: ClipboardDebugContext(
+            app: context.app,
+            bundleID: context.bundleID,
+            site: context.site,
+            tool: context.tool,
+            surface: context.surface,
+            provider: aiProviderIdentity(tool: context.tool, surface: context.surface, bundleID: context.bundleID)
+                .map { $0 == "codex" ? "Codex" : "Claude" }
+        ), at: now)
+
         let source = eventType == "paste" ? lastCopyRecord : nil
         let hasFreshSource = source.map {
             let age = now.timeIntervalSince($0.ts)
