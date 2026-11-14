@@ -1,5 +1,39 @@
 # Release Notes
 
+## Unreleased - 2026-11-14
+
+Claude as a first-class provider:
+
+- Quota history records Claude 5h, the Claude plan, the source of each Claude reading, and reset times for every window. Older history files still load.
+- The Claude plan is read from the rate limit tier in `~/.claude.json` (for example Max 5x), which also fills the plan on the Insights account row.
+- The drawdown insight follows your primary provider (Claude when shown, otherwise Codex). A plan change starts a new segment instead of counting as a reset, and a new pace line shows the burn rate since the last reset or plan change and whether the week lasts until its reset.
+- The weekly drawdown graph only draws the providers you show.
+- A provider hidden with the eye menu is no longer polled or scanned. Toggling refreshes right away.
+- Activity records store Claude quota in their own fields instead of the Codex ones.
+
+Energy and data quality:
+
+- Sampling and polling pause while the screen is locked or the Mac or display is asleep, with one refresh on return.
+- Lock screen samples are no longer logged and are left out of sessions and workflow paths.
+- Launch skips Claude transcripts older than 8 days, and a growing transcript is parsed from where the last pass stopped instead of from the start.
+- Activity logs are read backwards to the 7 day cutoff instead of loaded whole.
+- The Claude credential is cached until its expiry instead of launching `security` every 30 seconds; `~/.claude.json` is parsed once per change; the usage cache file is only rewritten when it changed; the 5h usage log only appends when the window changed.
+- `Scripts/install-app.sh` installs an optimized release build.
+- The detached window is titled MaxxBar.
+
+## 2026-11-10
+
+- Cut idle energy use while the popover is closed: transcript parse cache, quota-only refresh while closed, activity sampled every 60 seconds, clipboard poller off (copies come from Cmd+C), Clipboard tab removed from the tab bar.
+- Added Claude and Codex visibility toggles (the eye menu in the popover).
+- Desktop sessions named "Local session", "Untitled" or "New session" use their summary or sidecar title instead.
+
+## 2026-10-21
+
+- Live Claude limits from the Claude Code OAuth credential, with a Haiku keep-alive that lets Claude Code refresh its own sign-in, 429 backoff, and a saved last-good reading.
+- Optional Claude Code status line tap (`Scripts/install-claude-statusline-tap.sh`) so live Claude limits need no extra requests.
+- Direct CPU/GPU temperature and fan readings through a read-only AppleSMC connection.
+- Clipboard queue and flow insights with short-lived local image previews.
+
 ## v0.2.0 - 2026-07-10
 
 - Added a resizable menu-bar popover that remembers its last width and height.
