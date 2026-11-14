@@ -540,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Memory"
+        window.title = "MaxxBar"
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 290, height: 595)
         window.contentViewController = NSHostingController(

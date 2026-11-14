@@ -4586,10 +4586,29 @@ enum LLMUsageReader {
         return accounts
     }
 
-    private static func readClaudeAccountProfile() -> LLMProviderAccount? {
+    nonisolated(unsafe) private static var cachedClaudeProfile: (stamp: ClaudeParsedFileStamp, root: [String: Any])?
+    private static let cachedClaudeProfileLock = NSLock()
+
+    /// ~/.claude.json, parsed once per change instead of several times per refresh.
+    private static func claudeProfileRoot() -> [String: Any]? {
         let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize, let modified = values.contentModificationDate else { return nil }
+        let stamp = ClaudeParsedFileStamp(size: size, modified: modified)
+        cachedClaudeProfileLock.lock()
+        defer { cachedClaudeProfileLock.unlock() }
+        if let cachedClaudeProfile, cachedClaudeProfile.stamp == stamp { return cachedClaudeProfile.root }
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            cachedClaudeProfile = nil
+            return nil
+        }
+        cachedClaudeProfile = (stamp, root)
+        return root
+    }
+
+    private static func readClaudeAccountProfile() -> LLMProviderAccount? {
+        guard let root = claudeProfileRoot() else {
             return nil
         }
         let account = (root["oauthAccount"] as? [String: Any]) ?? root
@@ -4821,9 +4840,7 @@ enum LLMUsageReader {
 
     /// Token refreshes would change a token fingerprint, so prefer the stable account ID.
     private static func claudeCredentialID(accessToken: String) -> String {
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
-        if let data = try? Data(contentsOf: url),
-           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        if let root = claudeProfileRoot(),
            let account = root["oauthAccount"] as? [String: Any],
            let uuid = account["accountUuid"] as? String,
            !uuid.isEmpty {
@@ -4888,8 +4905,8 @@ enum LLMUsageReader {
         defer { claudePollingLock.unlock() }
         let now = Date()
         let credentialID = claudeCredentialID(accessToken: accessToken)
-        var state = ClaudeUsagePollingState.load(from: claudeCacheURL)
-            ?? ClaudeUsagePollingState(credentialID: credentialID)
+        let loadedState = ClaudeUsagePollingState.load(from: claudeCacheURL)
+        var state = loadedState ?? ClaudeUsagePollingState(credentialID: credentialID)
         state.switchCredential(to: credentialID)
         state.decayFloor(at: now)
         if renewedCredential, state.lastError == "Claude access token was rejected" {
@@ -4897,7 +4914,8 @@ enum LLMUsageReader {
             state.lastError = nil
         }
         defer {
-            if let data = try? JSONEncoder().encode(state) {
+            // Most passes only read the cache; rewrite the file only when the state changed.
+            if state != loadedState, let data = try? JSONEncoder().encode(state) {
                 try? FileManager.default.createDirectory(
                     at: claudeCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true
                 )
@@ -5021,12 +5039,7 @@ enum LLMUsageReader {
     }
 
     private static func claudeAccountExists() -> Bool {
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
-        guard let data = try? Data(contentsOf: url),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return false
-        }
-        return object["oauthAccount"] is [String: Any]
+        claudeProfileRoot()?["oauthAccount"] is [String: Any]
     }
 
     private static func mergedLocalUsage(
@@ -5105,6 +5118,17 @@ enum LLMUsageReader {
                 urls.append(url)
             }
         }
+        // Every number on screen covers at most 7 days, so older transcripts are only read to fill the
+        // 30-row recent session list. This keeps launch from parsing every transcript ever written.
+        let modifiedAt = Dictionary(uniqueKeysWithValues: urls.map {
+            ($0.path, (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+        })
+        let recentCutoff = Date().addingTimeInterval(-8 * 86_400)
+        urls = urls
+            .sorted { modifiedAt[$0.path, default: .distantPast] > modifiedAt[$1.path, default: .distantPast] }
+            .enumerated()
+            .filter { $0.offset < 30 || modifiedAt[$0.element.path, default: .distantPast] >= recentCutoff }
+            .map(\.element)
         let livePaths = Set(urls.map(\.path))
         claudeParsedFilesLock.lock()
         claudeParsedFiles = claudeParsedFiles.filter { livePaths.contains($0.key) }
@@ -5211,37 +5235,57 @@ enum LLMUsageReader {
         let modified: Date
     }
 
-    nonisolated(unsafe) private static var claudeParsedFiles: [String: (stamp: ClaudeParsedFileStamp, parsed: ClaudeParsedFile)] = [:]
+    private struct ClaudeParsedFileEntry {
+        let stamp: ClaudeParsedFileStamp
+        let parsed: ClaudeParsedFile
+        /// Byte offset just past the last complete line parsed, and how many lines that was.
+        let offset: UInt64
+        let lineCount: Int
+    }
+
+    nonisolated(unsafe) private static var claudeParsedFiles: [String: ClaudeParsedFileEntry] = [:]
     private static let claudeParsedFilesLock = NSLock()
 
     /// Parses a transcript once and reuses the result until the file's size or modification date changes.
+    /// Transcripts only grow, so a grown file is parsed from where the last pass stopped instead of from byte zero.
     private static func parsedClaudeFile(_ url: URL) -> ClaudeParsedFile? {
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         var stamp: ClaudeParsedFileStamp?
         if let size = values?.fileSize, let modified = values?.contentModificationDate {
             stamp = ClaudeParsedFileStamp(size: size, modified: modified)
         }
-        if let stamp {
-            claudeParsedFilesLock.lock()
-            let hit = claudeParsedFiles[url.path]
-            claudeParsedFilesLock.unlock()
-            if let hit, hit.stamp == stamp { return hit.parsed }
+        claudeParsedFilesLock.lock()
+        let hit = claudeParsedFiles[url.path]
+        claudeParsedFilesLock.unlock()
+        if let hit, let stamp, hit.stamp == stamp { return hit.parsed }
+        let resume = hit.flatMap { hit -> ClaudeParsedFileEntry? in
+            guard let stamp, stamp.size > hit.stamp.size, UInt64(stamp.size) >= hit.offset else { return nil }
+            return hit
         }
 
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        var sessionID = url.deletingPathExtension().lastPathComponent
-        var title: String?
-        var summary: String?
-        var preview: String?
-        var cwd: String?
-        var model: String?
-        var createdAt: Date?
-        var updatedAt: Date?
-        var requestUsage: [String: (usage: LLMTokenUsageSummary, modelName: String, timestamp: Date?)] = [:]
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let startOffset = resume?.offset ?? 0
+        guard (try? handle.seek(toOffset: startOffset)) != nil,
+              let data = try? handle.readToEnd() else { return resume?.parsed }
+        // Stop at the last newline: a line still being written is picked up on the next pass.
+        let consumed = (data.lastIndex(of: 0x0A).map { $0 - data.startIndex + 1 }) ?? 0
+        let previous = resume?.parsed
+        var sessionID = previous?.sessionID ?? url.deletingPathExtension().lastPathComponent
+        var title = previous?.title
+        var summary = previous?.summary
+        var preview = previous?.preview
+        var cwd = previous?.cwd
+        var model = previous?.model
+        var createdAt = previous?.createdAt
+        var updatedAt = previous?.updatedAt
+        var requestUsage = previous?.requestUsage ?? [:]
+        var lineCount = resume?.lineCount ?? 0
 
-        for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+        for line in data.prefix(consumed).split(separator: 0x0A, omittingEmptySubsequences: true) {
+            let index = lineCount
+            lineCount += 1
+            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             if let value = object["sessionId"] as? String, !value.isEmpty { sessionID = value }
             if let value = object["customTitle"] as? String, !value.isEmpty { title = value }
             if title == nil, let value = object["aiTitle"] as? String, !value.isEmpty { title = value }
@@ -5299,7 +5343,9 @@ enum LLMUsageReader {
         )
         if let stamp {
             claudeParsedFilesLock.lock()
-            claudeParsedFiles[url.path] = (stamp, parsed)
+            claudeParsedFiles[url.path] = ClaudeParsedFileEntry(
+                stamp: stamp, parsed: parsed, offset: startOffset + UInt64(consumed), lineCount: lineCount
+            )
             claudeParsedFilesLock.unlock()
         }
         return parsed

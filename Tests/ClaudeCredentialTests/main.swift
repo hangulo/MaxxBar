@@ -93,4 +93,16 @@ for file in try FileManager.default.contentsOfDirectory(atPath: directory.path) 
 }
 let log = try String(contentsOf: directory.appendingPathComponent("keeper.log"), encoding: .utf8)
 assert(log.contains("result=renewed") && log.contains("exit=0"))
+// A valid token is cached until its expiry, so the Keychain is not read on every refresh.
+var loads = 0
+current = credential("cached", expires: now.timeIntervalSince1970 + 3_600)
+let caching = ClaudeCredentialManager(load: { loads += 1; return current }, keepAlive: keepAlive,
+                                      stateURL: directory.appendingPathComponent("caching.json"), clock: { now })
+assert(caching.read().accessToken == "cached" && caching.read().accessToken == "cached" && loads == 1)
+// A rejected token, or one past its expiry, is read again.
+current = credential("rotated", expires: now.timeIntervalSince1970 + 7_200)
+assert(caching.read(rejectedAccessToken: "cached").accessToken == "rotated" && loads == 2)
+now = now.addingTimeInterval(7_300)
+current = credential("next", expires: now.timeIntervalSince1970 + 3_600)
+assert(caching.read().accessToken == "next" && loads == 3)
 print("Claude keep-alive checks passed")

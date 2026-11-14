@@ -72,6 +72,9 @@ final class ClaudeCredentialManager: @unchecked Sendable {
     private let clock: () -> Date
     private let enabled: Bool
     private(set) var state: KeepAliveState?
+    /// The last credential read. Reading it launches /usr/bin/security, so a still-valid token is reused
+    /// until its own expiry or until Claude rejects it.
+    private var cached: ClaudeOAuthCredential?
 
     init(load: @escaping () -> ClaudeOAuthCredential?, keepAlive: @escaping () -> ClaudeKeepAliveRun,
          stateURL: URL, logURL: URL? = nil, clock: @escaping () -> Date = Date.init, enabled: Bool = true) {
@@ -88,12 +91,20 @@ final class ClaudeCredentialManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let now = clock()
+        if rejectedAccessToken == nil, let cached, cached.isValid(at: now) {
+            return ReadResult(accessToken: cached.accessToken)
+        }
+        cached = nil
         guard let credential = load() else {
             return ReadResult(error: "Claude Code's saved sign-in is missing or empty. Run claude auth login in Terminal to restore live Claude limits.")
         }
         let rejected = rejectedAccessToken == credential.accessToken
         // Claude Code refreshes once its token has expired, so the keep-alive waits for expiry.
-        guard rejected || !credential.isValid(at: now) else { return ReadResult(accessToken: credential.accessToken) }
+        guard rejected || !credential.isValid(at: now) else {
+            // Without an expiry the token cannot be cached safely; read it again next time.
+            if credential.expiresAt != nil { cached = credential }
+            return ReadResult(accessToken: credential.accessToken)
+        }
         guard enabled else {
             return ReadResult(error: "Claude Code's sign-in has expired. Open claude in Terminal or run claude auth login to restore live Claude limits.")
         }
@@ -119,6 +130,7 @@ final class ClaudeCredentialManager: @unchecked Sendable {
         } ?? false
         appendLog(run: run, before: credential.expiresAt, after: after?.expiresAt, renewed: renewed, attempt: attempts)
         if renewed, let after {
+            cached = after
             state = nil
             try? FileManager.default.removeItem(at: stateURL)
             return ReadResult(accessToken: after.accessToken, refreshed: true)

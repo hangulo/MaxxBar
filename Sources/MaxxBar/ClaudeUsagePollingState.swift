@@ -1,7 +1,7 @@
 import Foundation
 
 /// Persist only usage data and a credential fingerprint, never the OAuth token.
-struct ClaudeUsagePollingState: Codable {
+struct ClaudeUsagePollingState: Codable, Equatable {
     var credentialID: String
     var cachedData: Data?
     var fetchedAt: Date?
