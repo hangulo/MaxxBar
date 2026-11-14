@@ -5,7 +5,8 @@ import MachO
 import CryptoKit
 
 extension LLMUsageReader {
-    static func readLocalClaudeUsage() -> LocalProviderUsage {
+    /// Every Claude Code and Desktop transcript on disk.
+    private static func claudeTranscriptURLs() -> [URL] {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         let roots = [
             home.appendingPathComponent(".claude/projects", isDirectory: true),
@@ -24,6 +25,11 @@ extension LLMUsageReader {
                 urls.append(url)
             }
         }
+        return urls
+    }
+
+    static func readLocalClaudeUsage() -> LocalProviderUsage {
+        var urls = claudeTranscriptURLs()
         // Every number on screen covers at most 7 days, so older transcripts are only read to fill the
         // 30-row recent session list. This keeps launch from parsing every transcript ever written.
         let modifiedAt = Dictionary(uniqueKeysWithValues: urls.map {
@@ -51,6 +57,12 @@ extension LLMUsageReader {
         let sessions = uniqueSessions(transcripts.map(\.session))
         let modelEvents = uniqueClaudeModelEvents(transcripts.flatMap(\.modelEvents))
         let now = Date()
+        // Days from a week ago on are fully covered by the transcripts read above (files modified in 8 days).
+        APICostLedger.record(
+            apiCostEvents(modelEvents), provider: "Claude",
+            completeFrom: Calendar.current.date(byAdding: .day, value: -7, to: Calendar.current.startOfDay(for: now))
+        )
+        scheduleClaudeCostBackfillIfNeeded()
         func usageWindow(label: String, seconds: TimeInterval) -> LLMLocalUsageWindow {
             let matching = modelEvents.filter { now.timeIntervalSince($0.timestamp ?? .distantPast) <= seconds }
             return LLMLocalUsageWindow(
@@ -95,6 +107,55 @@ extension LLMUsageReader {
             )
         }
         return mergedModelUsage(totals)
+    }
+
+    private static func apiCostEvents(_ events: [ClaudeModelUsageEvent]) -> [APICostEvent] {
+        events.compactMap { event in
+            guard let at = event.timestamp, let usage = event.usage,
+                  !event.modelName.localizedCaseInsensitiveContains("synthetic") else { return nil }
+            let cost = LLMTokenPricing.rates(for: event.modelName).breakdown(
+                inputTokens: usage.inputTokens,
+                cachedInputTokens: usage.cachedInputTokens,
+                cacheWriteInputTokens: usage.cacheWriteInputTokens,
+                cacheWrite1hInputTokens: usage.cacheWrite1hInputTokens,
+                outputTokens: usage.outputTokens
+            ).total
+            return APICostEvent(
+                at: at, costUSD: cost, inputTokens: usage.inputTokens, cachedInputTokens: usage.cachedInputTokens,
+                cacheWriteInputTokens: usage.cacheWriteInputTokens, outputTokens: usage.outputTokens
+            )
+        }
+    }
+
+    nonisolated(unsafe) private static var claudeCostBackfillStarted = false
+
+    /// Once per install: price every request in every transcript on disk, so "this month" has history from
+    /// before the ledger existed. Runs in the background; transcripts are read one at a time.
+    private static func scheduleClaudeCostBackfillIfNeeded() {
+        claudeParsedFilesLock.lock()
+        let start = !claudeCostBackfillStarted
+        claudeCostBackfillStarted = true
+        claudeParsedFilesLock.unlock()
+        guard start, !APICostLedger.isBackfilled(provider: "Claude") else { return }
+        DispatchQueue.global(qos: .background).async {
+            var seen = Set<String>()
+            var events: [APICostEvent] = []
+            for url in claudeTranscriptURLs() {
+                autoreleasepool {
+                    guard let parsed = parsedClaudeFile(url),
+                          !(parsed.cwd?.hasPrefix(claudeTitlerDirectory.path) ?? false) else { return }
+                    for (key, value) in parsed.requestUsage where seen.insert("\(parsed.sessionID)|\(key)").inserted {
+                        let event = ClaudeModelUsageEvent(
+                            requestID: key, sessionID: parsed.sessionID, modelName: value.modelName,
+                            tokens: value.usage.totalTokens, timestamp: value.timestamp ?? parsed.updatedAt,
+                            usage: value.usage
+                        )
+                        events.append(contentsOf: apiCostEvents([event]))
+                    }
+                }
+            }
+            APICostLedger.record(events, provider: "Claude", completeFrom: nil, backfill: true)
+        }
     }
 
     private static func uniqueClaudeModelEvents(_ events: [ClaudeModelUsageEvent]) -> [ClaudeModelUsageEvent] {
@@ -437,7 +498,8 @@ extension LLMUsageReader {
                 sessionID: sessionID,
                 modelName: value.modelName,
                 tokens: value.usage.totalTokens,
-                timestamp: value.timestamp ?? updatedAt
+                timestamp: value.timestamp ?? updatedAt,
+                usage: value.usage
             )
         }
         return ClaudeTranscript(session: session, modelEvents: events, untitledPrompt: realTitle == nil ? preview : nil)

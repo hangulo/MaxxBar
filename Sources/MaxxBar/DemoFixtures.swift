@@ -160,9 +160,13 @@ extension LLMUsageSnapshot {
                 email: "you@client.example",
                 displayName: "Hector",
                 organizationName: "Client workspace",
-                planName: "Team"
+                planName: "Max 5x"
             )
-        ]
+        ],
+        apiCost: ["Claude": APICostSummary(
+            today: 12.40, thisWeek: 61.85, lastSevenDays: 84.10, thisMonth: 212.35,
+            monthDaysCovered: 13, pricingAsOf: LLMTokenPricing.asOf
+        )]
     )
 }
 

@@ -209,7 +209,11 @@ extension LLMTokenUsageSummary {
     }
 }
 
+/// API list prices per million tokens. Cache reads have their own rate; cache writes are priced in
+/// `breakdown` at 1.25x (5 minute) and 2x (1 hour) of base input. One table for every estimate in the app.
 struct LLMTokenPricing: Equatable {
+    /// When the Claude prices below were last checked against Anthropic's published rates.
+    static let asOf = "2026-10-06"
     static let gpt55 = LLMTokenPricing(label: "gpt-5.5 API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 30.0)
     static let gpt54 = LLMTokenPricing(label: "gpt-5.4 API", freshInputDollarsPerMillion: 2.5, cachedInputDollarsPerMillion: 0.25, outputDollarsPerMillion: 15.0)
     static let gpt54Mini = LLMTokenPricing(label: "gpt-5.4-mini API", freshInputDollarsPerMillion: 0.75, cachedInputDollarsPerMillion: 0.075, outputDollarsPerMillion: 4.5)
@@ -217,10 +221,13 @@ struct LLMTokenPricing: Equatable {
     static let gpt53Codex = LLMTokenPricing(label: "gpt-5.3-codex API", freshInputDollarsPerMillion: 1.75, cachedInputDollarsPerMillion: 0.175, outputDollarsPerMillion: 14.0)
     static let gpt51Codex = LLMTokenPricing(label: "gpt-5.1-codex API", freshInputDollarsPerMillion: 1.25, cachedInputDollarsPerMillion: 0.125, outputDollarsPerMillion: 10.0)
     static let codexMini = LLMTokenPricing(label: "codex-mini API", freshInputDollarsPerMillion: 1.5, cachedInputDollarsPerMillion: 0.375, outputDollarsPerMillion: 6.0)
+    static let claudeFable51 = LLMTokenPricing(label: "Claude Fable 5.1 API", freshInputDollarsPerMillion: 10.0, cachedInputDollarsPerMillion: 0.25, outputDollarsPerMillion: 50.0)
     static let claudeFable5 = LLMTokenPricing(label: "Claude Fable 5 API", freshInputDollarsPerMillion: 10.0, cachedInputDollarsPerMillion: 1.0, outputDollarsPerMillion: 50.0)
+    static let claudeOpus55 = LLMTokenPricing(label: "Claude Opus 5.5 API", freshInputDollarsPerMillion: 4.0, cachedInputDollarsPerMillion: 0.2, outputDollarsPerMillion: 20.0)
     static let claudeOpus = LLMTokenPricing(label: "Claude Opus API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 25.0)
-    static let claudeSonnet5 = LLMTokenPricing(label: "Claude Sonnet 5 API (intro)", freshInputDollarsPerMillion: 2.0, cachedInputDollarsPerMillion: 0.2, outputDollarsPerMillion: 10.0)
+    static let claudeSonnet5 = LLMTokenPricing(label: "Claude Sonnet 5 / 5.5 API", freshInputDollarsPerMillion: 2.0, cachedInputDollarsPerMillion: 0.2, outputDollarsPerMillion: 10.0)
     static let claudeSonnet = LLMTokenPricing(label: "Claude Sonnet API", freshInputDollarsPerMillion: 3.0, cachedInputDollarsPerMillion: 0.3, outputDollarsPerMillion: 15.0)
+    static let claudeHaiku55 = LLMTokenPricing(label: "Claude Haiku 5.5 API", freshInputDollarsPerMillion: 0.10, cachedInputDollarsPerMillion: 0.01, outputDollarsPerMillion: 0.50)
     static let claudeHaiku = LLMTokenPricing(label: "Claude Haiku API", freshInputDollarsPerMillion: 1.0, cachedInputDollarsPerMillion: 0.1, outputDollarsPerMillion: 5.0)
 
     var label: String
@@ -230,8 +237,14 @@ struct LLMTokenPricing: Equatable {
 
     static func rates(for modelName: String) -> LLMTokenPricing {
         let model = modelName.lowercased()
+        if model.contains("fable-5-1") || model.contains("mythos-5-1") || model.contains("fable 5.1") {
+            return .claudeFable51
+        }
         if model.contains("fable") || model.contains("mythos") {
             return .claudeFable5
+        }
+        if model.contains("opus-5-5") || model.contains("opus 5.5") {
+            return .claudeOpus55
         }
         if model.contains("opus") {
             return .claudeOpus
@@ -241,6 +254,9 @@ struct LLMTokenPricing: Equatable {
         }
         if model.contains("sonnet") {
             return .claudeSonnet
+        }
+        if model.contains("haiku-5-5") || model.contains("haiku 5.5") {
+            return .claudeHaiku55
         }
         if model.contains("haiku") {
             return .claudeHaiku
@@ -469,6 +485,8 @@ struct LLMUsageSnapshot: Equatable {
     var weeklyModelUsage: [LLMModelUsageTotal] = []
     var dailyModelUsage: [LLMModelUsageTotal] = []
     var providerAccounts: [LLMProviderAccount] = []
+    /// API cost equivalents by provider, from the daily ledger.
+    var apiCost: [String: APICostSummary] = [:]
 
     /// The Claude plan from the local Claude profile. `planType` above is the Codex plan.
     var claudePlanType: String? {
