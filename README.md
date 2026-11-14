@@ -14,13 +14,14 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 
 ## What It Does
 
-- Shows Claude and Codex runway in the menu bar. With one provider shown, it gets a 5h column and a weekly column, each with percent left and time until reset. With both shown, each gets a 5h / weekly column. A `~` marks a previously checked reading.
+- Shows Claude and Codex runway in the menu bar. With one provider shown, it gets a 5h column and a weekly column, each with percent left and time until reset. When the current burn rate would empty a window before it resets, that column turns amber and its bottom line shows when it runs out instead (`out 48m` for 5h, `Thu 2p` for the week). With both shown, each gets a 5h / weekly column. A `~` marks a previously checked reading.
 - Lets you pick which provider you track with the eye menu in the popover. The first shown provider (Claude when shown) is the primary one: the drawdown insight and its pace line follow it. A hidden provider is not polled or scanned at all.
 - Opens a Runway-first popover with live Claude and Codex limits when authenticated, reset credits, local quota history, a drawdown insight with a plan-aware burn rate, cache-token detail, combined token/session totals, and recent session timelines.
 - Provides an Insights tab with detected provider accounts/plans, today’s time and session share, a seven-day model mix and token distribution, output destinations, copy/paste flow metadata, before/after workflow paths, and recent Codex and Claude session context.
 - Generates a separate MaxxBar Hub with Tracework-aligned navigation for Overview, AI Insights, Runway, and Sessions.
 - Keeps Memory visible with pressure, memory breakdown, top processes, swap, and a compact CPU/GPU temperature and fan RPM card beneath Swap.
 - Keeps a deeper CPU/GPU panel with sensor readings in the code (render it with `--render-popover <path> cpu`); it is not in the tab bar yet.
+- Opens at login by default (toggle it in the eye menu, or in System Settings > General > Login Items).
 - Installs a local app bundle and recreates the Desktop shortcut so the launcher points at the latest local build.
 
 ## Popover Tabs
@@ -39,7 +40,9 @@ Quota history (`llm-quota-history.json`) records, for each sample, the Claude an
 
 ## Energy
 
-MaxxBar stops sampling and polling while the screen is locked, the display is asleep, or the Mac is asleep, and refreshes once when you return. Lock screen samples are not written to the activity log. While the popover is closed only the quotas refresh. The Claude credential is reused until its own expiry instead of being read from the Keychain on every refresh, transcripts older than 8 days are skipped, a growing transcript is parsed from where the last pass stopped, and the activity logs are read from the end back to the 7 day cutoff.
+MaxxBar stops sampling and polling while the screen is locked, the display is asleep, or the Mac is asleep, and refreshes once when you return. Lock screen samples are not written to the activity log. While the popover is closed only the quotas refresh. The Claude credential is reused until its own expiry instead of being read from the Keychain on every refresh, transcripts older than 8 days are skipped, a growing transcript is parsed from where the last pass stopped, and the activity logs are read from the end back to the 7 day cutoff. Parsed transcript totals are saved to `claude-parse-cache.json`, so a launch only reads what was appended since the last run. The refresh timer runs once a minute while the popover is closed.
+
+Once a day, lines older than 30 days move from `ai-activity.jsonl`, `ai-transfers.jsonl`, `clipboard-metadata.jsonl`, and `llm-5h-usage-windows.jsonl` into an `archive` folder next to them. Nothing is deleted; remove the archive folder by hand if you do not need it.
 
 Drag the lower-right grip to resize the popover; MaxxBar stores the last width and height locally and restores them at the next open or launch. The bottom action bar opens the MaxxBar Hub, starts Deep Trace in Tracework when available, opens the popover as a window, relaunches the app, or quits. Dense chart/help titles use a short hover delay and can be clicked to pin the explanation; bottom action icons and the compact version label show immediate labels.
 
@@ -88,7 +91,11 @@ The tests are small programs compiled with `swiftc`:
 ```sh
 Scripts/test-claude-polling.sh
 Scripts/test-claude-credentials.sh
+Scripts/test-runway-forecast.sh
+Scripts/test-log-retention.sh
 ```
+
+The project lives in iCloud Drive, so `.build` is a symbolic link to `~/Library/Developer/MaxxBar-build/.build` and build products are not synced. On a new Mac, recreate it with `mkdir -p ~/Library/Developer/MaxxBar-build/.build && ln -s ~/Library/Developer/MaxxBar-build/.build .build`.
 
 On a Mac where the default SDK does not match the toolchain, prefix commands with `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`.
 
