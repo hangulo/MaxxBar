@@ -36,9 +36,11 @@ extension LLMUsageReader {
             .filter { $0.offset < 30 || modifiedAt[$0.element.path, default: .distantPast] >= recentCutoff }
             .map(\.element)
         let livePaths = Set(urls.map(\.path))
+        loadClaudeParseCacheIfNeeded()
         claudeParsedFilesLock.lock()
         claudeParsedFiles = claudeParsedFiles.filter { livePaths.contains($0.key) }
         claudeParsedFilesLock.unlock()
+        defer { saveClaudeParseCacheIfNeeded() }
 
         let sidecarTitles = claudeSidecarTitles()
         let generatedTitles = loadClaudeGeneratedTitles()
@@ -152,6 +154,128 @@ extension LLMUsageReader {
     nonisolated(unsafe) private static var claudeParsedFiles: [String: ClaudeParsedFileEntry] = [:]
     private static let claudeParsedFilesLock = NSLock()
 
+    // MARK: Parse cache on disk
+    // Launch used to start cold and parse every recent transcript again. The parsed totals are saved to
+    // claude-parse-cache.json so a launch only reads what was appended since the last run.
+
+    private struct DiskParsedFile: Codable {
+        struct Request: Codable {
+            var input: UInt64
+            var cached: UInt64
+            var output: UInt64
+            var total: UInt64
+            var cacheWrite: UInt64
+            var cacheWrite1h: UInt64
+            var model: String
+            var at: Date?
+        }
+        var size: Int
+        var modified: Date
+        var offset: UInt64
+        var lineCount: Int
+        var sessionID: String
+        var title: String?
+        var summary: String?
+        var preview: String?
+        var cwd: String?
+        var model: String?
+        var createdAt: Date?
+        var updatedAt: Date?
+        var requests: [String: Request]
+    }
+
+    private static let claudeParseCacheVersion = 1
+    private struct DiskParseCache: Codable {
+        var version: Int
+        var files: [String: DiskParsedFile]
+    }
+
+    nonisolated(unsafe) private static var claudeParseCacheLoaded = false
+    nonisolated(unsafe) private static var claudeParseCacheDirty = false
+    nonisolated(unsafe) private static var claudeParseCacheSavedAt: Date?
+    private static let claudeParseCacheSaveInterval: TimeInterval = 300
+
+    private static var claudeParseCacheURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/MaxxBar/claude-parse-cache.json")
+    }
+
+    private static func loadClaudeParseCacheIfNeeded() {
+        claudeParsedFilesLock.lock()
+        defer { claudeParsedFilesLock.unlock() }
+        guard !claudeParseCacheLoaded else { return }
+        claudeParseCacheLoaded = true
+        guard let data = try? Data(contentsOf: claudeParseCacheURL),
+              let cache = try? JSONDecoder().decode(DiskParseCache.self, from: data),
+              cache.version == claudeParseCacheVersion else { return }
+        for (path, file) in cache.files where claudeParsedFiles[path] == nil {
+            let requests = file.requests.mapValues { request in
+                (
+                    usage: LLMTokenUsageSummary(
+                        inputTokens: request.input,
+                        cachedInputTokens: request.cached,
+                        outputTokens: request.output,
+                        reasoningOutputTokens: 0,
+                        totalTokens: request.total,
+                        turnCount: 1,
+                        cacheWriteInputTokens: request.cacheWrite,
+                        cacheWrite1hInputTokens: request.cacheWrite1h
+                    ),
+                    modelName: request.model,
+                    timestamp: request.at
+                )
+            }
+            claudeParsedFiles[path] = ClaudeParsedFileEntry(
+                stamp: ClaudeParsedFileStamp(size: file.size, modified: file.modified),
+                parsed: ClaudeParsedFile(
+                    sessionID: file.sessionID, title: file.title, summary: file.summary, preview: file.preview,
+                    cwd: file.cwd, model: file.model, createdAt: file.createdAt, updatedAt: file.updatedAt,
+                    requestUsage: requests
+                ),
+                offset: file.offset,
+                lineCount: file.lineCount
+            )
+        }
+    }
+
+    /// Written at most every five minutes, and only after a transcript was parsed.
+    private static func saveClaudeParseCacheIfNeeded() {
+        claudeParsedFilesLock.lock()
+        let now = Date()
+        guard claudeParseCacheDirty,
+              claudeParseCacheSavedAt.map({ now.timeIntervalSince($0) >= claudeParseCacheSaveInterval }) ?? true else {
+            claudeParsedFilesLock.unlock()
+            return
+        }
+        let files = claudeParsedFiles.mapValues { entry in
+            DiskParsedFile(
+                size: entry.stamp.size, modified: entry.stamp.modified, offset: entry.offset, lineCount: entry.lineCount,
+                sessionID: entry.parsed.sessionID, title: entry.parsed.title, summary: entry.parsed.summary,
+                preview: entry.parsed.preview, cwd: entry.parsed.cwd, model: entry.parsed.model,
+                createdAt: entry.parsed.createdAt, updatedAt: entry.parsed.updatedAt,
+                requests: entry.parsed.requestUsage.mapValues { request in
+                    DiskParsedFile.Request(
+                        input: request.usage.inputTokens, cached: request.usage.cachedInputTokens,
+                        output: request.usage.outputTokens, total: request.usage.totalTokens,
+                        cacheWrite: request.usage.cacheWriteInputTokens,
+                        cacheWrite1h: request.usage.cacheWrite1hInputTokens,
+                        model: request.modelName, at: request.timestamp
+                    )
+                }
+            )
+        }
+        claudeParseCacheDirty = false
+        claudeParseCacheSavedAt = now
+        claudeParsedFilesLock.unlock()
+        guard let data = try? JSONEncoder().encode(DiskParseCache(version: claudeParseCacheVersion, files: files)) else {
+            return
+        }
+        try? FileManager.default.createDirectory(
+            at: claudeParseCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try? data.write(to: claudeParseCacheURL, options: .atomic)
+    }
+
     /// Parses a transcript once and reuses the result until the file's size or modification date changes.
     /// Transcripts only grow, so a grown file is parsed from where the last pass stopped instead of from byte zero.
     private static func parsedClaudeFile(_ url: URL) -> ClaudeParsedFile? {
@@ -252,6 +376,7 @@ extension LLMUsageReader {
             claudeParsedFiles[url.path] = ClaudeParsedFileEntry(
                 stamp: stamp, parsed: parsed, offset: startOffset + UInt64(consumed), lineCount: lineCount
             )
+            claudeParseCacheDirty = true
             claudeParsedFilesLock.unlock()
         }
         return parsed
