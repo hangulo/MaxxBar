@@ -168,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var detachedWindow: NSWindow?
     private var timer: Timer?
+    private var lastVisibleProviders = ProviderVisibility.visibleProviders
     private let clipboardFlowMonitor = ClipboardFlowMonitor()
     private let clipboardMetadataMonitor = ClipboardMetadataMonitor()
     private var currentPopoverPanel: StatsPanel = .runway
@@ -215,7 +216,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.updateStatusTitle() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.updateStatusTitle()
+                // A provider that was just shown has not been read, and a hidden one is no longer polled: refresh now.
+                let visible = ProviderVisibility.visibleProviders
+                if visible != self.lastVisibleProviders {
+                    self.lastVisibleProviders = visible
+                    self.refreshLLMUsageInBackground(force: true)
+                }
+            }
         }
 
         refreshStatusInBackground()

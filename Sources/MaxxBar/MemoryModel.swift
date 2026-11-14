@@ -150,6 +150,9 @@ struct LLMUsageLimit: Identifiable, Equatable {
     var cachedAt: Date? = nil
     /// When this reading was taken, for display; set for Claude readings whether live or cached.
     var checkedAt: Date? = nil
+    /// Where the reading came from: "statusline" (Claude Code's own rate_limits), "endpoint" (a live usage request),
+    /// or "cache" (the last saved endpoint response).
+    var source: String? = nil
 
     var windows: [LLMUsageWindow] {
         [primary, secondary].compactMap { $0 }
@@ -179,7 +182,7 @@ struct LLMLocalUsageWindow: Identifiable, Equatable {
 
 struct LLMUsageSession: Identifiable, Equatable {
     var id: String
-    var provider: String = "Codex"
+    var provider: String
     var title: String
     var projectName: String
     var modelName: String
@@ -468,6 +471,8 @@ struct LLMTokenCostEstimate: Identifiable, Equatable {
 
 struct LLMUsageWindowLogEntry: Codable, Equatable {
     var recordedAt: Date
+    /// Missing in lines written before provider support; those lines are Codex.
+    var provider: String? = nil
     var windowLabel: String
     var windowStartedAt: Date
     var windowEndedAt: Date
@@ -483,8 +488,9 @@ struct LLMUsageWindowLogEntry: Codable, Equatable {
     var cachedInputDollarsPerMillion: Double
     var outputDollarsPerMillion: Double
 
-    init(recordedAt: Date = Date(), estimate: LLMTokenCostEstimate) {
+    init(recordedAt: Date = Date(), provider: String? = nil, estimate: LLMTokenCostEstimate) {
         self.recordedAt = recordedAt
+        self.provider = provider
         self.windowLabel = estimate.label
         self.windowStartedAt = estimate.windowStartedAt
         self.windowEndedAt = estimate.windowEndedAt
@@ -502,6 +508,8 @@ struct LLMUsageWindowLogEntry: Codable, Equatable {
     }
 }
 
+/// One point of quota history. The first four fields predate Claude support and hold Codex values
+/// (`planType` is the Codex plan). Every later field is optional so files written by older builds still decode.
 struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var id = UUID()
     var sampledAt: Date
@@ -509,6 +517,31 @@ struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var weeklyRemainingPercent: Int?
     var planType: String? = nil
     var claudeWeeklyRemainingPercent: Int? = nil
+    var claudeFiveHourRemainingPercent: Int? = nil
+    /// The Claude plan at the time of the sample, for example "Max 5x". A plan change starts a new drawdown segment.
+    var claudePlanType: String? = nil
+    /// Where the Claude reading came from (see `LLMUsageLimit.source`).
+    var claudeSource: String? = nil
+    var codexFiveHourResetAt: Date? = nil
+    var codexWeeklyResetAt: Date? = nil
+    var claudeFiveHourResetAt: Date? = nil
+    var claudeWeeklyResetAt: Date? = nil
+
+    func fiveHourRemainingPercent(for provider: String) -> Int? {
+        provider == "Claude" ? claudeFiveHourRemainingPercent : primaryRemainingPercent
+    }
+
+    func weeklyRemainingPercent(for provider: String) -> Int? {
+        provider == "Claude" ? claudeWeeklyRemainingPercent : weeklyRemainingPercent
+    }
+
+    func plan(for provider: String) -> String? {
+        provider == "Claude" ? claudePlanType : planType
+    }
+
+    func weeklyResetAt(for provider: String) -> Date? {
+        provider == "Claude" ? claudeWeeklyResetAt : codexWeeklyResetAt
+    }
 }
 
 private struct LLMQuotaActivitySignature: Equatable {
@@ -516,15 +549,21 @@ private struct LLMQuotaActivitySignature: Equatable {
     var weeklyRemainingPercent: Int?
     var planType: String?
     var claudeWeeklyRemainingPercent: Int?
+    var claudeFiveHourRemainingPercent: Int?
+    var claudePlanType: String?
     var localFiveHourTokens: UInt64
     var localWeeklyTokens: UInt64
     var localWeeklyThreads: Int
     var latestSessionUpdateSecond: Int?
 
-    init(usage: LLMUsageSnapshot, limit: LLMUsageLimit) {
-        self.primaryRemainingPercent = limit.shortWindow?.remainingPercent
-        self.weeklyRemainingPercent = limit.weeklyWindow?.remainingPercent
-        self.claudeWeeklyRemainingPercent = usage.limits.first { $0.name == "Claude" }?.weeklyWindow?.remainingPercent
+    init(usage: LLMUsageSnapshot) {
+        let codex = usage.limits.first { $0.name == "Codex" }
+        let claude = usage.limits.first { $0.name == "Claude" }
+        self.primaryRemainingPercent = codex?.shortWindow?.remainingPercent
+        self.weeklyRemainingPercent = codex?.weeklyWindow?.remainingPercent
+        self.claudeWeeklyRemainingPercent = claude?.weeklyWindow?.remainingPercent
+        self.claudeFiveHourRemainingPercent = claude?.shortWindow?.remainingPercent
+        self.claudePlanType = usage.claudePlanType
         self.planType = usage.planType
         self.localFiveHourTokens = usage.localFiveHourTokens
         self.localWeeklyTokens = usage.localWeeklyTokens
@@ -556,6 +595,11 @@ struct LLMUsageSnapshot: Equatable {
     var weeklyModelUsage: [LLMModelUsageTotal] = []
     var dailyModelUsage: [LLMModelUsageTotal] = []
     var providerAccounts: [LLMProviderAccount] = []
+
+    /// The Claude plan from the local Claude profile. `planType` above is the Codex plan.
+    var claudePlanType: String? {
+        providerAccounts.first { $0.provider == "Claude" }?.planName
+    }
 }
 
 struct LLMProviderAccount: Identifiable, Equatable {
@@ -1224,9 +1268,9 @@ final class MemoryModel: ObservableObject {
     private func sampleLLMQuotaIfNeeded(force: Bool = false) {
         let codex = llmUsage.limits.first { $0.name == "Codex" }
         let claude = llmUsage.limits.first { $0.name == "Claude" }
-        guard let limit = codex ?? claude else { return }
+        guard codex != nil || claude != nil else { return }
         let now = Date()
-        let activitySignature = LLMQuotaActivitySignature(usage: llmUsage, limit: limit)
+        let activitySignature = LLMQuotaActivitySignature(usage: llmUsage)
         if !force,
            let previousLLMQuotaSample,
            now.timeIntervalSince(previousLLMQuotaSample) < llmQuotaSampleInterval(for: activitySignature) {
@@ -1238,8 +1282,15 @@ final class MemoryModel: ObservableObject {
                 sampledAt: now,
                 primaryRemainingPercent: codex?.shortWindow?.remainingPercent,
                 weeklyRemainingPercent: codex?.weeklyWindow?.remainingPercent,
-                planType: llmUsage.planType,
-                claudeWeeklyRemainingPercent: claude?.weeklyWindow?.remainingPercent
+                planType: codex == nil ? nil : llmUsage.planType,
+                claudeWeeklyRemainingPercent: claude?.weeklyWindow?.remainingPercent,
+                claudeFiveHourRemainingPercent: claude?.shortWindow?.remainingPercent,
+                claudePlanType: claude == nil ? nil : llmUsage.claudePlanType,
+                claudeSource: claude?.source,
+                codexFiveHourResetAt: codex?.shortWindow?.resetAt,
+                codexWeeklyResetAt: codex?.weeklyWindow?.resetAt,
+                claudeFiveHourResetAt: claude?.shortWindow?.resetAt,
+                claudeWeeklyResetAt: claude?.weeklyWindow?.resetAt
             )
         )
         previousLLMQuotaSample = now
@@ -1320,12 +1371,20 @@ final class MemoryModel: ObservableObject {
         }
     }
 
+    nonisolated(unsafe) private static var lastLoggedFiveHourEntry: LLMUsageWindowLogEntry?
+
+    /// Appends a line only when the window's numbers changed; before this, about 90% of lines repeated the previous one.
+    /// Called from one background refresh at a time (guarded by isRefreshingLLMUsage).
     nonisolated private static func logFiveHourUsageWindow(from usage: LLMUsageSnapshot) {
         guard let estimate = usage.costEstimates.first(where: { $0.label.lowercased() == "5h" }),
-              let url = fiveHourUsageLogURL,
-              let line = logLine(for: LLMUsageWindowLogEntry(estimate: estimate)) else {
+              let url = fiveHourUsageLogURL else {
             return
         }
+        let entry = LLMUsageWindowLogEntry(provider: "Codex", estimate: estimate)
+        var comparable = entry
+        comparable.recordedAt = lastLoggedFiveHourEntry?.recordedAt ?? entry.recordedAt
+        guard comparable != lastLoggedFiveHourEntry, let line = logLine(for: entry) else { return }
+        lastLoggedFiveHourEntry = entry
 
         do {
             try FileManager.default.createDirectory(
@@ -1656,6 +1715,7 @@ extension LLMUsageSnapshot {
         recentSessions: [
             LLMUsageSession(
                 id: "demo-1",
+                provider: "Codex",
                 title: "MaxxBar LLM usage tab",
                 projectName: "MaxxBar",
                 modelName: "GPT-5 Codex",
@@ -1668,6 +1728,7 @@ extension LLMUsageSnapshot {
             ),
             LLMUsageSession(
                 id: "demo-2",
+                provider: "Codex",
                 title: "Sensor helper",
                 projectName: "MaxxBar",
                 modelName: "GPT-5.3 Codex",
@@ -1682,6 +1743,7 @@ extension LLMUsageSnapshot {
         topWeeklySessions: [
             LLMUsageSession(
                 id: "demo-1",
+                provider: "Codex",
                 title: "MaxxBar LLM usage tab",
                 projectName: "MaxxBar",
                 modelName: "GPT-5 Codex",
@@ -2615,6 +2677,9 @@ enum AIUsageReader {
         var cpuSystemPercent: Int
         var codexFiveHourRemainingPercent: Int?
         var codexWeeklyRemainingPercent: Int?
+        // Rows written before these fields existed may hold Claude values in the codex fields above.
+        var claudeFiveHourRemainingPercent: Int? = nil
+        var claudeWeeklyRemainingPercent: Int? = nil
     }
 
     private struct MaxxMomentRecord: Codable {
@@ -2634,6 +2699,8 @@ enum AIUsageReader {
         var codexFiveHourRemainingPercent: Int?
         var codexWeeklyRemainingPercent: Int?
         var note: String
+        var claudeFiveHourRemainingPercent: Int? = nil
+        var claudeWeeklyRemainingPercent: Int? = nil
     }
 
     private struct AITransferRecord: Codable {
@@ -2772,7 +2839,9 @@ enum AIUsageReader {
             cpuSystemPercent: record.cpuSystemPercent,
             codexFiveHourRemainingPercent: record.codexFiveHourRemainingPercent,
             codexWeeklyRemainingPercent: record.codexWeeklyRemainingPercent,
-            note: cleanNote.isEmpty ? sentiment : cleanNote
+            note: cleanNote.isEmpty ? sentiment : cleanNote,
+            claudeFiveHourRemainingPercent: record.claudeFiveHourRemainingPercent,
+            claudeWeeklyRemainingPercent: record.claudeWeeklyRemainingPercent
         )
         appendActivityRecord(record)
         appendMomentRecord(moment)
@@ -2865,7 +2934,8 @@ enum AIUsageReader {
         cpuGPU: CPUGPUSnapshot,
         llmUsage: LLMUsageSnapshot
     ) -> AIActivityRecord {
-        let codexLimit = llmUsage.limits.first(where: { $0.name == "Codex" }) ?? llmUsage.limits.first
+        let codexLimit = llmUsage.limits.first { $0.name == "Codex" }
+        let claudeLimit = llmUsage.limits.first { $0.name == "Claude" }
         return AIActivityRecord(
             ts: Date(),
             app: context.app,
@@ -2881,7 +2951,9 @@ enum AIUsageReader {
             cpuUserPercent: cpuGPU.cpuUserPercent,
             cpuSystemPercent: cpuGPU.cpuSystemPercent,
             codexFiveHourRemainingPercent: codexLimit?.shortWindow?.remainingPercent,
-            codexWeeklyRemainingPercent: codexLimit?.weeklyWindow?.remainingPercent
+            codexWeeklyRemainingPercent: codexLimit?.weeklyWindow?.remainingPercent,
+            claudeFiveHourRemainingPercent: claudeLimit?.shortWindow?.remainingPercent,
+            claudeWeeklyRemainingPercent: claudeLimit?.weeklyWindow?.remainingPercent
         )
     }
 
@@ -4051,7 +4123,10 @@ enum AIUsageReader {
 }
 
 enum LLMUsageReader {
-    private struct LocalCodexUsage {
+    /// Local token and session totals for one provider (Codex from its sqlite state, Claude from transcripts).
+    private struct LocalProviderUsage {
+        static let empty = LocalProviderUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], costEstimates: [], recentSessions: [], topWeeklySessions: [], modelUsage: [], dailyModelUsage: [])
+
         let fiveHourTokens: UInt64
         let weeklyTokens: UInt64
         let weeklyThreads: Int
@@ -4404,19 +4479,20 @@ enum LLMUsageReader {
     /// `checkClaudeNow` asks the Claude usage endpoint immediately unless a cooldown is active or it was read under 30s ago.
     /// Local scans (Claude transcripts, Codex sqlite) are the expensive part of a read. The menu bar only needs the
     /// quotas, so while the popover is closed callers pass refreshLocal: false and reuse the last scan for a while.
-    nonisolated(unsafe) private static var cachedLocalUsage: (codex: LocalCodexUsage, claude: LocalCodexUsage, at: Date)?
+    nonisolated(unsafe) private static var cachedLocalUsage: (codex: LocalProviderUsage, claude: LocalProviderUsage, at: Date)?
     private static let cachedLocalUsageLock = NSLock()
     private static let localUsageMaxAge: TimeInterval = 10 * 60
 
-    private static func localUsage(refresh: Bool) -> (codex: LocalCodexUsage, claude: LocalCodexUsage) {
+    private static func localUsage(refresh: Bool) -> (codex: LocalProviderUsage, claude: LocalProviderUsage) {
         cachedLocalUsageLock.lock()
         let cached = cachedLocalUsage
         cachedLocalUsageLock.unlock()
         if !refresh, let cached, Date().timeIntervalSince(cached.at) < localUsageMaxAge {
             return (cached.codex, cached.claude)
         }
-        let codex = readLocalCodexUsage()
-        let claude = readLocalClaudeUsage()
+        // A provider hidden with the eye toggle is not scanned at all.
+        let codex = ProviderVisibility.showCodex ? readLocalCodexUsage() : .empty
+        let claude = ProviderVisibility.showClaude ? readLocalClaudeUsage() : .empty
         cachedLocalUsageLock.lock()
         cachedLocalUsage = (codex, claude, Date())
         cachedLocalUsageLock.unlock()
@@ -4426,7 +4502,9 @@ enum LLMUsageReader {
     static func read(checkClaudeNow: Bool = false, refreshLocal: Bool = true) -> LLMUsageSnapshot {
         let (codexLocal, claudeLocal) = localUsage(refresh: refreshLocal)
         let local = mergedLocalUsage(codexLocal, claudeLocal)
-        var snapshot = readCodexUsage(local: local)
+        var snapshot = ProviderVisibility.showCodex
+            ? readCodexUsage(local: local)
+            : snapshotWithLocalUsage(local, error: nil)
         snapshot.weeklyModelUsage = local.modelUsage
         snapshot.dailyModelUsage = local.dailyModelUsage
         snapshot.providerAccounts = providerAccounts(
@@ -4439,6 +4517,10 @@ enum LLMUsageReader {
         // Record the Codex error first: applyClaudeLimits rebuilds `error` from providerErrors.
         if let codexError = snapshot.error {
             snapshot.providerErrors["Codex"] = codexError
+        }
+        guard ProviderVisibility.showClaude else {
+            snapshot.providerAccounts.removeAll { $0.provider == "Claude" }
+            return snapshot
         }
         let claudeActivity = (claudeLocal.recentSessions + claudeLocal.topWeeklySessions).compactMap(\.updatedAt).max()
         applyClaudeLimits(
@@ -4498,7 +4580,11 @@ enum LLMUsageReader {
 
         let seatTier = text("seatTier")
         let plan: String?
-        if let seatTier {
+        if let tier = text("userRateLimitTier") ?? text("organizationRateLimitTier"),
+           let tierPlan = claudePlanName(rateLimitTier: tier) {
+            // The rate limit tier separates Max 5x from Max 20x; seatTier is often empty on personal plans.
+            plan = tierPlan
+        } else if let seatTier {
             let normalized = seatTier.lowercased()
             if normalized.contains("team") {
                 plan = "Team"
@@ -4524,7 +4610,21 @@ enum LLMUsageReader {
         )
     }
 
-    private static func readCodexUsage(local: LocalCodexUsage) -> LLMUsageSnapshot {
+    /// Maps tiers such as "default_claude_max_5x" to "Max 5x".
+    static func claudePlanName(rateLimitTier tier: String) -> String? {
+        let normalized = tier.lowercased()
+        if normalized.contains("max") {
+            if normalized.contains("20x") { return "Max 20x" }
+            if normalized.contains("5x") { return "Max 5x" }
+            return "Max"
+        }
+        if normalized.contains("enterprise") { return "Enterprise" }
+        if normalized.contains("team") { return "Team" }
+        if normalized.contains("pro") { return "Pro" }
+        return nil
+    }
+
+    private static func readCodexUsage(local: LocalProviderUsage) -> LLMUsageSnapshot {
         guard let token = readAccessToken() else {
             return LLMUsageSnapshot(
                 email: nil,
@@ -4685,6 +4785,7 @@ enum LLMUsageReader {
         // Mark older captures as previously checked readings.
         limit.cachedAt = ClaudeUsagePollingState.staleMarker(checkedAt: tapped.capturedAt, now: now)
         limit.checkedAt = tapped.capturedAt
+        limit.source = "statusline"
         return limit
     }
 
@@ -4738,6 +4839,7 @@ enum LLMUsageReader {
             if let reset = limits[index].secondary?.resetAt, reset <= now { limits[index].secondary = nil }
             limits[index].cachedAt = ClaudeUsagePollingState.staleMarker(checkedAt: fetchedAt, now: now)
             limits[index].checkedAt = fetchedAt
+            limits[index].source = "cache"
         }
         limits.removeAll { $0.windows.isEmpty }
         return limits
@@ -4839,7 +4941,10 @@ enum LLMUsageReader {
         }
         state.succeeded(data: data, at: now)
         var limits = claudeLimits(from: response)
-        for index in limits.indices { limits[index].checkedAt = now }
+        for index in limits.indices {
+            limits[index].checkedAt = now
+            limits[index].source = "endpoint"
+        }
         return .success(limits, warning: nil)
     }
 
@@ -4903,9 +5008,9 @@ enum LLMUsageReader {
     }
 
     private static func mergedLocalUsage(
-        _ codex: LocalCodexUsage,
-        _ claude: LocalCodexUsage
-    ) -> LocalCodexUsage {
+        _ codex: LocalProviderUsage,
+        _ claude: LocalProviderUsage
+    ) -> LocalProviderUsage {
         let labels = ["1h", "5h", "24h", "7d"]
         let windows = labels.map { label in
             let values = (codex.windows + claude.windows).filter { $0.label == label }
@@ -4922,7 +5027,7 @@ enum LLMUsageReader {
                 ? ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast)
                 : $0.tokens > $1.tokens
             }
-        return LocalCodexUsage(
+        return LocalProviderUsage(
             fiveHourTokens: codex.fiveHourTokens + claude.fiveHourTokens,
             weeklyTokens: codex.weeklyTokens + claude.weeklyTokens,
             weeklyThreads: codex.weeklyThreads + claude.weeklyThreads,
@@ -4959,7 +5064,7 @@ enum LLMUsageReader {
         return sessions.filter { seen.insert("\($0.provider):\($0.id)").inserted }
     }
 
-    private static func readLocalClaudeUsage() -> LocalCodexUsage {
+    private static func readLocalClaudeUsage() -> LocalProviderUsage {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         let roots = [
             home.appendingPathComponent(".claude/projects", isDirectory: true),
@@ -5013,7 +5118,7 @@ enum LLMUsageReader {
                 ? ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast)
                 : $0.tokens > $1.tokens
             }
-        return LocalCodexUsage(
+        return LocalProviderUsage(
             fiveHourTokens: windows.first(where: { $0.label == "5h" })?.tokens ?? 0,
             weeklyTokens: windows.first(where: { $0.label == "7d" })?.tokens ?? 0,
             weeklyThreads: windows.first(where: { $0.label == "7d" })?.threads ?? 0,
@@ -5425,10 +5530,10 @@ enum LLMUsageReader {
         return 0
     }
 
-    private static func readLocalCodexUsage() -> LocalCodexUsage {
+    private static func readLocalCodexUsage() -> LocalProviderUsage {
         let databasePath = "\(NSHomeDirectory())/.codex/state_5.sqlite"
         guard FileManager.default.fileExists(atPath: databasePath) else {
-            return LocalCodexUsage(fiveHourTokens: 0, weeklyTokens: 0, weeklyThreads: 0, windows: [], costEstimates: [], recentSessions: [], topWeeklySessions: [], modelUsage: [], dailyModelUsage: [])
+            return .empty
         }
 
         let windows = [
@@ -5440,7 +5545,7 @@ enum LLMUsageReader {
         let fiveHour = windows.first(where: { $0.label == "5h" }) ?? LLMLocalUsageWindow(label: "5h", tokens: 0, threads: 0)
         let weekly = windows.first(where: { $0.label == "7d" }) ?? LLMLocalUsageWindow(label: "7d", tokens: 0, threads: 0)
 
-        return LocalCodexUsage(
+        return LocalProviderUsage(
             fiveHourTokens: fiveHour.tokens,
             weeklyTokens: weekly.tokens,
             weeklyThreads: weekly.threads,
@@ -5581,6 +5686,7 @@ enum LLMUsageReader {
             let rolloutPath = compactText(row[8], fallback: "")
             return LLMUsageSession(
                 id: row[0],
+                provider: "Codex",
                 title: title,
                 projectName: project,
                 modelName: model,
@@ -5756,8 +5862,8 @@ enum LLMUsageReader {
     }
 
     private static func snapshotWithLocalUsage(
-        _ local: LocalCodexUsage,
-        error: String
+        _ local: LocalProviderUsage,
+        error: String?
     ) -> LLMUsageSnapshot {
         LLMUsageSnapshot(
             email: nil,

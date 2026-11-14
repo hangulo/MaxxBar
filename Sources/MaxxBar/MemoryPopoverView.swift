@@ -162,6 +162,9 @@ enum ProviderVisibility {
         let names = [showClaude ? "Claude" : nil, showCodex ? "Codex" : nil].compactMap { $0 }
         return names.isEmpty ? ["Claude", "Codex"] : names
     }
+
+    /// The provider tracked first-class (drawdown insight and pace): Claude when shown, otherwise Codex.
+    static var primaryProvider: String { visibleProviders[0] }
 }
 
 struct ProviderVisibilityMenu: View {
@@ -1876,11 +1879,15 @@ struct DrawdownInsightCard: View {
     let snapshot: LLMUsageSnapshot
     let quotaHistory: [LLMQuotaHistorySample]
     @State private var mode = LLMQuotaDrawdownMode.last
+    @AppStorage(ProviderVisibility.showClaudeKey) private var showClaude = true
+    @AppStorage(ProviderVisibility.showCodexKey) private var showCodex = true
+
+    private var provider: String { showClaude || !showCodex ? "Claude" : "Codex" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                InstantHelpTitle("DRAWDOWN INSIGHT", help: drawdownInsightHelp)
+                InstantHelpTitle("\(provider.uppercased()) DRAWDOWN", help: drawdownInsightHelp)
                 Spacer()
                 if insight != nil {
                     LLMQuotaDrawdownModeToggle(selection: $mode)
@@ -1888,7 +1895,7 @@ struct DrawdownInsightCard: View {
             }
 
             if let insight {
-                LLMQuotaDrawdownInsightView(insight: insight)
+                LLMQuotaDrawdownInsightView(insight: insight, accent: provider == "Claude" ? .claudeCoral : .accentBlue)
             } else {
                 Text("No local drawdown pattern yet")
                     .font(.system(size: 12.5, weight: .regular))
@@ -1899,7 +1906,7 @@ struct DrawdownInsightCard: View {
     }
 
     private var insight: LLMQuotaDrawdownInsight? {
-        quotaDrawdownInsight(from: rangedQuotaHistory, mode: mode)
+        quotaDrawdownInsight(from: rangedQuotaHistory, provider: provider, mode: mode)
     }
 
     private var rangedQuotaHistory: [LLMQuotaHistorySample] {
@@ -1909,23 +1916,32 @@ struct DrawdownInsightCard: View {
     }
 
     private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
-        if !quotaHistory.isEmpty {
-            return quotaHistory
-        }
-
-        guard let limit = snapshot.limits.first(where: { $0.name == "Codex" }) ?? snapshot.limits.first else {
-            return []
-        }
-
-        return [
-            LLMQuotaHistorySample(
-                sampledAt: snapshot.lastUpdated ?? Date(),
-                primaryRemainingPercent: limit.shortWindow?.remainingPercent,
-                weeklyRemainingPercent: limit.weeklyWindow?.remainingPercent,
-                planType: snapshot.planType
-            )
-        ]
+        quotaHistoryWithLiveReading(quotaHistory, snapshot: snapshot)
     }
+}
+
+/// The saved history plus the current reading when it is newer than the last saved sample.
+private func quotaHistoryWithLiveReading(_ history: [LLMQuotaHistorySample], snapshot: LLMUsageSnapshot) -> [LLMQuotaHistorySample] {
+    let codex = snapshot.limits.first { $0.name == "Codex" }
+    let claude = snapshot.limits.first { $0.name == "Claude" }
+    guard let updatedAt = snapshot.lastUpdated, codex != nil || claude != nil,
+          updatedAt > (history.last?.sampledAt ?? .distantPast) else {
+        return history
+    }
+    return history + [LLMQuotaHistorySample(
+        sampledAt: updatedAt,
+        primaryRemainingPercent: codex?.shortWindow?.remainingPercent,
+        weeklyRemainingPercent: codex?.weeklyWindow?.remainingPercent,
+        planType: codex == nil ? nil : snapshot.planType,
+        claudeWeeklyRemainingPercent: claude?.weeklyWindow?.remainingPercent,
+        claudeFiveHourRemainingPercent: claude?.shortWindow?.remainingPercent,
+        claudePlanType: claude == nil ? nil : snapshot.claudePlanType,
+        claudeSource: claude?.source,
+        codexFiveHourResetAt: codex?.shortWindow?.resetAt,
+        codexWeeklyResetAt: codex?.weeklyWindow?.resetAt,
+        claudeFiveHourResetAt: claude?.shortWindow?.resetAt,
+        claudeWeeklyResetAt: claude?.weeklyWindow?.resetAt
+    )]
 }
 
 struct LLMLocalUsageCard: View {
@@ -1960,20 +1976,7 @@ struct LLMLocalUsageCard: View {
     }
 
     private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
-        var history = quotaHistory
-        let codex = snapshot.limits.first { $0.name == "Codex" }
-        let claude = snapshot.limits.first { $0.name == "Claude" }
-        if let updatedAt = snapshot.lastUpdated, codex != nil || claude != nil,
-           updatedAt > (history.last?.sampledAt ?? .distantPast) {
-            history.append(LLMQuotaHistorySample(
-                sampledAt: updatedAt,
-                primaryRemainingPercent: codex?.shortWindow?.remainingPercent,
-                weeklyRemainingPercent: codex?.weeklyWindow?.remainingPercent,
-                planType: snapshot.planType,
-                claudeWeeklyRemainingPercent: claude?.weeklyWindow?.remainingPercent
-            ))
-        }
-        return history
+        quotaHistoryWithLiveReading(quotaHistory, snapshot: snapshot)
     }
 
     private var rangedQuotaHistory: [LLMQuotaHistorySample] {
@@ -2127,12 +2130,21 @@ struct LLMQuotaHistoryGraph: View {
     let range: LLMQuotaHistoryRange
     var rangeSelection: Binding<LLMQuotaHistoryRange>?
     @State private var hoveredPoint: LLMQuotaPlotPoint?
+    @AppStorage(ProviderVisibility.showClaudeKey) private var showClaude = true
+    @AppStorage(ProviderVisibility.showCodexKey) private var showCodex = true
+
+    private var drawsCodex: Bool { showCodex || !showClaude }
+    private var drawsClaude: Bool { showClaude || !showCodex }
 
     var body: some View {
         VStack(spacing: 5) {
             HStack(spacing: 12) {
-                seriesLegend("Codex", keyPath: \.weeklyRemainingPercent, color: .accentBlue)
-                seriesLegend("Claude", keyPath: \.claudeWeeklyRemainingPercent, color: .claudeCoral)
+                if drawsClaude {
+                    seriesLegend("Claude", keyPath: \.claudeWeeklyRemainingPercent, color: .claudeCoral)
+                }
+                if drawsCodex {
+                    seriesLegend("Codex", keyPath: \.weeklyRemainingPercent, color: .accentBlue)
+                }
                 Spacer()
                 if let rangeSelection {
                     LLMQuotaHistoryRangeToggle(selection: rangeSelection, ranges: [.day, .threeDays, .sevenDays])
@@ -2168,23 +2180,26 @@ struct LLMQuotaHistoryGraph: View {
                             .position(x: 12, y: y)
                     }
 
-                    linePath(for: \.weeklyRemainingPercent, in: chartRect)
-                        .stroke(
-                            Color.accentBlue.opacity(0.28),
-                            style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
-                        )
-                    linePath(for: \.weeklyRemainingPercent, in: chartRect)
-                        .stroke(
-                            Color.accentBlue,
-                            style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
-                        )
-                    linePath(for: \.claudeWeeklyRemainingPercent, in: chartRect)
-                        .stroke(Color.claudeCoral.opacity(0.25), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
-                    linePath(for: \.claudeWeeklyRemainingPercent, in: chartRect)
-                        .stroke(Color.claudeCoral, style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
-
-                    sampleDots(for: \.weeklyRemainingPercent, color: .accentBlue, label: "Codex", in: chartRect)
-                    sampleDots(for: \.claudeWeeklyRemainingPercent, color: .claudeCoral, label: "Claude", in: chartRect)
+                    if drawsCodex {
+                        linePath(for: \.weeklyRemainingPercent, in: chartRect)
+                            .stroke(
+                                Color.accentBlue.opacity(0.28),
+                                style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
+                            )
+                        linePath(for: \.weeklyRemainingPercent, in: chartRect)
+                            .stroke(
+                                Color.accentBlue,
+                                style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
+                            )
+                        sampleDots(for: \.weeklyRemainingPercent, color: .accentBlue, label: "Codex", in: chartRect)
+                    }
+                    if drawsClaude {
+                        linePath(for: \.claudeWeeklyRemainingPercent, in: chartRect)
+                            .stroke(Color.claudeCoral.opacity(0.25), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                        linePath(for: \.claudeWeeklyRemainingPercent, in: chartRect)
+                            .stroke(Color.claudeCoral, style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
+                        sampleDots(for: \.claudeWeeklyRemainingPercent, color: .claudeCoral, label: "Claude", in: chartRect)
+                    }
 
                     if let hoveredPoint {
                         hoverIndicator(for: hoveredPoint, in: chartRect)
@@ -2261,8 +2276,8 @@ struct LLMQuotaHistoryGraph: View {
     }
 
     private func nearestPoint(to location: CGPoint, in rect: CGRect) -> LLMQuotaPlotPoint? {
-        let points = changePlotPoints(for: \.weeklyRemainingPercent, label: "Codex")
-            + changePlotPoints(for: \.claudeWeeklyRemainingPercent, label: "Claude")
+        let points = (drawsCodex ? changePlotPoints(for: \.weeklyRemainingPercent, label: "Codex") : [])
+            + (drawsClaude ? changePlotPoints(for: \.claudeWeeklyRemainingPercent, label: "Claude") : [])
         guard location.x >= rect.minX - 8, location.x <= rect.maxX + 8 else { return nil }
         return points.min {
             hypot(pointPosition(for: $0, in: rect).x - location.x, pointPosition(for: $0, in: rect).y - location.y)
@@ -2350,6 +2365,8 @@ struct LLMQuotaDrawdownInsight: Identifiable {
     let startedAt: Date
     let endedAt: Date
     let milestones: [LLMQuotaMilestone]
+    /// Burn rate over the current segment (since the last reset or plan change), when there is one to show.
+    var paceText: String? = nil
 }
 
 struct LLMQuotaMilestone: Identifiable {
@@ -2361,6 +2378,7 @@ struct LLMQuotaMilestone: Identifiable {
 
 struct LLMQuotaDrawdownInsightView: View {
     let insight: LLMQuotaDrawdownInsight
+    var accent: Color = .accentBlue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -2369,7 +2387,7 @@ struct LLMQuotaDrawdownInsightView: View {
                     Text("\(insight.startPercent)% → \(insight.endPercent)% in")
                         .foregroundStyle(.white.opacity(0.86))
                     Text(insight.durationText)
-                        .foregroundStyle(Color.accentBlue)
+                        .foregroundStyle(accent)
                 }
                 .font(.system(size: 11.5, weight: .semibold))
                 .lineLimit(1)
@@ -2385,12 +2403,20 @@ struct LLMQuotaDrawdownInsightView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .lineLimit(2)
 
+            if let paceText = insight.paceText {
+                Text(paceText)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.78))
+                    .monospacedDigit()
+                    .lineLimit(2)
+            }
+
             VStack(spacing: 2) {
                 ForEach(insight.milestones) { milestone in
                     HStack(spacing: 7) {
                         Text(milestone.label)
                             .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Color.accentBlue.opacity(0.9))
+                            .foregroundStyle(accent.opacity(0.9))
                             .frame(width: 42, alignment: .leading)
                         Text(quotaMilestoneTime(milestone.sampledAt))
                             .font(.system(size: 10.5, weight: .regular))
@@ -4530,26 +4556,52 @@ private struct LLMQuotaValue {
     let sampledAt: Date
     let remainingPercent: Int
     let planType: String?
+    var resetAt: Date? = nil
 }
 
-private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample], mode: LLMQuotaDrawdownMode) -> LLMQuotaDrawdownInsight? {
+/// True when sample `index` starts a new plan: both plans are known and differ, or remaining jumped up
+/// while the previous sample said the weekly reset was still more than a minute away.
+private func isPlanChange(_ values: [LLMQuotaValue], at index: Int) -> Bool {
+    let previous = values[index - 1]
+    let current = values[index]
+    if let before = previous.planType, let after = current.planType {
+        return before.caseInsensitiveCompare(after) != .orderedSame
+    }
+    if current.remainingPercent > previous.remainingPercent + 2,
+       let resetAt = previous.resetAt,
+       current.sampledAt < resetAt.addingTimeInterval(-60) {
+        return true
+    }
+    return false
+}
+
+private func quotaDrawdownInsight(
+    from samples: [LLMQuotaHistorySample],
+    provider: String,
+    mode: LLMQuotaDrawdownMode
+) -> LLMQuotaDrawdownInsight? {
     let values = samples
         .compactMap { sample -> LLMQuotaValue? in
-            guard let remaining = sample.weeklyRemainingPercent else { return nil }
+            guard let remaining = sample.weeklyRemainingPercent(for: provider) else { return nil }
             return LLMQuotaValue(
                 sampledAt: sample.sampledAt,
                 remainingPercent: remaining,
-                planType: sample.planType
+                planType: sample.plan(for: provider),
+                resetAt: sample.weeklyResetAt(for: provider)
             )
         }
         .sorted { $0.sampledAt < $1.sampledAt }
 
     guard values.count >= 2 else { return nil }
 
+    // A plan change rescales the percentages, so it starts a new segment but is not a reset.
+    let planChangeIndices = values.indices.dropFirst().filter { isPlanChange(values, at: $0) }
     let resetIndices = values.indices.dropFirst().filter { index in
-        values[index].remainingPercent - values[index - 1].remainingPercent >= 50
+        !planChangeIndices.contains(index)
+            && values[index].remainingPercent - values[index - 1].remainingPercent >= 50
             && values[index].remainingPercent >= 80
     }
+    let segmentStarts = (resetIndices + planChangeIndices).sorted()
 
     var resetAfterIndex: Int?
     let segmentStart: Int
@@ -4563,16 +4615,16 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample], mode: L
            values[lastReset - 1].remainingPercent <= 20 {
             resetAfterIndex = lastReset
             segmentEnd = lastReset - 1
-            segmentStart = resetIndices.last(where: { $0 < segmentEnd }) ?? 0
+            segmentStart = segmentStarts.last(where: { $0 <= segmentEnd }) ?? 0
             subtitle = "Last exhausted run before the current reset; crossings may fall between samples."
         } else {
             segmentEnd = values.count - 1
-            segmentStart = resetIndices.last(where: { $0 < segmentEnd }) ?? 0
+            segmentStart = segmentStarts.last(where: { $0 <= segmentEnd }) ?? 0
             subtitle = "Latest sampled drawdown; crossings may fall between samples."
         }
     case .current:
         segmentEnd = values.count - 1
-        segmentStart = resetIndices.last ?? 0
+        segmentStart = segmentStarts.last ?? 0
         subtitle = "Current sampled drawdown; crossings may fall between samples."
     }
 
@@ -4648,8 +4700,27 @@ private func quotaDrawdownInsight(from samples: [LLMQuotaHistorySample], mode: L
         planLabel: planLabel(from: values, start: fullIndex, end: lowIndex),
         startedAt: values[fullIndex].sampledAt,
         endedAt: values[lowIndex].sampledAt,
-        milestones: deduplicatedMilestones(milestones)
+        milestones: deduplicatedMilestones(milestones),
+        paceText: quotaPaceText(values, since: segmentStarts.last ?? 0)
     )
+}
+
+/// Burn rate from the last reset or plan change to now, and whether the week lasts until its reset at that pace.
+/// Samples from before a plan change are never mixed in, because their percentages measure a different allowance.
+private func quotaPaceText(_ values: [LLMQuotaValue], since start: Int) -> String? {
+    guard let last = values.last, start < values.count - 1 else { return nil }
+    let first = values[start]
+    let hours = last.sampledAt.timeIntervalSince(first.sampledAt) / 3_600
+    let used = first.remainingPercent - last.remainingPercent
+    guard hours >= 1, used > 0 else { return nil }
+    let perDay = Double(used) / hours * 24
+    let rate = perDay >= 10 ? String(format: "%.0f%%/day", perDay) : String(format: "%.1f%%/day", perDay)
+    let hoursLeft = Double(last.remainingPercent) / (perDay / 24)
+    let emptyAt = last.sampledAt.addingTimeInterval(hoursLeft * 3_600)
+    if let resetAt = last.resetAt, emptyAt >= resetAt {
+        return "Pace \(rate) since \(quotaDayTime(first.sampledAt)). Lasts until the reset."
+    }
+    return "Pace \(rate) since \(quotaDayTime(first.sampledAt)). Runs out around \(quotaDayTime(emptyAt))."
 }
 
 private func appendDrawdownMilestone(_ milestone: LLMQuotaMilestone, to milestones: inout [LLMQuotaMilestone]) {
@@ -4789,6 +4860,13 @@ private func quotaMilestoneTime(_ value: Date) -> String {
     exactClockTime(value)
 }
 
+/// "Tue 4:00 p.m." for times that may be days away.
+private func quotaDayTime(_ value: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "EEE"
+    return "\(formatter.string(from: value)) \(exactClockTime(value))"
+}
+
 private func exactClockTime(_ value: Date) -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "h:mm a"
@@ -4817,7 +4895,7 @@ Shows your live Claude five-hour and weekly usage windows when Claude Code OAuth
 """
 
 private let limitDrawdownHelp = """
-Shows weekly quota remaining over the last 24 hours, 72 hours, or seven days (pick with the toggle): Codex in blue and Claude in orange. Markers and hover details focus on changes rather than repeated samples. Claude history starts when MaxxBar first records its quota; earlier values are unavailable.
+Shows weekly quota remaining over the last 24 hours, 72 hours, or seven days (pick with the toggle): Claude in orange and Codex in blue, for the providers you show. Markers and hover details focus on changes rather than repeated samples. Claude history starts when MaxxBar first records its quota; earlier values are unavailable.
 """
 
 private let sessionTimelineHelp = """
@@ -4825,7 +4903,7 @@ Shows recent local Codex sessions in the selected drawdown window, newest first.
 """
 
 private let drawdownInsightHelp = """
-Summarizes the latest sampled weekly runway drop from the last seven days of local quota history. Exact crossing times are bounded by how often MaxxBar sampled the API.
+Summarizes the latest sampled weekly runway drop for your primary provider (Claude when it is shown, otherwise Codex) from the last seven days of local quota history. A plan change starts a new segment, and the pace line only uses samples taken since the last reset or plan change. Exact crossing times are bounded by how often MaxxBar sampled the API.
 """
 
 private let maxxInsightsHelp = """
