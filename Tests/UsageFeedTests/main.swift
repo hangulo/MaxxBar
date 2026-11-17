@@ -79,6 +79,22 @@ polled.limits[0].primary?.remainingPercent = 69
 later = UsageFeed(snapshot: polled, now: now, calendar: calendar, appVersion: "test")
 assert(!later.sameContent(as: feed))
 
+// Closed windows: kept for 30 days, sorted, and a new close is a content change.
+let oldClose = UsageFeed.ClosedWindow(provider: "Claude", kind: "fiveHour", model: nil, resetAt: now.addingTimeInterval(-40 * 86_400),
+                                      usedPercent: 50, leftPercent: 50, lowConfidence: false, backfilled: true, plan: "Pro")
+let lateClose = UsageFeed.ClosedWindow(provider: "Claude", kind: "weekly", model: nil, resetAt: now.addingTimeInterval(-3_600),
+                                       usedPercent: 26, leftPercent: 74, lowConfidence: false, backfilled: false, plan: "Max 5x")
+var earlyClose = lateClose
+earlyClose.kind = "weeklyModel"
+earlyClose.model = "Fable"
+earlyClose.resetAt = now.addingTimeInterval(-7_200)
+let withWindows = UsageFeed(snapshot: snapshot, closedWindows: [lateClose, oldClose, earlyClose], now: now, calendar: calendar, appVersion: "test")
+assert(withWindows.closedWindows.map(\.kind) == ["weeklyModel", "weekly"], "\(withWindows.closedWindows)")
+assert(!withWindows.sameContent(as: feed))
+assert(feed.closedWindows.isEmpty)
+let windowText = String(decoding: try UsageFeed.encoder().encode(withWindows), as: UTF8.self)
+assert(windowText.contains("\"leftPercent\" : 74"))
+
 // Writer: writes once, skips identical content, skips an empty snapshot.
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("usage-feed-\(UUID().uuidString)")
 let target = dir.appendingPathComponent("usage-feed.json")

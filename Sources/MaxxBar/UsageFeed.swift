@@ -44,6 +44,22 @@ struct UsageFeed: Codable, Equatable {
         var totals: Totals
     }
 
+    /// A quota window that has closed (reset), with what was left unused. Filled from the window ledger.
+    struct ClosedWindow: Codable, Equatable {
+        var provider: String
+        /// "fiveHour", "weekly" (all models) or "weeklyModel" (one model's weekly limit, see `model`).
+        var kind: String
+        var model: String?
+        var resetAt: Date
+        var usedPercent: Int
+        var leftPercent: Int
+        /// The last reading before the reset was taken more than 30 minutes before it.
+        var lowConfidence: Bool
+        /// Reconstructed from older quota history rather than recorded at the close.
+        var backfilled: Bool
+        var plan: String?
+    }
+
     struct Hour: Codable, Equatable {
         var hourStart: Date
         var totals: Totals
@@ -59,8 +75,21 @@ struct UsageFeed: Codable, Equatable {
     var providers: [Provider]
     var daily: [Day]
     var hourly: [Hour]
+    /// Closed quota windows from the last `closedWindowRetentionSeconds`, oldest first. Empty until the ledger has rows.
+    var closedWindows: [ClosedWindow]
 
-    init(snapshot: LLMUsageSnapshot, now: Date = Date(), calendar: Calendar = .current, appVersion: String) {
+    static let closedWindowRetentionSeconds: TimeInterval = 30 * 86_400
+
+    init(
+        snapshot: LLMUsageSnapshot,
+        closedWindows: [ClosedWindow] = [],
+        now: Date = Date(),
+        calendar: Calendar = .current,
+        appVersion: String
+    ) {
+        self.closedWindows = closedWindows
+            .filter { $0.resetAt >= now.addingTimeInterval(-Self.closedWindowRetentionSeconds) }
+            .sorted { $0.resetAt == $1.resetAt ? $0.kind < $1.kind : $0.resetAt < $1.resetAt }
         self.generatedAt = now
         self.appVersion = appVersion
         self.timeZone = calendar.timeZone.identifier
@@ -167,11 +196,15 @@ enum UsageFeedWriter {
 
     /// Returns true when the file was written.
     @discardableResult
-    static func publish(_ snapshot: LLMUsageSnapshot, to target: URL? = UsageFeedWriter.url) -> Bool {
+    static func publish(
+        _ snapshot: LLMUsageSnapshot,
+        closedWindows: [UsageFeed.ClosedWindow] = [],
+        to target: URL? = UsageFeedWriter.url
+    ) -> Bool {
         // Nothing read yet (first launch tick): keep the last file instead of replacing it with an empty one.
         guard let target, !snapshot.limits.isEmpty || !snapshot.usageBuckets.isEmpty else { return false }
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        let feed = UsageFeed(snapshot: snapshot, appVersion: version)
+        let feed = UsageFeed(snapshot: snapshot, closedWindows: closedWindows, appVersion: version)
 
         lock.lock()
         defer { lock.unlock() }
