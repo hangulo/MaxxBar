@@ -248,8 +248,8 @@ enum AIUsageReader {
             cpuSystemPercent: cpuGPU.cpuSystemPercent,
             codexFiveHourRemainingPercent: codexLimit?.shortWindow?.remainingPercent,
             codexWeeklyRemainingPercent: codexLimit?.weeklyWindow?.remainingPercent,
-            claudeFiveHourRemainingPercent: claudeLimit?.shortWindow?.remainingPercent,
-            claudeWeeklyRemainingPercent: claudeLimit?.weeklyWindow?.remainingPercent
+            claudeFiveHourRemainingPercent: claudeLimit?.shortWindow?.measuredRemainingPercent,
+            claudeWeeklyRemainingPercent: claudeLimit?.weeklyWindow?.measuredRemainingPercent
         )
     }
 

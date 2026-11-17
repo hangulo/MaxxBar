@@ -105,6 +105,7 @@ The tests are small programs compiled with `swiftc`:
 
 ```sh
 Scripts/test-claude-polling.sh
+Scripts/test-quota-estimator.sh
 Scripts/test-claude-credentials.sh
 Scripts/test-usage-feed.sh
 Scripts/test-runway-forecast.sh
@@ -140,9 +141,11 @@ Claude Code keep-alive: when Claude Code's stored access token has expired (or C
 
 For live Claude runway without extra network requests, run `Scripts/install-claude-statusline-tap.sh` once. It points Claude Code's status line at a small tap that saves the `rate_limits` Claude Code already receives (5h and weekly usage) to `~/Library/Application Support/MaxxBar/claude-statusline.json`, then runs your previous status line command so its output is unchanged. MaxxBar prefers a capture from the last 30 minutes; while one exists it asks the usage endpoint at most hourly, only for the Opus and Sonnet weekly windows. Undo with `Scripts/install-claude-statusline-tap.sh --uninstall`.
 
-Otherwise, Claude usage refreshes from the endpoint at most every fifteen minutes. HTTP 429 responses trigger an increasing cooldown (five minutes to one hour), honoring longer `Retry-After` delays. The last successful usage response and cooldown are saved locally across restarts, with the Claude account ID (or a credential fingerprint) but no OAuth token. The cooldown survives Claude Code's token refreshes. Cached readings show their check time; windows whose reset has passed are omitted, and readings older than 24 hours are discarded.
+Otherwise, Claude usage refreshes from the endpoint every 3 minutes while Claude is in use, every 5 minutes normally, and every 30 minutes when idle. It also asks at the moments a reading is worth most: when the popover opens on a reading over 2 minutes old, after a reset time in the last reading passes, when the Mac wakes or unlocks, and when local token use since the last reading is estimated to have moved the 5 hour window by 5 points. Every request, whatever asked for it and including Check now, passes the same gate: the 429 cooldown, at least 60 seconds since the last request, and at most 30 requests in any hour (the old 2 minute schedule's rate, now a ceiling). HTTP 429 responses trigger an increasing cooldown (five minutes to one hour), honoring longer `Retry-After` delays. The last successful usage response and cooldown are saved locally across restarts, with the Claude account ID (or a credential fingerprint) but no OAuth token. The cooldown survives Claude Code's token refreshes. Cached readings show their check time; windows whose reset has passed are omitted, and readings older than 24 hours are discarded.
 
-Other apps can read a small, versioned summary of quota and token use from `usage-feed.json`; its fields are documented in [Docs/usage-feed.md](Docs/usage-feed.md).
+Other apps can read a small, versioned summary of quota and token use from `usage-feed.json`; its fields are documented in [Docs/usage-feed.md](Docs/usage-feed.md). Each quota window says whether its numbers are `measured` (a real reading) or `estimated` (the last reading plus local tokens since), and an estimated window also carries the real reading it builds on (`measuredRemainingPercent`, `measuredUsedPercent`); `checkedAt` stays the real reading's time. These fields were added without a version change, so a reader that ignores them sees the same numbers MaxxBar shows.
+
+Between readings MaxxBar estimates Claude 5h and weekly usage from the tokens it already counts in local transcripts. It calibrates tokens per percent from consecutive pairs of real readings inside the same window, taken on the current plan and since the current weekly window began, pooling every pair so the whole-percent rounding of each reading evens out. It tries raw tokens and tokens weighted by each model's API prices and uses whichever fits the readings more closely. With fewer than 3 pairs in which the reading moved (or under 3 points moved in total) there is no estimate. Each new reading replaces the estimate; an estimate never goes below 0, above 100, or down between two readings, and stops at the window's reset. Estimates show with "~" in the menu bar and on the Runway bars, the card says where the reading came from and how old it is, and the time until empty uses the estimate so it moves smoothly. Estimates are never saved as readings: `llm-quota-history.json`, the window ledger and the activity log only hold real ones. The real readings it calibrates from are kept for 8 days in `claude-readings.json`. Usage on claude.ai or another Mac is not in the local transcripts, so the estimate can only lag the truth; the next reading catches it up.
 
 When a Claude quota window resets (the 5 hour window, the weekly window, and per-model weeklies such as Fable), MaxxBar records what was left unused in `llm-window-ledger.jsonl`, one line per closed window, append only and never trimmed. The first run backfills from the saved quota history. A reading taken more than 30 minutes before the reset is marked low confidence, and MaxxBar takes a fresh reading two minutes before each known reset. The Runway tab's Left at reset card summarizes it, and Open full report writes `report/usage-report.html` (one self-contained page, no network requests) with value at API prices, plan cost, unused weekly allowance, 5 hour windows, daily sessions and model mix.
 
@@ -153,6 +156,7 @@ Local files are stored under:
 ```text
 ~/Library/Application Support/MaxxBar/claude-auth-retry.json
 ~/Library/Application Support/MaxxBar/claude-usage-cache.json
+~/Library/Application Support/MaxxBar/claude-readings.json
 ~/Library/Application Support/MaxxBar/llm-quota-history.json
 ~/Library/Application Support/MaxxBar/usage-feed.json
 ~/Library/Application Support/MaxxBar/ai-activity.jsonl

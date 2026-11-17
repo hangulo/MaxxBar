@@ -124,8 +124,8 @@ struct LLMUsageLimitCard: View {
                 HStack(spacing: 6) {
                     if let checkNote, !isChecking {
                         Text(checkNote)
-                    } else if let checkedAt = limit.checkedAt ?? limit.cachedAt {
-                        Text("Last checked \(checkedAt.formatted(date: .omitted, time: .shortened))")
+                    } else if let summary = limit.readingSummary() {
+                        Text(summary)
                     }
                     Spacer()
                     if isChecking {

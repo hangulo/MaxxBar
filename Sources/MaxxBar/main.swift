@@ -104,6 +104,10 @@ enum MaxxBarLauncher {
             print("llmPlan=\(llmUsage.planType ?? "-")")
             print("llmEmail=\(llmUsage.email ?? "-")")
             print("llmLimits=\(llmUsage.limits.map { limit in "\(limit.name):\(limit.shortWindow?.remainingPercent ?? -1)%/\(limit.weeklyWindow?.remainingPercent ?? -1)%" }.joined(separator: ","))")
+            if let claude = llmUsage.limits.first(where: { $0.name == "Claude" }) {
+                let windows = claude.windows.map { "\($0.label)=\($0.usedPercent)%\($0.measuredUsedPercent.map { " (~estimate, measured \($0)%)" } ?? "")" }
+                print("llmClaudeReading=\(claude.readingSummary() ?? "-") | \(windows.joined(separator: ", "))")
+            }
             print("llmResetCredits=\(llmUsage.resetCreditCount.map(String.init) ?? "-")")
             print("llmLocalFiveHourTokens=\(llmUsage.localFiveHourTokens)")
             print("llmLocalWeeklyTokens=\(llmUsage.localWeeklyTokens)")
@@ -339,7 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard pauseReasons.isEmpty, timer == nil else { return }
         startRefreshTimer()
         refreshStatusInBackground()
-        refreshLLMUsageInBackground(force: true, refreshLocal: false)
+        refreshLLMUsageInBackground(force: true, refreshLocal: false, claudeTrigger: .wake)
     }
 
     private func startClipboardFlowMonitor() {
@@ -368,8 +372,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func refreshLLMUsageInBackground(force: Bool = false, refreshLocal: Bool = true) {
-        model.refreshLLMUsageInBackground(force: force, refreshLocal: refreshLocal) { [weak self] in
+    private func refreshLLMUsageInBackground(
+        force: Bool = false, refreshLocal: Bool = true, claudeTrigger: ClaudePollTrigger = .scheduled
+    ) {
+        model.refreshLLMUsageInBackground(force: force, refreshLocal: refreshLocal, claudeTrigger: claudeTrigger) { [weak self] in
             guard let self else { return }
             self.updateStatusTitle()
             self.statusItem?.button?.toolTip = self.statusToolTip()
@@ -398,7 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if timer != nil, pauseReasons.isEmpty { startRefreshTimer() }
             refreshInBackground()
             if selectedPanel == .llmUsage || selectedPanel == .runway {
-                refreshLLMUsageInBackground(force: true)
+                refreshLLMUsageInBackground(force: true, claudeTrigger: .popoverOpened)
             }
         }
     }
@@ -441,7 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let provider = names[0]
         let limit = model.llmUsage.limits.first { $0.name == provider }
-        let stale = limit?.cachedAt == nil ? "" : "~"
+        let stale = limit?.cachedAt == nil && limit?.isEstimate != true ? "" : "~"
         let plan = provider == "Claude" ? model.llmUsage.claudePlanType : model.llmUsage.planType
         // The bottom line switches from time until reset to time until empty only when, at the current
         // burn rate, the window runs out before it resets.
@@ -514,7 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let limit = model.llmUsage.limits.first(where: { $0.name == name }) else { return "--/--" }
             let short = limit.shortWindow.map { String($0.remainingPercent) } ?? "--"
             let weekly = limit.weeklyWindow.map { String($0.remainingPercent) } ?? "--"
-            return "\(short)/\(weekly)\(limit.cachedAt == nil ? "" : "~")"
+            return "\(short)/\(weekly)\(limit.cachedAt == nil && !limit.isEstimate ? "" : "~")"
         }
         let names = ProviderVisibility.visibleProviders
         return (names.joined(separator: " "), names.map(quota).joined(separator: " "))
@@ -532,8 +538,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func statusToolTip() -> String {
         let usage = model.aiUsage
+        let readings = model.llmUsage.limits
+            .filter { $0.name == "Claude" || $0.name == "Codex" }
+            .compactMap { limit in limit.readingSummary().map { "\(limit.name): \($0)" } }
+            .joined(separator: "\n")
         return """
-        Claude and Codex: 5h / weekly percent remaining (~ = last checked reading)
+        Claude and Codex: 5h / weekly percent remaining (~ = older reading or estimate)
+        \(readings)
         \(model.llmUsage.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "\n"))
         AI today: \(usage.sessionsToday) sessions · \(aiTimeLabel(usage.timeTodaySeconds)) inferred time
         \(usage.copyEventsToday) copy · \(usage.pasteEventsToday) paste · \(usage.insightEventsToday) insight events

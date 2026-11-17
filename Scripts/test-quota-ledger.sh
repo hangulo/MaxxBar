@@ -5,6 +5,7 @@ TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/maxxbar-quota-ledger.XXXXXX")"
 trap 'rm -rf "$TEST_DIR"' EXIT
 swiftc -module-cache-path "$TEST_DIR/module-cache" \
     "$ROOT_DIR/Sources/MaxxBar/LLMUsageTypes.swift" \
+    "$ROOT_DIR/Sources/MaxxBar/ClaudeQuotaEstimator.swift" \
     "$ROOT_DIR/Sources/MaxxBar/APICostLedger.swift" \
     "$ROOT_DIR/Sources/MaxxBar/QuotaWindowLedger.swift" \
     "$ROOT_DIR/Tests/QuotaWindowLedgerTests/main.swift" \

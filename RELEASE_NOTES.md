@@ -4,6 +4,14 @@
 
 - New Waste forecast card on Runway, above Left at reset: how much of this week's Claude allowance is likely to expire unused at your usual pace, how much more to spend to finish near 90% used, the same for per-model weeklies such as Fable, and where the current 5 hour window is heading. Weekly habits come from a 28 slot profile (each weekday in four 6 hour parts, median of past weeks) built from the saved quota history, with older plans rescaled. `Scripts/test-waste-forecast.sh` covers it.
 
+Fresher Claude readings (roadmap item 17):
+
+- Between real readings, the Claude 5h and weekly percentages are estimated from the tokens already counted in local transcripts, calibrated from consecutive pairs of real readings in the same window, on the current plan and since the current weekly window began. Raw tokens or API-price-weighted tokens, whichever fits the readings better. No estimate until at least 3 pairs moved the reading. Estimates snap to each new reading, stay between 0 and 100, never step down between readings, and show with "~".
+- Estimates are never written as readings: quota history, the window ledger and the activity log keep real readings only. The real readings used for calibration are kept for 8 days in `claude-readings.json`.
+- The usage endpoint is asked at better moments, not more often: when the popover opens on a reading over 2 minutes old, after a reset passes, on wake or unlock, and after heavy local use. The timer is slower (3 / 5 / 30 minutes, was 2 / 5 / 15). Every request passes the 429 cooldown, a 60 second hard gap and a 30 per hour ceiling, Check now included.
+- The Claude card and the menu bar tooltip say where the reading came from (endpoint, status line or saved reading), how old it is, and whether the numbers on screen are an estimate. The time until empty uses the estimate, so it no longer steps.
+- `usage-feed.json` marks each window `measured` or `estimated` and carries the real reading beside an estimate. Additive, schema version 1 unchanged.
+
 ## v0.3.0 - 2026-11-16
 
 Everything merged after the 14 Nov Claude work, in PRs #16, #17 and #18.

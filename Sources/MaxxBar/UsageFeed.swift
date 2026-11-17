@@ -13,6 +13,12 @@ struct UsageFeed: Codable, Equatable {
         var usedPercent: Int
         var resetsAt: Date?
         var windowSeconds: Int
+        /// "measured" (a real reading) or "estimated" (the last reading plus local tokens since). Added in
+        /// version 1; files written before it have no value, which means measured.
+        var basis: String? = nil
+        /// The real reading behind an estimate. Only present when `basis` is "estimated".
+        var measuredRemainingPercent: Int? = nil
+        var measuredUsedPercent: Int? = nil
     }
 
     struct Provider: Codable, Equatable {
@@ -133,7 +139,10 @@ struct UsageFeed: Codable, Equatable {
             remainingPercent: window.remainingPercent,
             usedPercent: window.usedPercent,
             resetsAt: window.resetAt,
-            windowSeconds: window.windowSeconds
+            windowSeconds: window.windowSeconds,
+            basis: window.isEstimate ? "estimated" : "measured",
+            measuredRemainingPercent: window.isEstimate ? window.measuredRemainingPercent : nil,
+            measuredUsedPercent: window.measuredUsedPercent
         )
     }
 

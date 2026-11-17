@@ -10,6 +10,12 @@ struct LLMUsageWindow: Equatable {
     var remainingPercent: Int
     var resetAt: Date?
     var windowSeconds: Int
+    /// Set only when `usedPercent` is an estimate from local tokens: the last real reading it builds on.
+    var measuredUsedPercent: Int? = nil
+
+    var isEstimate: Bool { measuredUsedPercent != nil }
+    /// The last real reading, for anything that persists readings (history, ledger, activity records).
+    var measuredRemainingPercent: Int { measuredUsedPercent.map { 100 - $0 } ?? remainingPercent }
 }
 
 struct LLMUsageLimit: Identifiable, Equatable {
@@ -26,6 +32,23 @@ struct LLMUsageLimit: Identifiable, Equatable {
 
     var windows: [LLMUsageWindow] {
         [primary, secondary].compactMap { $0 }
+    }
+
+    var isEstimate: Bool { windows.contains(where: \.isEstimate) }
+
+    /// "Endpoint reading 4m ago · now ~estimated from local tokens", for the card and the menu bar tooltip.
+    func readingSummary(now: Date = Date()) -> String? {
+        guard let checkedAt = checkedAt ?? cachedAt else { return nil }
+        let origin: String
+        switch source {
+        case "endpoint": origin = "Endpoint reading"
+        case "statusline": origin = "Status line reading"
+        case "cache": origin = "Saved endpoint reading"
+        default: origin = "Reading"
+        }
+        let minutes = max(Int(now.timeIntervalSince(checkedAt) / 60), 0)
+        let age = minutes < 1 ? "just now" : minutes < 60 ? "\(minutes)m ago" : "\(minutes / 60)h \(minutes % 60)m ago"
+        return "\(origin) \(age)" + (isEstimate ? " · now ~estimated from local tokens" : "")
     }
 
     var shortWindow: LLMUsageWindow? {
@@ -516,8 +539,9 @@ struct LLMQuotaActivitySignature: Equatable {
         let claude = usage.limits.first { $0.name == "Claude" }
         self.primaryRemainingPercent = codex?.shortWindow?.remainingPercent
         self.weeklyRemainingPercent = codex?.weeklyWindow?.remainingPercent
-        self.claudeWeeklyRemainingPercent = claude?.weeklyWindow?.remainingPercent
-        self.claudeFiveHourRemainingPercent = claude?.shortWindow?.remainingPercent
+        // Real readings only: an estimate moving between readings is not new quota data.
+        self.claudeWeeklyRemainingPercent = claude?.weeklyWindow?.measuredRemainingPercent
+        self.claudeFiveHourRemainingPercent = claude?.shortWindow?.measuredRemainingPercent
         self.claudePlanType = usage.claudePlanType
         self.planType = usage.planType
         self.localFiveHourTokens = usage.localFiveHourTokens
@@ -554,6 +578,8 @@ struct LLMUsageSnapshot: Equatable {
     var usageBuckets: [LLMUsageBucket] = []
     /// API cost equivalents by provider, from the daily ledger.
     var apiCost: [String: APICostSummary] = [:]
+    /// Claude tokens per minute for the last 8 days, which the quota estimator measures between readings.
+    var claudeUsagePoints: [ClaudeQuotaEstimator.UsagePoint] = []
 
     /// The Claude plan from the local Claude profile. `planType` above is the Codex plan.
     var claudePlanType: String? {
