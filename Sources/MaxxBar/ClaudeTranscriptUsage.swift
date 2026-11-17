@@ -79,7 +79,12 @@ extension LLMUsageReader {
             recentSessions: Array(recent.prefix(30)),
             topWeeklySessions: Array(weekly.prefix(30)),
             modelUsage: modelUsageTotals(from: modelEvents, since: now.addingTimeInterval(-604_800)),
-            dailyModelUsage: modelUsageTotals(from: modelEvents, since: now.addingTimeInterval(-86_400))
+            dailyModelUsage: modelUsageTotals(from: modelEvents, since: now.addingTimeInterval(-86_400)),
+            usageBuckets: LLMUsageBucket.hourly(
+                provider: "Claude",
+                calls: modelEvents.map { (call: $0.call, modelName: $0.modelName) },
+                now: now
+            )
         )
     }
 
@@ -312,7 +317,15 @@ extension LLMUsageReader {
                 sessionID: sessionID,
                 modelName: value.modelName,
                 tokens: value.usage.totalTokens,
-                timestamp: value.timestamp ?? updatedAt
+                timestamp: value.timestamp ?? updatedAt,
+                call: LLMTokenCall(
+                    timestamp: value.timestamp ?? updatedAt,
+                    inputTokens: value.usage.inputTokens,
+                    cachedInputTokens: value.usage.cachedInputTokens,
+                    cacheWriteInputTokens: value.usage.cacheWriteInputTokens,
+                    cacheWrite1hInputTokens: value.usage.cacheWrite1hInputTokens,
+                    outputTokens: value.usage.outputTokens
+                )
             )
         }
         return ClaudeTranscript(session: session, modelEvents: events, untitledPrompt: realTitle == nil ? preview : nil)

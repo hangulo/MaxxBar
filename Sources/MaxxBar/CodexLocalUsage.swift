@@ -29,8 +29,36 @@ extension LLMUsageReader {
             recentSessions: sessions(databasePath: databasePath, mode: .recent),
             topWeeklySessions: sessions(databasePath: databasePath, mode: .highestWeekly),
             modelUsage: codexModelUsage(databasePath: databasePath, seconds: 604_800),
-            dailyModelUsage: codexModelUsage(databasePath: databasePath, seconds: 86_400)
+            dailyModelUsage: codexModelUsage(databasePath: databasePath, seconds: 86_400),
+            usageBuckets: codexUsageBuckets(databasePath: databasePath)
         )
+    }
+
+    /// Hourly totals from the per-request token events in rollouts active in the last 7 days.
+    /// Rollouts are parsed incrementally (see `CodexRolloutCache`), so this mostly reuses earlier work.
+    private static func codexUsageBuckets(databasePath: String) -> [LLMUsageBucket] {
+        let query = """
+        select rollout_path, replace(replace(coalesce(nullif(model,''), ''), char(10), ' '), char(9), ' ')
+        from threads
+        where tokens_used > 0
+          and coalesce(updated_at_ms, updated_at * 1000) >= (strftime('%s','now')-\(Int(LLMUsageBucket.retentionSeconds)))*1000
+          and rollout_path is not null
+          and rollout_path != '';
+        """
+        var calls: [(call: LLMTokenCall, modelName: String)] = []
+        for row in sqliteRows(databasePath: databasePath, query: query) {
+            guard let rolloutPath = row.first, tokenUsageSummary(from: rolloutPath) != nil else { continue }
+            let modelName = row.count > 1 ? row[1] : ""
+            calls += cachedCodexCalls(rolloutPath).map { (call: $0, modelName: modelName) }
+        }
+        return LLMUsageBucket.hourly(provider: "Codex", calls: calls)
+    }
+
+    private static func cachedCodexCalls(_ rolloutPath: String) -> [LLMTokenCall] {
+        let path = rolloutPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        codexRolloutCache.lock.lock()
+        defer { codexRolloutCache.lock.unlock() }
+        return codexRolloutCache.entries[path]?.calls ?? []
     }
 
     private static func codexModelUsage(databasePath: String, seconds: Int) -> [LLMModelUsageTotal] {

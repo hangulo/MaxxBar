@@ -89,6 +89,7 @@ The tests are small programs compiled with `swiftc`:
 ```sh
 Scripts/test-claude-polling.sh
 Scripts/test-claude-credentials.sh
+Scripts/test-usage-feed.sh
 ```
 
 On a Mac where the default SDK does not match the toolchain, prefix commands with `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`.
@@ -117,12 +118,15 @@ For live Claude runway without extra network requests, run `Scripts/install-clau
 
 Otherwise, Claude usage refreshes from the endpoint at most every fifteen minutes. HTTP 429 responses trigger an increasing cooldown (five minutes to one hour), honoring longer `Retry-After` delays. The last successful usage response and cooldown are saved locally across restarts, with the Claude account ID (or a credential fingerprint) but no OAuth token. The cooldown survives Claude Code's token refreshes. Cached readings show their check time; windows whose reset has passed are omitted, and readings older than 24 hours are discarded.
 
+Other apps can read a small, versioned summary of quota and token use from `usage-feed.json`; its fields are documented in [Docs/usage-feed.md](Docs/usage-feed.md).
+
 Local files are stored under:
 
 ```text
 ~/Library/Application Support/MaxxBar/claude-auth-retry.json
 ~/Library/Application Support/MaxxBar/claude-usage-cache.json
 ~/Library/Application Support/MaxxBar/llm-quota-history.json
+~/Library/Application Support/MaxxBar/usage-feed.json
 ~/Library/Application Support/MaxxBar/ai-activity.jsonl
 ~/Library/Application Support/MaxxBar/ai-transfers.jsonl
 ~/Library/Application Support/MaxxBar/clipboard-metadata.jsonl
