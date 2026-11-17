@@ -104,32 +104,3 @@ struct CPUGPUSnapshot: Equatable {
     var loadAverages: [Double]
     var uptime: String
 }
-
-struct NetworkSample: Equatable {
-    var uploadBytesPerSecond: UInt64
-    var downloadBytesPerSecond: UInt64
-}
-
-struct NetworkProcess: Identifiable, Equatable {
-    var id: String { name }
-    let name: String
-    let path: String
-    let appPath: String?
-    let uploadBytesPerSecond: UInt64
-    let downloadBytesPerSecond: UInt64
-}
-
-struct NetworkSnapshot: Equatable {
-    var location: String
-    var interfaceName: String?
-    var interfaceDisplayName: String
-    var publicIP: String?
-    var ipAddresses: [String]
-    var ethernetConnected: Bool
-    var pingTarget: String
-    var pingMilliseconds: Int?
-    var uploadBytesPerSecond: UInt64
-    var downloadBytesPerSecond: UInt64
-    var history: [NetworkSample]
-    var processes: [NetworkProcess]
-}

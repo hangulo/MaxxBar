@@ -40,6 +40,8 @@ struct MemoryPopoverView: View {
                 MemoryPanelView(model: model, onPopOut: onPopOut, onQuit: onQuit)
             case .cpuGPU:
                 CPUGPUPanelView(snapshot: model.cpuGPU, sensors: model.sensors, onPopOut: onPopOut, onQuit: onQuit)
+                    .onAppear { model.setPerformanceVisible(true) }
+                    .onDisappear { model.setPerformanceVisible(false) }
             case .llmUsage:
                 AIUsagePanelView(
                     aiUsage: model.aiUsage,
@@ -61,8 +63,6 @@ struct MemoryPopoverView: View {
                     onPopOut: onPopOut,
                     onQuit: onQuit
                 )
-            case .clipboard:
-                ClipboardPanelView(snapshot: model.clipboardDebug)
             }
 
             ActionBarView(
@@ -170,6 +170,7 @@ enum ProviderVisibility {
 struct ProviderVisibilityMenu: View {
     @AppStorage(ProviderVisibility.showClaudeKey) private var showClaude = true
     @AppStorage(ProviderVisibility.showCodexKey) private var showCodex = true
+    @State private var openAtLogin = LaunchAtLogin.isEnabled
 
     var body: some View {
         Menu {
@@ -177,6 +178,11 @@ struct ProviderVisibilityMenu: View {
                 .disabled(showClaude && !showCodex)
             Toggle("Show Codex", isOn: $showCodex)
                 .disabled(showCodex && !showClaude)
+            Divider()
+            Toggle("Open at Login", isOn: Binding(
+                get: { openAtLogin },
+                set: { openAtLogin = LaunchAtLogin.setEnabled($0) }
+            ))
         } label: {
             Image(systemName: "eye")
                 .font(.system(size: 13, weight: .medium))
@@ -188,21 +194,20 @@ struct ProviderVisibilityMenu: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Show or hide Claude and Codex")
+        .help("Show or hide Claude and Codex, and open MaxxBar at login")
     }
 }
 
 enum StatsPanel: String, CaseIterable, Identifiable {
     case runway = "Runway"
     case llmUsage = "Insights"
-    case clipboard = "Clipboard"
     case memory = "Memory"
     case cpuGPU = "CPU/GPU"
 
     var id: String { rawValue }
 
     static var visibleCases: [StatsPanel] {
-        [.runway, .llmUsage, .memory]
+        [.runway, .llmUsage, .memory, .cpuGPU]
     }
 }
 

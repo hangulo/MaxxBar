@@ -5,7 +5,8 @@ import MachO
 import CryptoKit
 
 extension LLMUsageReader {
-    static func readLocalClaudeUsage() -> LocalProviderUsage {
+    /// Every Claude Code and Desktop transcript on disk.
+    private static func claudeTranscriptURLs() -> [URL] {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         let roots = [
             home.appendingPathComponent(".claude/projects", isDirectory: true),
@@ -24,6 +25,11 @@ extension LLMUsageReader {
                 urls.append(url)
             }
         }
+        return urls
+    }
+
+    static func readLocalClaudeUsage() -> LocalProviderUsage {
+        var urls = claudeTranscriptURLs()
         // Every number on screen covers at most 7 days, so older transcripts are only read to fill the
         // 30-row recent session list. This keeps launch from parsing every transcript ever written.
         let modifiedAt = Dictionary(uniqueKeysWithValues: urls.map {
@@ -36,9 +42,11 @@ extension LLMUsageReader {
             .filter { $0.offset < 30 || modifiedAt[$0.element.path, default: .distantPast] >= recentCutoff }
             .map(\.element)
         let livePaths = Set(urls.map(\.path))
+        loadClaudeParseCacheIfNeeded()
         claudeParsedFilesLock.lock()
         claudeParsedFiles = claudeParsedFiles.filter { livePaths.contains($0.key) }
         claudeParsedFilesLock.unlock()
+        defer { saveClaudeParseCacheIfNeeded() }
 
         let sidecarTitles = claudeSidecarTitles()
         let generatedTitles = loadClaudeGeneratedTitles()
@@ -49,6 +57,12 @@ extension LLMUsageReader {
         let sessions = uniqueSessions(transcripts.map(\.session))
         let modelEvents = uniqueClaudeModelEvents(transcripts.flatMap(\.modelEvents))
         let now = Date()
+        // Days from a week ago on are fully covered by the transcripts read above (files modified in 8 days).
+        APICostLedger.record(
+            apiCostEvents(modelEvents), provider: "Claude",
+            completeFrom: Calendar.current.date(byAdding: .day, value: -7, to: Calendar.current.startOfDay(for: now))
+        )
+        scheduleClaudeCostBackfillIfNeeded()
         func usageWindow(label: String, seconds: TimeInterval) -> LLMLocalUsageWindow {
             let matching = modelEvents.filter { now.timeIntervalSince($0.timestamp ?? .distantPast) <= seconds }
             return LLMLocalUsageWindow(
@@ -98,6 +112,66 @@ extension LLMUsageReader {
             )
         }
         return mergedModelUsage(totals)
+    }
+
+    private static func apiCostEvents(_ events: [ClaudeModelUsageEvent]) -> [APICostEvent] {
+        events.compactMap { event in
+            guard let at = event.timestamp, let usage = event.usage,
+                  !event.modelName.localizedCaseInsensitiveContains("synthetic") else { return nil }
+            let cost = LLMTokenPricing.rates(for: event.modelName).breakdown(
+                inputTokens: usage.inputTokens,
+                cachedInputTokens: usage.cachedInputTokens,
+                cacheWriteInputTokens: usage.cacheWriteInputTokens,
+                cacheWrite1hInputTokens: usage.cacheWrite1hInputTokens,
+                outputTokens: usage.outputTokens
+            ).total
+            return APICostEvent(
+                at: at, costUSD: cost, inputTokens: usage.inputTokens, cachedInputTokens: usage.cachedInputTokens,
+                cacheWriteInputTokens: usage.cacheWriteInputTokens, outputTokens: usage.outputTokens
+            )
+        }
+    }
+
+    nonisolated(unsafe) private static var claudeCostBackfillStarted = false
+
+    /// Once per install: price every request in every transcript on disk, so "this month" has history from
+    /// before the ledger existed. Runs in the background; transcripts are read one at a time.
+    private static func scheduleClaudeCostBackfillIfNeeded() {
+        claudeParsedFilesLock.lock()
+        let start = !claudeCostBackfillStarted
+        claudeCostBackfillStarted = true
+        claudeParsedFilesLock.unlock()
+        guard start, !APICostLedger.isBackfilled(provider: "Claude") else { return }
+        DispatchQueue.global(qos: .background).async {
+            var seen = Set<String>()
+            var events: [APICostEvent] = []
+            for url in claudeTranscriptURLs() {
+                autoreleasepool {
+                    guard let parsed = parsedClaudeFile(url),
+                          !(parsed.cwd?.hasPrefix(claudeTitlerDirectory.path) ?? false) else { return }
+                    for (key, value) in parsed.requestUsage where seen.insert("\(parsed.sessionID)|\(key)").inserted {
+                        let event = ClaudeModelUsageEvent(
+                            requestID: key, sessionID: parsed.sessionID, modelName: value.modelName,
+                            tokens: value.usage.totalTokens, timestamp: value.timestamp ?? parsed.updatedAt,
+                            call: tokenCall(value.usage, at: value.timestamp ?? parsed.updatedAt), usage: value.usage
+                        )
+                        events.append(contentsOf: apiCostEvents([event]))
+                    }
+                }
+            }
+            APICostLedger.record(events, provider: "Claude", completeFrom: nil, backfill: true)
+        }
+    }
+
+    private static func tokenCall(_ usage: LLMTokenUsageSummary, at timestamp: Date?) -> LLMTokenCall {
+        LLMTokenCall(
+            timestamp: timestamp,
+            inputTokens: usage.inputTokens,
+            cachedInputTokens: usage.cachedInputTokens,
+            cacheWriteInputTokens: usage.cacheWriteInputTokens,
+            cacheWrite1hInputTokens: usage.cacheWrite1hInputTokens,
+            outputTokens: usage.outputTokens
+        )
     }
 
     private static func uniqueClaudeModelEvents(_ events: [ClaudeModelUsageEvent]) -> [ClaudeModelUsageEvent] {
@@ -156,6 +230,128 @@ extension LLMUsageReader {
 
     nonisolated(unsafe) private static var claudeParsedFiles: [String: ClaudeParsedFileEntry] = [:]
     private static let claudeParsedFilesLock = NSLock()
+
+    // MARK: Parse cache on disk
+    // Launch used to start cold and parse every recent transcript again. The parsed totals are saved to
+    // claude-parse-cache.json so a launch only reads what was appended since the last run.
+
+    private struct DiskParsedFile: Codable {
+        struct Request: Codable {
+            var input: UInt64
+            var cached: UInt64
+            var output: UInt64
+            var total: UInt64
+            var cacheWrite: UInt64
+            var cacheWrite1h: UInt64
+            var model: String
+            var at: Date?
+        }
+        var size: Int
+        var modified: Date
+        var offset: UInt64
+        var lineCount: Int
+        var sessionID: String
+        var title: String?
+        var summary: String?
+        var preview: String?
+        var cwd: String?
+        var model: String?
+        var createdAt: Date?
+        var updatedAt: Date?
+        var requests: [String: Request]
+    }
+
+    private static let claudeParseCacheVersion = 1
+    private struct DiskParseCache: Codable {
+        var version: Int
+        var files: [String: DiskParsedFile]
+    }
+
+    nonisolated(unsafe) private static var claudeParseCacheLoaded = false
+    nonisolated(unsafe) private static var claudeParseCacheDirty = false
+    nonisolated(unsafe) private static var claudeParseCacheSavedAt: Date?
+    private static let claudeParseCacheSaveInterval: TimeInterval = 300
+
+    private static var claudeParseCacheURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/MaxxBar/claude-parse-cache.json")
+    }
+
+    private static func loadClaudeParseCacheIfNeeded() {
+        claudeParsedFilesLock.lock()
+        defer { claudeParsedFilesLock.unlock() }
+        guard !claudeParseCacheLoaded else { return }
+        claudeParseCacheLoaded = true
+        guard let data = try? Data(contentsOf: claudeParseCacheURL),
+              let cache = try? JSONDecoder().decode(DiskParseCache.self, from: data),
+              cache.version == claudeParseCacheVersion else { return }
+        for (path, file) in cache.files where claudeParsedFiles[path] == nil {
+            let requests = file.requests.mapValues { request in
+                (
+                    usage: LLMTokenUsageSummary(
+                        inputTokens: request.input,
+                        cachedInputTokens: request.cached,
+                        outputTokens: request.output,
+                        reasoningOutputTokens: 0,
+                        totalTokens: request.total,
+                        turnCount: 1,
+                        cacheWriteInputTokens: request.cacheWrite,
+                        cacheWrite1hInputTokens: request.cacheWrite1h
+                    ),
+                    modelName: request.model,
+                    timestamp: request.at
+                )
+            }
+            claudeParsedFiles[path] = ClaudeParsedFileEntry(
+                stamp: ClaudeParsedFileStamp(size: file.size, modified: file.modified),
+                parsed: ClaudeParsedFile(
+                    sessionID: file.sessionID, title: file.title, summary: file.summary, preview: file.preview,
+                    cwd: file.cwd, model: file.model, createdAt: file.createdAt, updatedAt: file.updatedAt,
+                    requestUsage: requests
+                ),
+                offset: file.offset,
+                lineCount: file.lineCount
+            )
+        }
+    }
+
+    /// Written at most every five minutes, and only after a transcript was parsed.
+    private static func saveClaudeParseCacheIfNeeded() {
+        claudeParsedFilesLock.lock()
+        let now = Date()
+        guard claudeParseCacheDirty,
+              claudeParseCacheSavedAt.map({ now.timeIntervalSince($0) >= claudeParseCacheSaveInterval }) ?? true else {
+            claudeParsedFilesLock.unlock()
+            return
+        }
+        let files = claudeParsedFiles.mapValues { entry in
+            DiskParsedFile(
+                size: entry.stamp.size, modified: entry.stamp.modified, offset: entry.offset, lineCount: entry.lineCount,
+                sessionID: entry.parsed.sessionID, title: entry.parsed.title, summary: entry.parsed.summary,
+                preview: entry.parsed.preview, cwd: entry.parsed.cwd, model: entry.parsed.model,
+                createdAt: entry.parsed.createdAt, updatedAt: entry.parsed.updatedAt,
+                requests: entry.parsed.requestUsage.mapValues { request in
+                    DiskParsedFile.Request(
+                        input: request.usage.inputTokens, cached: request.usage.cachedInputTokens,
+                        output: request.usage.outputTokens, total: request.usage.totalTokens,
+                        cacheWrite: request.usage.cacheWriteInputTokens,
+                        cacheWrite1h: request.usage.cacheWrite1hInputTokens,
+                        model: request.modelName, at: request.timestamp
+                    )
+                }
+            )
+        }
+        claudeParseCacheDirty = false
+        claudeParseCacheSavedAt = now
+        claudeParsedFilesLock.unlock()
+        guard let data = try? JSONEncoder().encode(DiskParseCache(version: claudeParseCacheVersion, files: files)) else {
+            return
+        }
+        try? FileManager.default.createDirectory(
+            at: claudeParseCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try? data.write(to: claudeParseCacheURL, options: .atomic)
+    }
 
     /// Parses a transcript once and reuses the result until the file's size or modification date changes.
     /// Transcripts only grow, so a grown file is parsed from where the last pass stopped instead of from byte zero.
@@ -257,6 +453,7 @@ extension LLMUsageReader {
             claudeParsedFiles[url.path] = ClaudeParsedFileEntry(
                 stamp: stamp, parsed: parsed, offset: startOffset + UInt64(consumed), lineCount: lineCount
             )
+            claudeParseCacheDirty = true
             claudeParsedFilesLock.unlock()
         }
         return parsed
@@ -318,14 +515,8 @@ extension LLMUsageReader {
                 modelName: value.modelName,
                 tokens: value.usage.totalTokens,
                 timestamp: value.timestamp ?? updatedAt,
-                call: LLMTokenCall(
-                    timestamp: value.timestamp ?? updatedAt,
-                    inputTokens: value.usage.inputTokens,
-                    cachedInputTokens: value.usage.cachedInputTokens,
-                    cacheWriteInputTokens: value.usage.cacheWriteInputTokens,
-                    cacheWrite1hInputTokens: value.usage.cacheWrite1hInputTokens,
-                    outputTokens: value.usage.outputTokens
-                )
+                call: tokenCall(value.usage, at: value.timestamp ?? updatedAt),
+                usage: value.usage
             )
         }
         return ClaudeTranscript(session: session, modelEvents: events, untitledPrompt: realTitle == nil ? preview : nil)

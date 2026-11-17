@@ -1,6 +1,21 @@
 # Release Notes
 
-## Unreleased - 2026-11-14
+## Unreleased - 2026-11-14 (third batch)
+
+- The CPU/GPU tab is back, built for local model work: thermal state with a plain explanation, power draw, CPU and GPU temperatures, fan speeds, per-core load, real GPU utilization (read from the GPU's own counters), and top processes. The process list and GPU read only run while the tab is open.
+- New API Value card on Insights: what usage would have cost at API list prices today, this week, over the last 7 days, and this month, next to the plan price. Kept per day in `api-cost-ledger.json`, backfilled once from all transcripts.
+- Added Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 API prices.
+
+## Unreleased - 2026-11-14 (second batch)
+
+- Removed Moments, the hidden Clipboard tab and its clipboard poller and image store, the Network panel, and other code nothing on screen reached (about 2,500 lines). The CPU/GPU tab and sensor code stay. `clipboard-metadata.jsonl` is still written on Command-C and Command-V, now without rereading the file.
+- Opens at login by default, with a toggle in the eye menu.
+- The menu bar shows when a window runs out, in amber, when the current burn rate empties it before its reset.
+- The refresh timer runs once a minute while the popover is closed.
+- Parsed Claude transcript totals are cached on disk, so launches only read new lines.
+- Logs keep 30 days; older lines move to an `archive` folder instead of being deleted.
+
+## 2026-11-14
 
 Claude as a first-class provider:
 

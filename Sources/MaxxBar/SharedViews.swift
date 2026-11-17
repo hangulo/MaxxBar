@@ -70,7 +70,7 @@ private func amps(_ value: Double?) -> String {
     return String(format: "%.1f A", value)
 }
 
-private func watts(_ value: Double?) -> String {
+func watts(_ value: Double?) -> String {
     guard let value else { return "-" }
     return String(format: "%.1f W", value)
 }
@@ -118,20 +118,6 @@ func dollarEstimate(_ value: Double) -> String {
         return String(format: "$%.1f", value)
     }
     return String(format: "$%.2f", value)
-}
-
-private func windowRange(_ start: Date, _ end: Date) -> String {
-    let calendar = Calendar.current
-    let formatter = DateFormatter()
-    if calendar.isDate(start, inSameDayAs: end) {
-        formatter.dateFormat = "MMM d, h:mm a"
-        let startText = formatter.string(from: start)
-        formatter.dateFormat = "h:mm a"
-        return "\(startText)-\(formatter.string(from: end))"
-    }
-
-    formatter.dateFormat = "MMM d, h:mm a"
-    return "\(formatter.string(from: start))-\(formatter.string(from: end))"
 }
 
 private struct LLMQuotaValue {
@@ -384,13 +370,6 @@ func planName(_ value: String?) -> String {
         .joined(separator: " ")
 }
 
-func resetTime(_ value: Date?) -> String {
-    guard let value else { return "-" }
-    let formatter = DateFormatter()
-    formatter.dateFormat = "h:mm a"
-    return formatter.string(from: value)
-}
-
 func resetLabel(_ value: Date?) -> String {
     guard let value else { return "Reset unavailable" }
     let formatter = RelativeDateTimeFormatter()
@@ -424,10 +403,6 @@ func absoluteTime(_ value: Date) -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "MMM d, h:mm a"
     return formatter.string(from: value)
-}
-
-func quotaPointTime(_ value: Date) -> String {
-    exactClockTime(value)
 }
 
 func quotaHoverTime(_ value: Date, range: LLMQuotaHistoryRange) -> String {

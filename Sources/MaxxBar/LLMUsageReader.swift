@@ -28,6 +28,7 @@ enum LLMUsageReader {
         let tokens: UInt64
         let timestamp: Date?
         let call: LLMTokenCall
+        var usage: LLMTokenUsageSummary? = nil
     }
 
     struct ClaudeTranscript {
@@ -407,6 +408,7 @@ enum LLMUsageReader {
             snapshot.providerAccounts.removeAll { $0.provider == "Claude" }
             return snapshot
         }
+        snapshot.apiCost["Claude"] = APICostLedger.summary(provider: "Claude")
         let claudeActivity = (claudeLocal.recentSessions + claudeLocal.topWeeklySessions).compactMap(\.updatedAt).max()
         applyClaudeLimits(
             to: &snapshot, lastActivity: claudeActivity,
