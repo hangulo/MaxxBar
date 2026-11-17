@@ -1,36 +1,47 @@
 # MaxxBar
 
-MaxxBar is a macOS menu bar companion for Codex and Claude runway, local AI usage insight, and machine context. It brings quota, token, memory, and workflow signals into one quiet daily surface, then points the product at a sharper question: how much AI runway is left, what local sessions are driving it, and where AI output is moving in your work.
+MaxxBar is a macOS menu bar app that tells you how much Claude and Codex runway you have left, when you will run out, and what your usage is worth.
 
-Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongoing release history.
+Current release: `v0.3.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for what changed.
 
 ## Screenshots
 
 <p>
-  <img src="Artifacts/screenshot-llm.png" alt="Runway panel" width="270">
-  <img src="Artifacts/screenshot-insights.png" alt="Insights panel" width="270">
-  <img src="Artifacts/screenshot-memory.png" alt="Memory panel" width="270">
+  <img src="Artifacts/screenshot-llm.png" alt="Runway tab" width="270" valign="top">
+  <img src="Artifacts/screenshot-insights.png" alt="Insights tab" width="270" valign="top">
+  <img src="Artifacts/screenshot-cpugpu.png" alt="CPU/GPU tab" width="270" valign="top">
+  <img src="Artifacts/screenshot-memory.png" alt="Memory tab" width="270" valign="top">
 </p>
+
+The full page usage report (dollar amounts blurred):
+
+<img src="Artifacts/screenshot-usage-report.png" alt="Claude usage report" width="820">
+
+The popover screenshots use built-in demo data.
 
 ## What It Does
 
-- Shows Claude and Codex runway in the menu bar. With one provider shown, it gets a 5h column and a weekly column, each with percent left and time until reset. When the current burn rate would empty a window before it resets, that column turns amber and its bottom line shows when it runs out instead (`out 48m` for 5h, `Thu 2p` for the week). With both shown, each gets a 5h / weekly column. A `~` marks a previously checked reading.
-- Lets you pick which provider you track with the eye menu in the popover. The first shown provider (Claude when shown) is the primary one: the drawdown insight and its pace line follow it. A hidden provider is not polled or scanned at all.
-- Opens a Runway-first popover with live Claude and Codex limits when authenticated, reset credits, local quota history, a drawdown insight with a plan-aware burn rate, cache-token detail, combined token/session totals, and recent session timelines.
-- Provides an Insights tab with detected provider accounts/plans, today’s time and session share, a seven-day model mix and token distribution, output destinations, copy/paste flow metadata, before/after workflow paths, and recent Codex and Claude session context.
-- Generates a separate MaxxBar Hub with Tracework-aligned navigation for Overview, AI Insights, Runway, and Sessions.
-- Keeps Memory visible with pressure, memory breakdown, top processes, swap, and a compact CPU/GPU temperature and fan RPM card beneath Swap.
-- Provides a CPU/GPU tab for local model work: macOS thermal state (Normal, Warm, Throttling, Critical), power draw, CPU and GPU temperatures, fan speeds, CPU load per core, GPU utilization, and the busiest processes. The process list and GPU read only run while the tab is open.
-- Shows an API Value card on Insights: what your primary provider's usage would have cost at API list prices today, this week, over the last 7 days, and this month, next to your plan's price.
-- Opens at login by default (toggle it in the eye menu, or in System Settings > General > Login Items).
-- Installs a local app bundle and recreates the Desktop shortcut so the launcher points at the latest local build.
+- **Runway at a glance.** 5 hour and weekly percent left in the menu bar, with time until reset.
+- **Early warning.** The column turns amber and shows `out 48m` or `Thu 2p` when you are on pace to run out before the reset.
+- **One provider or both.** Track Claude, Codex, or both from the eye menu. A hidden provider costs nothing: it is not polled or scanned.
+- **Burn rate that survives plan changes.** The drawdown card shows your pace since the last reset or plan upgrade.
+- **What you left on the table.** Left at reset records how much of each 5 hour and weekly window expired unused.
+- **What it is worth.** API Value prices your usage at API list rates for today, this week, 7 days and the month, next to your plan price.
+- **Full usage report.** One offline page with value, plan cost, unused allowance, 5 hour windows, daily sessions and model mix.
+- **Local model monitor.** The CPU/GPU tab shows throttling, temperatures, fans, power, GPU load and the busiest processes.
+- **Memory too.** Pressure, memory mix, top apps, swap and sensors.
+- **Feeds other apps.** Writes `usage-feed.json` for tools like Tracework ([Docs/usage-feed.md](Docs/usage-feed.md)).
+- **Light on battery.** Pauses when the Mac is locked or asleep, refreshes once a minute in the background, opens at login.
+- **Stays on your Mac.** Only the usage checks go to Anthropic and OpenAI. Clipboard text and sign-in tokens are never stored.
 
 ## Popover Tabs
 
-- Runway: live Claude and Codex limits, resets, weekly drawdown, the drawdown insight for your primary provider, and a combined session timeline.
-- Insights: models used, token-share distribution, AI usage patterns, output destinations, and AI workflow paths.
-- Memory: pressure, memory mix, top apps/processes, swap, and sensors.
-- CPU/GPU: thermal state, power, temperatures, fans, CPU and GPU load, and top processes.
+- **Runway:** live limits and resets, weekly drawdown, your pace, left at reset, session timeline.
+- **Insights:** API Value, accounts and plans, model mix, output destinations, workflow paths.
+- **Memory:** pressure, memory mix, top apps, swap, sensors.
+- **CPU/GPU:** thermal state, power, temperatures, fans, CPU and GPU load, top processes.
+
+Drag the lower-right grip to resize the popover; the size is remembered. The bottom bar opens the MaxxBar Hub, starts Deep Trace in Tracework, pops the popover out as a window, relaunches, or quits.
 
 ## Tracking Claude Or Codex
 
@@ -43,8 +54,6 @@ Quota history (`llm-quota-history.json`) records, for each sample, the Claude an
 MaxxBar stops sampling and polling while the screen is locked, the display is asleep, or the Mac is asleep, and refreshes once when you return. Lock screen samples are not written to the activity log. While the popover is closed only the quotas refresh. The Claude credential is reused until its own expiry instead of being read from the Keychain on every refresh, transcripts older than 8 days are skipped, a growing transcript is parsed from where the last pass stopped, and the activity logs are read from the end back to the 7 day cutoff. Parsed transcript totals are saved to `claude-parse-cache.json`, so a launch only reads what was appended since the last run. The refresh timer runs once a minute while the popover is closed.
 
 Once a day, lines older than 30 days move from `ai-activity.jsonl`, `ai-transfers.jsonl`, `clipboard-metadata.jsonl`, and `llm-5h-usage-windows.jsonl` into an `archive` folder next to them. Nothing is deleted; remove the archive folder by hand if you do not need it.
-
-Drag the lower-right grip to resize the popover; MaxxBar stores the last width and height locally and restores them at the next open or launch. The bottom action bar opens the MaxxBar Hub, starts Deep Trace in Tracework when available, opens the popover as a window, relaunches the app, or quits. Dense chart/help titles use a short hover delay and can be clicked to pin the explanation; bottom action icons and the compact version label show immediate labels.
 
 ## Build
 
@@ -61,7 +70,7 @@ Scripts/build-app.sh
 The app bundle is written to `Dist.noindex/MaxxBar.app` by default. Set `APP_VERSION` or `BUILD_VERSION` to override bundle metadata:
 
 ```sh
-APP_VERSION=0.2.0 BUILD_VERSION=0710.1200 Scripts/build-app.sh
+APP_VERSION=0.3.0 BUILD_VERSION=1116.1200 Scripts/build-app.sh
 ```
 
 ## Install On This Mac
@@ -79,7 +88,9 @@ swift run MaxxBar -- --sample
 swift run MaxxBar -- --render-popover Artifacts/screenshot-llm.png runway
 swift run MaxxBar -- --render-popover Artifacts/screenshot-insights.png insights
 swift run MaxxBar -- --render-popover Artifacts/screenshot-memory.png memory
+swift run MaxxBar -- --render-popover Artifacts/screenshot-cpugpu.png cpu
 swift run MaxxBar -- --write-ai-report
+swift run MaxxBar -- --write-usage-report
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popout-action
 ```
