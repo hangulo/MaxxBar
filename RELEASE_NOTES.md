@@ -1,6 +1,15 @@
 # Release Notes
 
-## Unreleased - 2026-11-14
+## Unreleased - 2026-11-14 (second batch)
+
+- Removed Moments, the hidden Clipboard tab and its clipboard poller and image store, the Network panel, and other code nothing on screen reached (about 2,500 lines). The CPU/GPU tab and sensor code stay. `clipboard-metadata.jsonl` is still written on Command-C and Command-V, now without rereading the file.
+- Opens at login by default, with a toggle in the eye menu.
+- The menu bar shows when a window runs out, in amber, when the current burn rate empties it before its reset.
+- The refresh timer runs once a minute while the popover is closed.
+- Parsed Claude transcript totals are cached on disk, so launches only read new lines.
+- Logs keep 30 days; older lines move to an `archive` folder instead of being deleted.
+
+## 2026-11-14
 
 Claude as a first-class provider:
 

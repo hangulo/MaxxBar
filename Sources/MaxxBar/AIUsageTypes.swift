@@ -48,16 +48,6 @@ struct AIProviderUsageSummary: Identifiable, Equatable {
     let transferFlows: [AITransferFlow]
 }
 
-struct MaxxMomentSummary: Identifiable, Equatable {
-    var id: String { "\(ts.timeIntervalSince1970)-\(app)-\(note)" }
-    let ts: Date
-    let sentiment: String
-    let app: String
-    let surface: String?
-    let note: String
-    let screenshotPath: String?
-}
-
 struct AIUsageSnapshot: Equatable {
     var sampledAt: Date?
     var activeApp: String
@@ -80,9 +70,6 @@ struct AIUsageSnapshot: Equatable {
     var topCopiedFrom: [AIUsageCounter]
     var topPastedInto: [AIUsageCounter]
     var transferFlows: [AITransferFlow]
-    var momentsToday: Int
-    var lastMomentAt: Date?
-    var recentMoments: [MaxxMomentSummary]
     var lastError: String?
     var providerSummaries: [AIProviderUsageSummary] = []
 

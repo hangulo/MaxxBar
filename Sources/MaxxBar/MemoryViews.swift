@@ -142,28 +142,6 @@ struct SensorSummaryRingsView: View {
     }
 }
 
-struct NetworkPanelView: View {
-    let snapshot: NetworkSnapshot
-    var onPopOut: (() -> Void)?
-    var onQuit: (() -> Void)?
-
-    var body: some View {
-        VStack(spacing: 7) {
-            CompactMetricCard(title: "LOCATION", value: snapshot.location)
-            NetworkGraphCard(snapshot: snapshot)
-            NetworkInterfaceCard(snapshot: snapshot)
-            CompactMetricCard(title: "PUBLIC IP ADDRESSES", value: snapshot.publicIP ?? "-")
-            CompactMetricCard(title: "IP ADDRESSES", value: snapshot.ipAddresses.first ?? "-")
-            CompactMetricCard(title: snapshot.ethernetConnected ? "CONNECTED" : "NOT CONNECTED", value: "Ethernet")
-            MetricCard(
-                title: "PING",
-                rows: [MetricRow(label: snapshot.pingTarget, value: snapshot.pingMilliseconds.map { "\($0)ms" } ?? "-")]
-            )
-            NetworkTotalsView(snapshot: snapshot)
-        }
-    }
-}
-
 struct MemoryRunwayHeroView: View {
     let snapshot: MemorySnapshot
 
@@ -367,24 +345,6 @@ struct MetricCard: View {
                         .monospacedDigit()
                 }
             }
-        }
-        .sectionStyle()
-    }
-}
-
-struct CompactMetricCard: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack {
-            Text(title)
-                .sectionTitle()
-            Spacer()
-            Text(value)
-                .font(.system(size: 13.5, weight: .semibold))
-                .foregroundStyle(value == "-" || title == "NOT CONNECTED" ? .white.opacity(0.54) : .white)
-                .monospacedDigit()
         }
         .sectionStyle()
     }
@@ -635,127 +595,6 @@ struct LegendInline: View {
     }
 }
 
-struct NetworkGraphCard: View {
-    let snapshot: NetworkSnapshot
-
-    var body: some View {
-        VStack(spacing: 8) {
-            HStack {
-                VStack(spacing: 0) {
-                    Text(ByteFormat.rate(snapshot.uploadBytesPerSecond))
-                        .font(.system(size: 20, weight: .regular, design: .rounded))
-                        .monospacedDigit()
-                    LegendInline(color: .wiredPink, label: "Upload", value: "")
-                }
-                Spacer()
-                VStack(spacing: 0) {
-                    Text(ByteFormat.rate(snapshot.downloadBytesPerSecond))
-                        .font(.system(size: 20, weight: .regular, design: .rounded))
-                        .monospacedDigit()
-                    LegendInline(color: .accentBlue, label: "Download", value: "")
-                }
-            }
-
-            NetworkBars(samples: snapshot.history)
-                .frame(height: 95)
-
-            HStack {
-                Text("Upload \(ByteFormat.rate(snapshot.uploadBytesPerSecond))")
-                Spacer()
-                Text("Download \(ByteFormat.rate(snapshot.downloadBytesPerSecond))")
-            }
-            .font(.system(size: 12.5, weight: .semibold))
-            .monospacedDigit()
-        }
-        .sectionStyle()
-    }
-}
-
-struct NetworkBars: View {
-    let samples: [NetworkSample]
-
-    var body: some View {
-        GeometryReader { proxy in
-            let maxValue = max(samples.map { max($0.uploadBytesPerSecond, $0.downloadBytesPerSecond) }.max() ?? 1, 1)
-            let halfHeight = proxy.size.height / 2
-            HStack(alignment: .center, spacing: 2) {
-                ForEach(Array(samples.enumerated()), id: \.offset) { _, sample in
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        Color.wiredPink
-                            .frame(height: max(2, halfHeight * CGFloat(sample.uploadBytesPerSecond) / CGFloat(maxValue)))
-                        Color.accentBlue
-                            .frame(height: max(2, halfHeight * CGFloat(sample.downloadBytesPerSecond) / CGFloat(maxValue)))
-                        Spacer(minLength: 0)
-                    }
-                    .frame(width: 3, height: proxy.size.height)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        }
-    }
-}
-
-struct NetworkInterfaceCard: View {
-    let snapshot: NetworkSnapshot
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: snapshot.interfaceName == nil ? "wifi.slash" : "wifi")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Color.accentBlue)
-            Text(snapshot.interfaceName == nil ? "Not Connected" : "Wi-Fi")
-                .font(.system(size: 13.5, weight: .regular))
-            Spacer()
-            Text(snapshot.interfaceDisplayName)
-                .font(.system(size: 13.5, weight: .semibold))
-                .lineLimit(1)
-        }
-        .sectionStyle()
-    }
-}
-
-struct NetworkTotalsView: View {
-    let snapshot: NetworkSnapshot
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text("INTERFACE TOTAL")
-                    .sectionTitle()
-                Spacer()
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 12, weight: .bold))
-                Text(" ")
-                    .frame(width: 42)
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 12, weight: .bold))
-            }
-
-            HStack(spacing: 8) {
-                Image(systemName: "network")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.accentBlue)
-                    .frame(width: 17, height: 17)
-                Text(snapshot.interfaceName ?? "No Interface")
-                    .font(.system(size: 13.5, weight: .regular))
-                    .lineLimit(1)
-                Spacer()
-                Text(ByteFormat.compactRate(snapshot.uploadBytesPerSecond))
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
-                Text(ByteFormat.compactRate(snapshot.downloadBytesPerSecond))
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
-            }
-        }
-        .sectionStyle()
-        .help("Interface throughput from macOS network counters. True per-process network attribution needs a separate nettop/NStat collector.")
-    }
-}
-
 struct BreakdownView: View {
     let snapshot: MemorySnapshot
 
@@ -856,18 +695,6 @@ enum ProcessListMode: String, CaseIterable, Identifiable {
     }
 }
 
-struct PagingView: View {
-    let snapshot: MemorySnapshot
-
-    var body: some View {
-        VStack(spacing: 7) {
-            LabelValueRow(label: "Page Ins", value: ByteFormat.memory(snapshot.pageIns))
-            LabelValueRow(label: "Page Outs", value: ByteFormat.memory(snapshot.pageOuts))
-        }
-        .sectionStyle()
-    }
-}
-
 struct SwapView: View {
     let snapshot: MemorySnapshot
 
@@ -901,34 +728,6 @@ struct SwapView: View {
     private var swapRatio: CGFloat {
         guard snapshot.swapTotal > 0 else { return 0 }
         return min(CGFloat(Double(snapshot.swapUsed) / Double(snapshot.swapTotal)), 1)
-    }
-}
-
-struct HistoryView: View {
-    let history: [MemoryBreakdown]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text("MEMORY")
-                    .sectionTitle()
-                Spacer()
-                Text("1 Hour")
-                    .font(.system(size: 12, weight: .medium))
-            }
-
-            GeometryReader { proxy in
-                HStack(alignment: .bottom, spacing: 2) {
-                    ForEach(Array(history.enumerated()), id: \.offset) { _, sample in
-                        HistoryBar(sample: sample)
-                            .frame(width: max((proxy.size.width - 118) / 60, 3))
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-            }
-            .frame(height: 42)
-        }
-        .sectionStyle()
     }
 }
 
@@ -1033,22 +832,6 @@ struct IconActionButton: View {
     }
 }
 
-struct HistoryBar: View {
-    let sample: MemoryBreakdown
-
-    var body: some View {
-        GeometryReader { proxy in
-            let total = max(Double(sample.total), 1)
-            VStack(spacing: 0) {
-                Color.compressedYellow.frame(height: proxy.size.height * Double(sample.compressed) / total)
-                Color.wiredPink.frame(height: proxy.size.height * Double(sample.wired) / total)
-                Color.accentBlue.frame(height: proxy.size.height * Double(sample.app) / total)
-            }
-            .frame(maxHeight: .infinity, alignment: .bottom)
-        }
-    }
-}
-
 struct LegendRow: View {
     let color: Color
     let label: String
@@ -1071,24 +854,6 @@ struct LegendRow: View {
         }
         .contentShape(Rectangle())
         .help(help)
-    }
-}
-
-struct LabelValueRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 13.5, weight: .regular))
-                .foregroundStyle(.white.opacity(0.82))
-            Spacer()
-            Text(value)
-                .font(.system(size: 13.5, weight: .regular))
-                .foregroundStyle(.white.opacity(0.86))
-                .monospacedDigit()
-        }
     }
 }
 
@@ -1128,36 +893,6 @@ struct ProcessIcon: View {
 
 struct CPUProcessIcon: View {
     let process: CPUProcess
-
-    var body: some View {
-        if let image = icon {
-            Image(nsImage: image)
-                .resizable()
-                .frame(width: 17, height: 17)
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(Color.panelLift)
-                .overlay {
-                    Text(String(process.name.prefix(1)))
-                        .font(.system(size: 9, weight: .semibold))
-                }
-                .frame(width: 17, height: 17)
-        }
-    }
-
-    private var icon: NSImage? {
-        if let appPath = process.appPath {
-            return NSWorkspace.shared.icon(forFile: appPath)
-        }
-
-        guard process.path.hasPrefix("/") else { return nil }
-        return NSWorkspace.shared.icon(forFile: process.path)
-    }
-}
-
-struct NetworkProcessIcon: View {
-    let process: NetworkProcess
 
     var body: some View {
         if let image = icon {
