@@ -27,6 +27,7 @@ The popover screenshots use built-in demo data.
 - **Burn rate that survives plan changes.** The drawdown card shows your pace since the last reset or plan upgrade.
 - **What you left on the table.** Left at reset records how much of each 5 hour and weekly window expired unused.
 - **What it is worth.** API Value prices your usage at API list rates for today, this week, 7 days and the month, next to your plan price.
+- **Weekly share card.** A 1080 x 1350 image of how much of your Claude plan went to work, what expired at the reset, and the points rescued against your usual week. Copy it or save it from the Runway tab. It carries no names, accounts, projects or paths, and the API dollar figure is off unless you switch it on.
 - **Full usage report.** One offline page with value, plan cost, unused allowance, 5 hour windows, daily sessions and model mix.
 - **Local model monitor.** The CPU/GPU tab shows throttling, temperatures, fans, power, GPU load and the busiest processes.
 - **Memory too.** Pressure, memory mix, top apps, swap and sensors.
@@ -91,6 +92,8 @@ swift run MaxxBar -- --render-popover Artifacts/screenshot-memory.png memory
 swift run MaxxBar -- --render-popover Artifacts/screenshot-cpugpu.png cpu
 swift run MaxxBar -- --write-ai-report
 swift run MaxxBar -- --write-usage-report
+swift run MaxxBar -- --render-share-card /tmp/share-card.png demo
+swift run MaxxBar -- --render-share-card /tmp/share-card.png so-far dollars
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popout-action
 ```
@@ -106,6 +109,7 @@ Scripts/test-usage-feed.sh
 Scripts/test-runway-forecast.sh
 Scripts/test-log-retention.sh
 Scripts/test-quota-ledger.sh
+Scripts/test-share-card.sh
 ```
 
 The project lives in iCloud Drive, so `.build` is a symbolic link to `~/Library/Developer/MaxxBar-build/.build` and build products are not synced. On a new Mac, recreate it with `mkdir -p ~/Library/Developer/MaxxBar-build/.build && ln -s ~/Library/Developer/MaxxBar-build/.build .build`.
