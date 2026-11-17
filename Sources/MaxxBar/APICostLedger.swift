@@ -51,15 +51,16 @@ enum APICostLedger {
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
-    static func isBackfilled(provider: String) -> Bool {
+    /// `mark` names a backfill version, so a fixed backfill can run again over the same provider.
+    static func isBackfilled(provider: String, mark: String? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return load()?.backfilled[provider] == true
+        return load()?.backfilled[mark ?? provider] == true
     }
 
     /// Replaces the stored totals for every day on or after `completeFrom` (days the events fully cover) and,
     /// for a backfill, every day the events touch. Older days the events do not cover are kept.
-    static func record(_ events: [APICostEvent], provider: String, completeFrom: Date?, backfill: Bool = false) {
+    static func record(_ events: [APICostEvent], provider: String, completeFrom: Date?, backfill: Bool = false, mark: String? = nil) {
         var totals: [String: APICostDay] = [:]
         for event in events {
             var day = totals[dayKey(event.at), default: APICostDay()]
@@ -82,7 +83,7 @@ enum APICostLedger {
         for (key, day) in totals where backfill || firstComplete.map({ key >= $0 }) ?? false {
             file.days[key, default: [:]][provider] = day
         }
-        if backfill { file.backfilled[provider] = true }
+        if backfill { file.backfilled[mark ?? provider] = true }
         file.pricingAsOf = LLMTokenPricing.asOf
         save(file)
     }

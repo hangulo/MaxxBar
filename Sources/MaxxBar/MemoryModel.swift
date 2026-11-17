@@ -25,6 +25,11 @@ final class MemoryModel: ObservableObject {
     @Published private(set) var llmUsage = LLMUsageSnapshot.empty
     @Published private(set) var llmQuotaHistory: [LLMQuotaHistorySample] = []
     @Published private(set) var aiUsage = AIUsageSnapshot.empty
+    /// Closed Claude quota windows from llm-window-ledger.jsonl.
+    @Published private(set) var quotaWindowLedger: [QuotaWindowRecord] = []
+    private var scheduledResetSampleAt: Date?
+    private var resetSampleWork: DispatchWorkItem?
+    @Published private(set) var isGeneratingUsageReport = false
     private var previousCumulativePageIns: UInt64?
     private var previousCumulativePageOuts: UInt64?
     private var previousCPUInfo: CPUReader.CPULoadInfo?
@@ -52,6 +57,7 @@ final class MemoryModel: ObservableObject {
     init() {
         llmQuotaHistory = Self.loadLLMQuotaHistory()
         previousLLMQuotaSample = llmQuotaHistory.last?.sampledAt
+        quotaWindowLedger = QuotaWindowLedgerStore.load()
     }
 
     init(
@@ -211,15 +217,18 @@ final class MemoryModel: ObservableObject {
                 guard let self, self.claudeCheckID == id else { return }
                 // Merge only the Claude parts: a full refresh may have landed in the meantime.
                 var merged = self.llmUsage
-                merged.limits.removeAll { $0.name == "Claude" }
-                merged.limits.append(contentsOf: result.snapshot.limits.filter { $0.name == "Claude" })
+                merged.limits.removeAll { $0.name.hasPrefix("Claude") }
+                merged.limits.append(contentsOf: result.snapshot.limits.filter { $0.name.hasPrefix("Claude") })
                 merged.providerErrors["Claude"] = result.snapshot.providerErrors["Claude"]
                 merged.error = merged.providerErrors.isEmpty
                     ? nil
                     : merged.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
                 self.llmUsage = merged
                 let published = merged
-                DispatchQueue.global(qos: .utility).async { _ = UsageFeedWriter.publish(published) }
+                let closedWindows = Self.feedClosedWindows(self.quotaWindowLedger)
+                DispatchQueue.global(qos: .utility).async {
+                    _ = UsageFeedWriter.publish(published, closedWindows: closedWindows)
+                }
                 // Keep "Checking…" visible briefly so an instant answer still reads as a response.
                 let remaining = max(0, 0.6 - Date().timeIntervalSince(started))
                 DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
@@ -255,17 +264,19 @@ final class MemoryModel: ObservableObject {
         }
 
         isRefreshingLLMUsage = true
+        let closedWindows = Self.feedClosedWindows(quotaWindowLedger)
         DispatchQueue.global(qos: .utility).async {
             let usage = LLMUsageReader.read(checkClaudeNow: checkClaudeNow, refreshLocal: refreshLocal)
             Self.logFiveHourUsageWindow(from: usage)
-            UsageFeedWriter.publish(usage)
+            UsageFeedWriter.publish(usage, closedWindows: closedWindows)
             let refreshedAt = Date()
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.llmUsage = usage
                 self.previousLLMUsageRefresh = refreshedAt
-                self.sampleLLMQuotaIfNeeded()
+                // Forced refreshes (launch, wake, just before a reset) always record a reading.
+                self.sampleLLMQuotaIfNeeded(force: force)
                 self.isRefreshingLLMUsage = false
                 completion?()
             }
@@ -285,6 +296,19 @@ final class MemoryModel: ObservableObject {
                     NSWorkspace.shared.open(refreshedURL)
                 }
             }
+        }
+    }
+
+    /// Writes the full page usage report off the main thread and opens it; a placeholder shows until it is ready.
+    func openUsageReport() {
+        guard !isGeneratingUsageReport else { return }
+        isGeneratingUsageReport = true
+        if let url = UsageReport.writePlaceholder() { NSWorkspace.shared.open(url) }
+        let ledger = quotaWindowLedger
+        let history = llmQuotaHistory
+        Task.detached(priority: .utility) {
+            _ = UsageReport.write(ledger: ledger, history: history)
+            await MainActor.run { self.isGeneratingUsageReport = false }
         }
     }
 
@@ -367,6 +391,13 @@ final class MemoryModel: ObservableObject {
         let codex = llmUsage.limits.first { $0.name == "Codex" }
         let claude = llmUsage.limits.first { $0.name == "Claude" }
         guard codex != nil || claude != nil else { return }
+        let modelWeeklies = Dictionary(
+            llmUsage.limits.compactMap { limit -> (String, LLMUsageWindow)? in
+                guard limit.name.hasPrefix("Claude "), let weekly = limit.weeklyWindow else { return nil }
+                return (String(limit.name.dropFirst("Claude ".count)), weekly)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
         let now = Date()
         let activitySignature = LLMQuotaActivitySignature(usage: llmUsage)
         if !force,
@@ -388,7 +419,9 @@ final class MemoryModel: ObservableObject {
                 codexFiveHourResetAt: codex?.shortWindow?.resetAt,
                 codexWeeklyResetAt: codex?.weeklyWindow?.resetAt,
                 claudeFiveHourResetAt: claude?.shortWindow?.resetAt,
-                claudeWeeklyResetAt: claude?.weeklyWindow?.resetAt
+                claudeWeeklyResetAt: claude?.weeklyWindow?.resetAt,
+                claudeModelWeeklyRemaining: modelWeeklies.isEmpty ? nil : modelWeeklies.mapValues(\.remainingPercent),
+                claudeModelWeeklyResetAt: modelWeeklies.isEmpty ? nil : modelWeeklies.compactMapValues(\.resetAt)
             )
         )
         previousLLMQuotaSample = now
@@ -399,6 +432,41 @@ final class MemoryModel: ObservableObject {
         }
 
         saveLLMQuotaHistory()
+        updateQuotaWindowLedger(now: now)
+    }
+
+    /// Ledger rows in the usage feed's shape (the feed keeps the last 30 days).
+    nonisolated static func feedClosedWindows(_ records: [QuotaWindowRecord]) -> [UsageFeed.ClosedWindow] {
+        records.map {
+            UsageFeed.ClosedWindow(
+                provider: "Claude", kind: $0.kind.rawValue, model: $0.model, resetAt: $0.windowResetAt,
+                usedPercent: $0.lastUsedPercent, leftPercent: $0.leftPercent, lowConfidence: $0.lowConfidence,
+                backfilled: $0.backfilled, plan: $0.plan
+            )
+        }
+    }
+
+    /// Closes windows whose reset has passed into llm-window-ledger.jsonl, then books a fresh reading
+    /// two minutes before the next reset so the record holds what was really left.
+    private func updateQuotaWindowLedger(now: Date) {
+        QuotaWindowLedgerStore.update(history: llmQuotaHistory, now: now) { records in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, records != self.quotaWindowLedger else { return }
+                self.quotaWindowLedger = records
+            }
+        }
+        guard let reset = QuotaWindowLedger.nextReset(in: llmQuotaHistory, after: now.addingTimeInterval(150)) else { return }
+        let fireAt = reset.addingTimeInterval(-120)
+        guard scheduledResetSampleAt.map({ abs($0.timeIntervalSince(fireAt)) > 60 }) ?? true else { return }
+        scheduledResetSampleAt = fireAt
+        resetSampleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.scheduledResetSampleAt = nil
+            self.refreshLLMUsageInBackground(force: true, checkClaudeNow: true, refreshLocal: false)
+        }
+        resetSampleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(fireAt.timeIntervalSince(now), 1), execute: work)
     }
 
     private func llmQuotaSampleInterval(for activitySignature: LLMQuotaActivitySignature) -> TimeInterval {

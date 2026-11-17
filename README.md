@@ -94,6 +94,7 @@ Scripts/test-claude-credentials.sh
 Scripts/test-usage-feed.sh
 Scripts/test-runway-forecast.sh
 Scripts/test-log-retention.sh
+Scripts/test-quota-ledger.sh
 ```
 
 The project lives in iCloud Drive, so `.build` is a symbolic link to `~/Library/Developer/MaxxBar-build/.build` and build products are not synced. On a new Mac, recreate it with `mkdir -p ~/Library/Developer/MaxxBar-build/.build && ln -s ~/Library/Developer/MaxxBar-build/.build .build`.
@@ -126,6 +127,8 @@ Otherwise, Claude usage refreshes from the endpoint at most every fifteen minute
 
 Other apps can read a small, versioned summary of quota and token use from `usage-feed.json`; its fields are documented in [Docs/usage-feed.md](Docs/usage-feed.md).
 
+When a Claude quota window resets (the 5 hour window, the weekly window, and per-model weeklies such as Fable), MaxxBar records what was left unused in `llm-window-ledger.jsonl`, one line per closed window, append only and never trimmed. The first run backfills from the saved quota history. A reading taken more than 30 minutes before the reset is marked low confidence, and MaxxBar takes a fresh reading two minutes before each known reset. The Runway tab's Left at reset card summarizes it, and Open full report writes `report/usage-report.html` (one self-contained page, no network requests) with value at API prices, plan cost, unused weekly allowance, 5 hour windows, daily sessions and model mix.
+
 API Value prices each Claude request in the local transcripts at its model's API list rate (input, output, cache reads, and 5 minute and 1 hour cache writes; the price table records the date it was checked). Daily totals are kept in `api-cost-ledger.json`, backfilled once from every transcript on disk, so "this month" covers days the live 8 day scan no longer reads. It is an estimate of value, not a bill. Codex is not priced yet.
 
 Local files are stored under:
@@ -139,6 +142,8 @@ Local files are stored under:
 ~/Library/Application Support/MaxxBar/ai-transfers.jsonl
 ~/Library/Application Support/MaxxBar/llm-5h-usage-windows.jsonl
 ~/Library/Application Support/MaxxBar/api-cost-ledger.json
+~/Library/Application Support/MaxxBar/llm-window-ledger.jsonl
+~/Library/Application Support/MaxxBar/report/usage-report.html
 ~/Library/Application Support/MaxxBar/claude-parse-cache.json
 ~/Library/Application Support/MaxxBar/archive/
 ~/Library/Application Support/MaxxBar/maxxbar-hub.html

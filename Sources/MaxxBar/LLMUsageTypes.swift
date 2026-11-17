@@ -474,6 +474,9 @@ struct LLMQuotaHistorySample: Identifiable, Equatable, Codable {
     var codexWeeklyResetAt: Date? = nil
     var claudeFiveHourResetAt: Date? = nil
     var claudeWeeklyResetAt: Date? = nil
+    /// Per-model weekly windows (for example "Fable"), keyed by model display name. Absent in older rows.
+    var claudeModelWeeklyRemaining: [String: Int]? = nil
+    var claudeModelWeeklyResetAt: [String: Date]? = nil
 
     func weeklyRemainingPercent(for provider: String) -> Int? {
         provider == "Claude" ? claudeWeeklyRemainingPercent : weeklyRemainingPercent

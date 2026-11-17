@@ -141,7 +141,8 @@ extension LLMUsageReader {
         let start = !claudeCostBackfillStarted
         claudeCostBackfillStarted = true
         claudeParsedFilesLock.unlock()
-        guard start, !APICostLedger.isBackfilled(provider: "Claude") else { return }
+        // Version 2 dedupes requests copied into resumed or forked transcripts, so it runs once more.
+        guard start, !APICostLedger.isBackfilled(provider: "Claude", mark: "Claude.v2") else { return }
         DispatchQueue.global(qos: .background).async {
             var seen = Set<String>()
             var events: [APICostEvent] = []
@@ -149,7 +150,7 @@ extension LLMUsageReader {
                 autoreleasepool {
                     guard let parsed = parsedClaudeFile(url),
                           !(parsed.cwd?.hasPrefix(claudeTitlerDirectory.path) ?? false) else { return }
-                    for (key, value) in parsed.requestUsage where seen.insert("\(parsed.sessionID)|\(key)").inserted {
+                    for (key, value) in parsed.requestUsage where seen.insert(requestDedupeKey(sessionID: parsed.sessionID, requestID: key)).inserted {
                         let event = ClaudeModelUsageEvent(
                             requestID: key, sessionID: parsed.sessionID, modelName: value.modelName,
                             tokens: value.usage.totalTokens, timestamp: value.timestamp ?? parsed.updatedAt,
@@ -159,8 +160,43 @@ extension LLMUsageReader {
                     }
                 }
             }
-            APICostLedger.record(events, provider: "Claude", completeFrom: nil, backfill: true)
+            APICostLedger.record(events, provider: "Claude", completeFrom: nil, backfill: true, mark: "Claude.v2")
         }
+    }
+
+    /// Every priced Claude request in every transcript on disk, for the usage report. Slow on first use (it reads
+    /// all transcripts); later calls reuse the parse cache. Requests copied into forked sessions count once.
+    static func usageReportRequests() -> (requests: [UsageReportRequest], sessions: [String: UsageReportSession]) {
+        let sidecarTitles = claudeSidecarTitles()
+        let generatedTitles = loadClaudeGeneratedTitles()
+        var seen = Set<String>()
+        var requests: [UsageReportRequest] = []
+        var sessions: [String: UsageReportSession] = [:]
+        for url in claudeTranscriptURLs() {
+            autoreleasepool {
+                guard let transcript = claudeTranscript(from: url, sidecarTitles: sidecarTitles, generatedTitles: generatedTitles)
+                else { return }
+                let session = transcript.session
+                sessions[session.id] = UsageReportSession(title: session.title, project: session.projectName)
+                for event in transcript.modelEvents
+                where seen.insert(requestDedupeKey(sessionID: event.sessionID, requestID: event.requestID)).inserted {
+                    guard let at = event.timestamp, let usage = event.usage,
+                          !event.modelName.localizedCaseInsensitiveContains("synthetic") else { continue }
+                    let cost = LLMTokenPricing.rates(for: event.modelName).breakdown(
+                        inputTokens: usage.inputTokens,
+                        cachedInputTokens: usage.cachedInputTokens,
+                        cacheWriteInputTokens: usage.cacheWriteInputTokens,
+                        cacheWrite1hInputTokens: usage.cacheWrite1hInputTokens,
+                        outputTokens: usage.outputTokens
+                    )
+                    requests.append(UsageReportRequest(
+                        at: at, sessionID: event.sessionID, model: event.modelName, cost: cost,
+                        tokens: usage.inputTokens + usage.outputTokens
+                    ))
+                }
+            }
+        }
+        return (requests, sessions)
     }
 
     private static func tokenCall(_ usage: LLMTokenUsageSummary, at timestamp: Date?) -> LLMTokenCall {
@@ -176,7 +212,13 @@ extension LLMUsageReader {
 
     private static func uniqueClaudeModelEvents(_ events: [ClaudeModelUsageEvent]) -> [ClaudeModelUsageEvent] {
         var seen = Set<String>()
-        return events.filter { seen.insert("\($0.sessionID)|\($0.requestID)").inserted }
+        return events.filter { seen.insert(requestDedupeKey(sessionID: $0.sessionID, requestID: $0.requestID)).inserted }
+    }
+
+    /// A resumed or forked session copies earlier lines, request ids included, into a new transcript; counting
+    /// each request id once keeps those from being double counted. Line-number fallbacks stay per session.
+    private static func requestDedupeKey(sessionID: String, requestID: String) -> String {
+        requestID.hasPrefix("line-") ? "\(sessionID)|\(requestID)" : requestID
     }
 
     private static func modelUsageTotals(

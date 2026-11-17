@@ -27,7 +27,7 @@ Read this file instead of MaxxBar's internal files. Its fields keep their names 
 | `appVersion` | MaxxBar version that wrote the file. |
 | `timeZone` | Time zone used for `daily[].date` and hour boundaries, for example `America/Los_Angeles`. |
 | `costBasis` | Plain-language note: costs are estimates at public API list prices, not what a subscription bills. |
-| `providers[]` | One entry per provider MaxxBar has a quota reading for (`Claude`, `Codex`). A provider hidden with the eye toggle is not read, so it is missing. |
+| `providers[]` | One entry per provider MaxxBar has a quota reading for (`Claude`, `Codex`). Per-model Claude weekly limits are their own entry with only `weekly`, for example `Claude Fable`. A provider hidden with the eye toggle is not read, so it is missing. |
 | `providers[].plan` | Plan name, for example `Max 5x` or `prolite`. Can be missing. |
 | `providers[].source` | Where the quota reading came from. Claude: `statusline` (Claude Code's own `rate_limits`), `endpoint` (a live usage request) or `cache` (the last saved response). Codex: `endpoint`. |
 | `providers[].checkedAt` | When the quota reading was taken. Reading age is now minus this. |

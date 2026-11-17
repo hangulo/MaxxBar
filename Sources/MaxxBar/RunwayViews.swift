@@ -6,6 +6,9 @@ struct LLMRunwayPanelView: View {
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
     var onCheckClaudeNow: (() -> Void)?
+    var quotaWindowLedger: [QuotaWindowRecord] = []
+    var isBuildingUsageReport = false
+    var onOpenUsageReport: (() -> Void)?
     var isCheckingClaude = false
     var claudeCheckNote: String?
     var onPopOut: (() -> Void)?
@@ -41,6 +44,12 @@ struct LLMRunwayPanelView: View {
 
                     LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
                     DrawdownInsightCard(snapshot: snapshot, quotaHistory: quotaHistory)
+                    if showClaude || !showCodex {
+                        QuotaLeftAtResetCard(
+                            snapshot: snapshot, records: quotaWindowLedger,
+                            isBuildingReport: isBuildingUsageReport, onOpenReport: onOpenUsageReport
+                        )
+                    }
                     LLMAdvancedUsageCard(snapshot: snapshot, isExpanded: $advancedExpanded)
                 }
             }

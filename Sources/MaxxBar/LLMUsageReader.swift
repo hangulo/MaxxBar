@@ -83,6 +83,42 @@ enum LLMUsageReader {
         let seven_day: ClaudeUsageWindowPayload?
         let seven_day_opus: ClaudeUsageWindowPayload?
         let seven_day_sonnet: ClaudeUsageWindowPayload?
+        /// The newer list form; the only place per-model weeklies other than Opus and Sonnet appear (e.g. Fable).
+        let limits: [ClaudeLimitPayload]?
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            five_hour = try? container.decodeIfPresent(ClaudeUsageWindowPayload.self, forKey: .five_hour)
+            seven_day = try? container.decodeIfPresent(ClaudeUsageWindowPayload.self, forKey: .seven_day)
+            seven_day_opus = try? container.decodeIfPresent(ClaudeUsageWindowPayload.self, forKey: .seven_day_opus)
+            seven_day_sonnet = try? container.decodeIfPresent(ClaudeUsageWindowPayload.self, forKey: .seven_day_sonnet)
+            // One malformed entry must not drop the whole response.
+            limits = (try? container.decodeIfPresent([LenientLimit].self, forKey: .limits))?.compactMap(\.value)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case five_hour, seven_day, seven_day_opus, seven_day_sonnet, limits
+        }
+
+        private struct LenientLimit: Decodable {
+            let value: ClaudeLimitPayload?
+            init(from decoder: Decoder) throws { value = try? ClaudeLimitPayload(from: decoder) }
+        }
+    }
+
+    private struct ClaudeLimitPayload: Decodable {
+        let kind: String?
+        let percent: Double?
+        let resets_at: String?
+        let scope: Scope?
+
+        struct Scope: Decodable {
+            let model: Model?
+        }
+
+        struct Model: Decodable {
+            let display_name: String?
+        }
     }
 
     private struct ClaudeUsageWindowPayload: Decodable {
@@ -305,7 +341,7 @@ enum LLMUsageReader {
     private static func applyClaudeLimits(
         to snapshot: inout LLMUsageSnapshot, lastActivity: Date?, hasClaudeSessions: Bool, manual: Bool
     ) {
-        snapshot.limits.removeAll { $0.name == "Claude" }
+        snapshot.limits.removeAll { $0.name.hasPrefix("Claude") }
         snapshot.providerErrors["Claude"] = nil
         let now = Date()
         let tapped = ClaudeStatusLineLimits.read()?.current(at: now)
@@ -866,6 +902,15 @@ enum LLMUsageReader {
         }
         if let sonnet = claudeWindow(response.seven_day_sonnet, label: "Weekly", seconds: 604_800) {
             limits.append(LLMUsageLimit(name: "Claude Sonnet", primary: nil, secondary: sonnet))
+        }
+        for scoped in response.limits ?? [] where scoped.kind == "weekly_scoped" {
+            guard let model = scoped.scope?.model?.display_name, !model.isEmpty,
+                  !limits.contains(where: { $0.name == "Claude \(model)" }),
+                  let window = claudeWindow(
+                      ClaudeUsageWindowPayload(utilization: scoped.percent, resets_at: scoped.resets_at),
+                      label: "Weekly", seconds: 604_800
+                  ) else { continue }
+            limits.append(LLMUsageLimit(name: "Claude \(model)", primary: nil, secondary: window))
         }
         return limits
     }
