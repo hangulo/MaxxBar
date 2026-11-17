@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- API prices updated (rates checked 2026-11-16, from Anthropic's and OpenAI's published pricing pages): Fable 5.2 / Mythos 5.2 added, Opus 5.5, Sonnet 5 and 5.5, Opus 4 / 4.1, Haiku 4.5, and gpt-5.6 sol / terra / luna, gpt-5.2, gpt-5.1, gpt-5, gpt-5-mini and gpt-5-nano. Each model now stores its own cache read and 5 minute / 1 hour cache write rates. Models match by the longest ID prefix, tolerating `[1m]` and date suffixes, so `claude-fable-5-2` no longer prices as Fable 5. Haiku 5.5 prices each request by prompt size (over 100K costs more), as do the gpt-5.6 models and gpt-5.5 over 272K input. Unknown models use their family's newest rates and stay labelled as estimates. The API Value card shows the date the rates were checked, and the API cost ledger reprices every transcript still on disk once after a rate update. `Scripts/test-api-pricing.sh` covers it.
 - New Waste forecast card on Runway, above Left at reset: how much of this week's Claude allowance is likely to expire unused at your usual pace, how much more to spend to finish near 90% used, the same for per-model weeklies such as Fable, and where the current 5 hour window is heading. Weekly habits come from a 28 slot profile (each weekday in four 6 hour parts, median of past weeks) built from the saved quota history, with older plans rescaled. `Scripts/test-waste-forecast.sh` covers it.
 
 Fresher Claude readings (roadmap item 17):

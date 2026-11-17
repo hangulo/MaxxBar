@@ -142,7 +142,7 @@ extension LLMUsageReader {
         events.compactMap { event in
             guard let at = event.timestamp, let usage = event.usage,
                   !event.modelName.localizedCaseInsensitiveContains("synthetic") else { return nil }
-            let cost = LLMTokenPricing.rates(for: event.modelName).breakdown(
+            let cost = LLMTokenPricing.rates(for: event.modelName, promptTokens: usage.inputTokens).breakdown(
                 inputTokens: usage.inputTokens,
                 cachedInputTokens: usage.cachedInputTokens,
                 cacheWriteInputTokens: usage.cacheWriteInputTokens,
@@ -158,6 +158,8 @@ extension LLMUsageReader {
 
     nonisolated(unsafe) private static var claudeCostBackfillStarted = false
 
+    private static let backfillMark = "Claude.v2.rates-\(LLMTokenPricing.asOf)"
+
     /// Once per install: price every request in every transcript on disk, so "this month" has history from
     /// before the ledger existed. Runs in the background; transcripts are read one at a time.
     private static func scheduleClaudeCostBackfillIfNeeded() {
@@ -165,8 +167,9 @@ extension LLMUsageReader {
         let start = !claudeCostBackfillStarted
         claudeCostBackfillStarted = true
         claudeParsedFilesLock.unlock()
-        // Version 2 dedupes requests copied into resumed or forked transcripts, so it runs once more.
-        guard start, !APICostLedger.isBackfilled(provider: "Claude", mark: "Claude.v2") else { return }
+        // Version 2 dedupes requests copied into resumed or forked transcripts. The mark carries the price table
+        // date, so a rate update reprices every transcript still on disk once.
+        guard start, !APICostLedger.isBackfilled(provider: "Claude", mark: backfillMark) else { return }
         DispatchQueue.global(qos: .background).async {
             var seen = Set<String>()
             var events: [APICostEvent] = []
@@ -184,7 +187,7 @@ extension LLMUsageReader {
                     }
                 }
             }
-            APICostLedger.record(events, provider: "Claude", completeFrom: nil, backfill: true, mark: "Claude.v2")
+            APICostLedger.record(events, provider: "Claude", completeFrom: nil, backfill: true, mark: backfillMark)
         }
     }
 
@@ -206,7 +209,7 @@ extension LLMUsageReader {
                 where seen.insert(requestDedupeKey(sessionID: event.sessionID, requestID: event.requestID)).inserted {
                     guard let at = event.timestamp, let usage = event.usage,
                           !event.modelName.localizedCaseInsensitiveContains("synthetic") else { continue }
-                    let cost = LLMTokenPricing.rates(for: event.modelName).breakdown(
+                    let cost = LLMTokenPricing.rates(for: event.modelName, promptTokens: usage.inputTokens).breakdown(
                         inputTokens: usage.inputTokens,
                         cachedInputTokens: usage.cachedInputTokens,
                         cacheWriteInputTokens: usage.cacheWriteInputTokens,

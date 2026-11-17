@@ -74,7 +74,7 @@ struct LLMUsageBucket: Equatable {
     var estimatedCostUSD: Double = 0
 
     mutating func add(_ call: LLMTokenCall, modelName: String) {
-        let cost = LLMTokenPricing.rates(for: modelName).breakdown(
+        let cost = LLMTokenPricing.rates(for: modelName, promptTokens: call.inputTokens).breakdown(
             inputTokens: call.inputTokens,
             cachedInputTokens: call.cachedInputTokens,
             cacheWriteInputTokens: call.cacheWriteInputTokens,
@@ -294,81 +294,154 @@ extension LLMTokenUsageSummary {
     }
 }
 
-/// API list prices per million tokens. Cache reads have their own rate; cache writes are priced in
-/// `breakdown` at 1.25x (5 minute) and 2x (1 hour) of base input. One table for every estimate in the app.
+/// API list prices in USD per million tokens, one table for every estimate in the app. Each model stores its
+/// own cache write (5 minute and 1 hour) and cache read rates. Models are matched by the longest ID prefix,
+/// tolerating suffixes such as "[1m]" or a date, but never a further version number ("claude-fable-5-2" is not
+/// "claude-fable-5"). Two models price by prompt size per request: Haiku 5.5 above 100K prompt tokens and the
+/// GPT-5.6 family and gpt-5.5 above 272K input tokens. Claude 4.6 and later have no long context surcharge.
 struct LLMTokenPricing: Equatable {
-    /// When the Claude prices below were last checked against Anthropic's published rates.
-    static let asOf = "2026-10-06"
-    static let gpt55 = LLMTokenPricing(label: "gpt-5.5 API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 30.0)
-    static let gpt54 = LLMTokenPricing(label: "gpt-5.4 API", freshInputDollarsPerMillion: 2.5, cachedInputDollarsPerMillion: 0.25, outputDollarsPerMillion: 15.0)
-    static let gpt54Mini = LLMTokenPricing(label: "gpt-5.4-mini API", freshInputDollarsPerMillion: 0.75, cachedInputDollarsPerMillion: 0.075, outputDollarsPerMillion: 4.5)
-    static let gpt54Nano = LLMTokenPricing(label: "gpt-5.4-nano API", freshInputDollarsPerMillion: 0.20, cachedInputDollarsPerMillion: 0.02, outputDollarsPerMillion: 1.25)
-    static let gpt53Codex = LLMTokenPricing(label: "gpt-5.3-codex API", freshInputDollarsPerMillion: 1.75, cachedInputDollarsPerMillion: 0.175, outputDollarsPerMillion: 14.0)
-    static let gpt51Codex = LLMTokenPricing(label: "gpt-5.1-codex API", freshInputDollarsPerMillion: 1.25, cachedInputDollarsPerMillion: 0.125, outputDollarsPerMillion: 10.0)
-    static let codexMini = LLMTokenPricing(label: "codex-mini API", freshInputDollarsPerMillion: 1.5, cachedInputDollarsPerMillion: 0.375, outputDollarsPerMillion: 6.0)
-    static let claudeFable51 = LLMTokenPricing(label: "Claude Fable 5.1 API", freshInputDollarsPerMillion: 10.0, cachedInputDollarsPerMillion: 0.25, outputDollarsPerMillion: 50.0)
-    static let claudeFable5 = LLMTokenPricing(label: "Claude Fable 5 API", freshInputDollarsPerMillion: 10.0, cachedInputDollarsPerMillion: 1.0, outputDollarsPerMillion: 50.0)
-    static let claudeOpus55 = LLMTokenPricing(label: "Claude Opus 5.5 API", freshInputDollarsPerMillion: 4.0, cachedInputDollarsPerMillion: 0.2, outputDollarsPerMillion: 20.0)
-    static let claudeOpus = LLMTokenPricing(label: "Claude Opus API", freshInputDollarsPerMillion: 5.0, cachedInputDollarsPerMillion: 0.5, outputDollarsPerMillion: 25.0)
-    static let claudeSonnet5 = LLMTokenPricing(label: "Claude Sonnet 5 / 5.5 API", freshInputDollarsPerMillion: 2.0, cachedInputDollarsPerMillion: 0.2, outputDollarsPerMillion: 10.0)
-    static let claudeSonnet = LLMTokenPricing(label: "Claude Sonnet API", freshInputDollarsPerMillion: 3.0, cachedInputDollarsPerMillion: 0.3, outputDollarsPerMillion: 15.0)
-    static let claudeHaiku55 = LLMTokenPricing(label: "Claude Haiku 5.5 API", freshInputDollarsPerMillion: 0.10, cachedInputDollarsPerMillion: 0.01, outputDollarsPerMillion: 0.50)
-    static let claudeHaiku = LLMTokenPricing(label: "Claude Haiku API", freshInputDollarsPerMillion: 1.0, cachedInputDollarsPerMillion: 0.1, outputDollarsPerMillion: 5.0)
+    /// When the table was last checked against platform.claude.com/docs/en/about-claude/pricing and
+    /// developers.openai.com/api/docs/pricing.
+    static let asOf = "2026-11-16"
+    static let checkedLabel = "rates checked \(asOf)"
 
     var label: String
     var freshInputDollarsPerMillion: Double
+    var cacheWrite5mDollarsPerMillion: Double
+    var cacheWrite1hDollarsPerMillion: Double
     var cachedInputDollarsPerMillion: Double
     var outputDollarsPerMillion: Double
+    /// False when the model is not in the table and a family's rates stand in for it.
+    var isKnown = true
 
-    static func rates(for modelName: String) -> LLMTokenPricing {
-        let model = modelName.lowercased()
-        if model.contains("fable-5-1") || model.contains("mythos-5-1") || model.contains("fable 5.1") {
-            return .claudeFable51
+    /// OpenAI rows: no cache write premium.
+    init(label: String, freshInputDollarsPerMillion: Double, cachedInputDollarsPerMillion: Double, outputDollarsPerMillion: Double) {
+        self.init(label: label, input: freshInputDollarsPerMillion, write5m: freshInputDollarsPerMillion,
+                  write1h: freshInputDollarsPerMillion, read: cachedInputDollarsPerMillion, output: outputDollarsPerMillion)
+    }
+
+    init(label: String, input: Double, write5m: Double, write1h: Double, read: Double, output: Double) {
+        self.label = label
+        freshInputDollarsPerMillion = input
+        cacheWrite5mDollarsPerMillion = write5m
+        cacheWrite1hDollarsPerMillion = write1h
+        cachedInputDollarsPerMillion = read
+        outputDollarsPerMillion = output
+    }
+
+    private static func claude(_ label: String, _ input: Double, _ write5m: Double, _ write1h: Double, _ read: Double, _ output: Double) -> LLMTokenPricing {
+        LLMTokenPricing(label: "\(label) API", input: input, write5m: write5m, write1h: write1h, read: read, output: output)
+    }
+
+    private static func openAI(_ label: String, _ input: Double, _ cached: Double, _ output: Double) -> LLMTokenPricing {
+        LLMTokenPricing(label: "\(label) API", freshInputDollarsPerMillion: input, cachedInputDollarsPerMillion: cached, outputDollarsPerMillion: output)
+    }
+
+    static let gpt55 = openAI("gpt-5.5", 5.00, 0.50, 30.00)
+
+    private struct Row {
+        var prefix: String
+        var pricing: LLMTokenPricing
+        /// Prompts over `threshold` tokens in one request use `pricing` from here instead.
+        var longPrompt: (threshold: UInt64, pricing: LLMTokenPricing)? = nil
+    }
+
+    private static let table: [Row] = {
+        let fable52 = claude("Claude Fable 5.2", 8, 10, 16, 0.20, 40)
+        let fable51 = claude("Claude Fable 5.1", 10, 12.50, 20, 0.25, 50)
+        let fable5 = claude("Claude Fable 5", 10, 12.50, 20, 1.00, 50)
+        let opus5 = claude("Claude Opus 5 / 4.5-4.8", 5, 6.25, 10, 0.50, 25)
+        let opus4 = claude("Claude Opus 4 / 4.1", 15, 18.75, 30, 1.50, 75)
+        let sonnet4 = claude("Claude Sonnet 4 / 4.5 / 4.6", 3, 3.75, 6, 0.30, 15)
+        let gpt56Sol = openAI("gpt-5.6-sol", 4.00, 0.40, 20.00), gpt56SolLong = openAI("gpt-5.6-sol (over 272K)", 8, 0.80, 30)
+        let gpt56Terra = openAI("gpt-5.6-terra", 2.00, 0.20, 12.00), gpt56TerraLong = openAI("gpt-5.6-terra (over 272K)", 4, 0.40, 18)
+        let gpt56Luna = openAI("gpt-5.6-luna", 0.20, 0.02, 1.20), gpt56LunaLong = openAI("gpt-5.6-luna (over 272K)", 0.40, 0.04, 1.80)
+        let gpt52 = openAI("gpt-5.2", 1.75, 0.175, 14.00)
+        let gpt51 = openAI("gpt-5.1", 1.25, 0.125, 10.00)
+        return [
+            Row(prefix: "claude-fable-5-2", pricing: fable52),
+            Row(prefix: "claude-mythos-5-2", pricing: fable52),
+            Row(prefix: "claude-fable-5-1", pricing: fable51),
+            Row(prefix: "claude-mythos-5-1", pricing: fable51),
+            Row(prefix: "claude-fable-5", pricing: fable5),
+            Row(prefix: "claude-mythos-5", pricing: fable5),
+            Row(prefix: "claude-opus-5-5", pricing: claude("Claude Opus 5.5", 4, 5, 8, 0.20, 20)),
+            Row(prefix: "claude-opus-5", pricing: opus5),
+            Row(prefix: "claude-opus-4-8", pricing: opus5),
+            Row(prefix: "claude-opus-4-7", pricing: opus5),
+            Row(prefix: "claude-opus-4-6", pricing: opus5),
+            Row(prefix: "claude-opus-4-5", pricing: opus5),
+            Row(prefix: "claude-opus-4-1", pricing: opus4),
+            Row(prefix: "claude-opus-4", pricing: opus4),
+            Row(prefix: "claude-sonnet-5-5", pricing: claude("Claude Sonnet 5.5", 2, 2.50, 4, 0.10, 10)),
+            Row(prefix: "claude-sonnet-5", pricing: claude("Claude Sonnet 5", 2, 2.50, 4, 0.20, 10)),
+            Row(prefix: "claude-sonnet-4-6", pricing: sonnet4),
+            Row(prefix: "claude-sonnet-4-5", pricing: sonnet4),
+            Row(prefix: "claude-sonnet-4", pricing: sonnet4),
+            Row(prefix: "claude-haiku-5-5", pricing: claude("Claude Haiku 5.5", 0.10, 0.125, 0.20, 0.01, 0.50),
+                longPrompt: (100_000, claude("Claude Haiku 5.5 (over 100K prompt)", 0.50, 0.625, 1.00, 0.05, 2.50))),
+            Row(prefix: "claude-haiku-4-5", pricing: claude("Claude Haiku 4.5", 1, 1.25, 2, 0.10, 5)),
+            Row(prefix: "gpt-5.6-sol", pricing: gpt56Sol, longPrompt: (272_000, gpt56SolLong)),
+            Row(prefix: "gpt-5.6-terra", pricing: gpt56Terra, longPrompt: (272_000, gpt56TerraLong)),
+            Row(prefix: "gpt-5.6-luna", pricing: gpt56Luna, longPrompt: (272_000, gpt56LunaLong)),
+            Row(prefix: "gpt-5.5", pricing: gpt55, longPrompt: (272_000, openAI("gpt-5.5 (over 272K)", 10, 1.00, 45))),
+            Row(prefix: "gpt-5.4-mini", pricing: openAI("gpt-5.4-mini", 0.75, 0.075, 4.50)),
+            Row(prefix: "gpt-5.4-nano", pricing: openAI("gpt-5.4-nano", 0.20, 0.02, 1.25)),
+            Row(prefix: "gpt-5.4", pricing: openAI("gpt-5.4", 2.50, 0.25, 15.00)),
+            Row(prefix: "gpt-5.3-codex", pricing: openAI("gpt-5.3-codex", 1.75, 0.175, 14.00)),
+            Row(prefix: "gpt-5.2-codex", pricing: gpt52),
+            Row(prefix: "gpt-5.2", pricing: gpt52),
+            Row(prefix: "gpt-5.1-codex", pricing: gpt51),
+            Row(prefix: "gpt-5.1", pricing: gpt51),
+            Row(prefix: "gpt-5-codex", pricing: openAI("gpt-5", 1.25, 0.125, 10.00)),
+            Row(prefix: "gpt-5-mini", pricing: openAI("gpt-5-mini", 0.25, 0.025, 2.00)),
+            Row(prefix: "gpt-5-nano", pricing: openAI("gpt-5-nano", 0.05, 0.005, 0.40)),
+            Row(prefix: "gpt-5", pricing: openAI("gpt-5", 1.25, 0.125, 10.00)),
+            Row(prefix: "codex-mini", pricing: openAI("codex-mini", 1.5, 0.375, 6.0))
+        ].sorted { $0.prefix.count > $1.prefix.count }
+    }()
+
+    /// "Claude Opus 4.8", "us.anthropic.claude-opus-4-8-v1" and "claude-opus-4-8[1m]" all become claude-opus-4-8….
+    static func normalizedModelID(_ modelName: String) -> String {
+        var model = modelName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = model.range(of: "claude") { model = String(model[range.lowerBound...]) }
+        let families = ["fable", "mythos", "opus", "sonnet", "haiku"]
+        if model.hasPrefix("claude") || families.contains(where: { model.hasPrefix($0) }) {
+            model = model.replacingOccurrences(of: " ", with: "-").replacingOccurrences(of: ".", with: "-")
+            if !model.hasPrefix("claude-") {
+                model = "claude-" + (model.hasPrefix("claude") ? String(model.dropFirst("claude".count)) : model)
+            }
         }
-        if model.contains("fable") || model.contains("mythos") {
-            return .claudeFable5
+        return model
+    }
+
+    /// Whether a table prefix ends where the model ID's own name does. Rejected: the middle of a number
+    /// ("claude-fable-5-2" inside "claude-fable-5-20261101") and another version number ("-2" after
+    /// "claude-fable-5", ".4" after "gpt-5"). Accepted: nothing, a date ("-20250514"), "[1m]", a variant name.
+    private static func endsAtBoundary(_ remainder: Substring) -> Bool {
+        guard let first = remainder.first else { return true }
+        guard !first.isLetter, !first.isNumber else { return false }
+        guard first == "-" || first == "." else { return true }
+        let digits = remainder.dropFirst().prefix { $0.isNumber }
+        return !(1...2).contains(digits.count)
+    }
+
+    /// Rates for one request. Pass the request's whole prompt (`promptTokens`: input plus cache reads and writes)
+    /// so models that price by prompt size pick the right tier; aggregates leave it nil and use the base tier.
+    static func rates(for modelName: String, promptTokens: UInt64? = nil) -> LLMTokenPricing {
+        let model = normalizedModelID(modelName)
+        if let row = table.first(where: { model.hasPrefix($0.prefix) && endsAtBoundary(model.dropFirst($0.prefix.count)) }) {
+            if let long = row.longPrompt, let promptTokens, promptTokens > long.threshold { return long.pricing }
+            return row.pricing
         }
-        if model.contains("opus-5-5") || model.contains("opus 5.5") {
-            return .claudeOpus55
-        }
-        if model.contains("opus") {
-            return .claudeOpus
-        }
-        if model.contains("sonnet-5") || model.contains("sonnet 5") {
-            return .claudeSonnet5
-        }
-        if model.contains("sonnet") {
-            return .claudeSonnet
-        }
-        if model.contains("haiku-5-5") || model.contains("haiku 5.5") {
-            return .claudeHaiku55
-        }
-        if model.contains("haiku") {
-            return .claudeHaiku
-        }
-        if model.hasPrefix("codex-mini") {
-            return .codexMini
-        }
-        if model.hasPrefix("gpt-5.3-codex") || model.hasPrefix("gpt-5.2-codex") {
-            return .gpt53Codex
-        }
-        if model.hasPrefix("gpt-5.1-codex") || model.hasPrefix("gpt-5-codex") {
-            return .gpt51Codex
-        }
-        if model.hasPrefix("gpt-5.4-mini") {
-            return .gpt54Mini
-        }
-        if model.hasPrefix("gpt-5.4-nano") {
-            return .gpt54Nano
-        }
-        if model.hasPrefix("gpt-5.4") {
-            return .gpt54
-        }
-        if model.hasPrefix("gpt-5.5") {
-            return .gpt55
-        }
-        var fallback = LLMTokenPricing.gpt55
-        fallback.label = "gpt-5.5 API rates (model has no known price)"
+        // Not in the table: a family's newest rates stand in, labelled as an estimate.
+        let family: [(String, String)] = [
+            ("fable", "claude-fable-5-2"), ("mythos", "claude-fable-5-2"), ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5")
+        ]
+        var fallback = family.first { model.contains($0.0) }.map { rates(for: $0.1) } ?? gpt55
+        fallback.label = "\(fallback.label) rates (model has no known price)"
+        fallback.isKnown = false
         return fallback
     }
 
@@ -382,7 +455,7 @@ struct LLMTokenPricing: Equatable {
             + dollars(for: outputTokens, rate: outputDollarsPerMillion)
     }
 
-    /// Cache writes bill at 1.25x base input for the 5-minute cache and 2x for the 1-hour cache.
+    /// `inputTokens` is the whole prompt; cache reads, 5 minute and 1 hour cache writes are carved out of it.
     func breakdown(
         inputTokens: UInt64,
         cachedInputTokens: UInt64,
@@ -395,8 +468,8 @@ struct LLMTokenPricing: Equatable {
         let writes1h = min(cacheWrite1hInputTokens, writes)
         return LLMCostBreakdown(
             freshInput: dollars(for: uncached - writes, rate: freshInputDollarsPerMillion),
-            cacheWrite: dollars(for: writes - writes1h, rate: freshInputDollarsPerMillion * 1.25)
-                + dollars(for: writes1h, rate: freshInputDollarsPerMillion * 2),
+            cacheWrite: dollars(for: writes - writes1h, rate: cacheWrite5mDollarsPerMillion)
+                + dollars(for: writes1h, rate: cacheWrite1hDollarsPerMillion),
             cacheRead: dollars(for: cachedInputTokens, rate: cachedInputDollarsPerMillion),
             output: dollars(for: outputTokens, rate: outputDollarsPerMillion)
         )

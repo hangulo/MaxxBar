@@ -30,7 +30,7 @@ struct APICostCard: View {
                         .foregroundStyle(.white.opacity(0.82))
                         .padding(.top, 2)
                 }
-                Text("What \(provider) usage on this Mac would cost at API list prices (as of \(cost.pricingAsOf)), including cache reads and writes.")
+                Text("What \(provider) usage on this Mac would cost at API list prices (\(LLMTokenPricing.checkedLabel)), including cache reads and writes.")
                     .font(.system(size: 10.5, weight: .regular))
                     .foregroundStyle(.white.opacity(0.5))
                     .fixedSize(horizontal: false, vertical: true)
