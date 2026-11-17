@@ -1,21 +1,33 @@
 # Release Notes
 
-## Unreleased - 2026-11-14 (third batch)
+## v0.3.0 - 2026-11-16
 
-- The CPU/GPU tab is back, built for local model work: thermal state with a plain explanation, power draw, CPU and GPU temperatures, fan speeds, per-core load, real GPU utilization (read from the GPU's own counters), and top processes. The process list and GPU read only run while the tab is open.
-- New API Value card on Insights: what usage would have cost at API list prices today, this week, over the last 7 days, and this month, next to the plan price. Kept per day in `api-cost-ledger.json`, backfilled once from all transcripts.
-- Added Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 API prices.
+Everything merged after the 14 Nov Claude work, in PRs #16, #17 and #18.
 
-## Unreleased - 2026-11-14 (second batch)
+Cleanup and energy ([#16](https://github.com/hangulo/MaxxBar/pull/16)):
 
-- Removed Moments, the hidden Clipboard tab and its clipboard poller and image store, the Network panel, and other code nothing on screen reached (about 2,500 lines). The CPU/GPU tab and sensor code stay. `clipboard-metadata.jsonl` is still written on Command-C and Command-V, now without rereading the file.
+- Removed Moments, the hidden Clipboard tab and its clipboard poller and image store, the Network panel, and other code nothing on screen reached (about 2,500 lines). `clipboard-metadata.jsonl` is still written on Command-C and Command-V, now without rereading the file.
 - Opens at login by default, with a toggle in the eye menu.
 - The menu bar shows when a window runs out, in amber, when the current burn rate empties it before its reset.
 - The refresh timer runs once a minute while the popover is closed.
 - Parsed Claude transcript totals are cached on disk, so launches only read new lines.
 - Logs keep 30 days; older lines move to an `archive` folder instead of being deleted.
 
-## 2026-11-14
+Usage feed ([#17](https://github.com/hangulo/MaxxBar/pull/17)):
+
+- MaxxBar writes `usage-feed.json` (schema `maxxbar.usage-feed`, version 1): per provider quota, plan, reading source and age, plus token and estimated cost totals per day and per hour for the last 7 days. No email, prompt text, project names or paths. Documented in `Docs/usage-feed.md`.
+
+Unused quota, performance and API value ([#18](https://github.com/hangulo/MaxxBar/pull/18)):
+
+- Records what was left unused when each Claude window resets (5 hour, weekly, and per-model weekly such as Fable) in `llm-window-ledger.jsonl`, backfilled from saved history, with a fresh reading two minutes before each known reset. A Left at reset card on Runway summarizes it.
+- New full page usage report (`report/usage-report.html`, no network requests): value at API prices, prorated plan cost, unused weekly allowance, a grid of 5 hour windows, daily value by token type with drill-down to sessions, and model mix.
+- The CPU/GPU tab is back, built for local model work: thermal state with a plain explanation, power draw, CPU and GPU temperatures, fan speeds, per-core load, real GPU utilization, and top processes. The heavier reads only run while the tab is open.
+- New API Value card on Insights: what usage would have cost at API list prices today, this week, over the last 7 days, and this month, next to the plan price, kept per day in `api-cost-ledger.json`. Requests copied into resumed or forked transcripts are counted once.
+- Added Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 API prices, and per-model weekly limits from the usage endpoint.
+
+Repository: stale screenshots of removed tabs were deleted, the README screenshots were regenerated from the current build, and the version is now 0.3.0.
+
+## 2026-11-14 ([#15](https://github.com/hangulo/MaxxBar/pull/15))
 
 Claude as a first-class provider:
 

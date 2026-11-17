@@ -1,4 +1,6 @@
 .build/
+# .build is a symbolic link out of iCloud on the development Mac (see README).
+.build
 .swiftpm/
 DerivedData/
 *.xcuserdata/

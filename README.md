@@ -2,7 +2,7 @@
 
 MaxxBar is a macOS menu bar companion for Codex and Claude runway, local AI usage insight, and machine context. It brings quota, token, memory, and workflow signals into one quiet daily surface, then points the product at a sharper question: how much AI runway is left, what local sessions are driving it, and where AI output is moving in your work.
 
-Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongoing release history.
+Current release: `v0.3.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongoing release history.
 
 ## Screenshots
 
@@ -10,6 +10,7 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
   <img src="Artifacts/screenshot-llm.png" alt="Runway panel" width="270">
   <img src="Artifacts/screenshot-insights.png" alt="Insights panel" width="270">
   <img src="Artifacts/screenshot-memory.png" alt="Memory panel" width="270">
+  <img src="Artifacts/screenshot-cpugpu.png" alt="CPU/GPU panel" width="270">
 </p>
 
 ## What It Does
@@ -22,13 +23,15 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 - Keeps Memory visible with pressure, memory breakdown, top processes, swap, and a compact CPU/GPU temperature and fan RPM card beneath Swap.
 - Provides a CPU/GPU tab for local model work: macOS thermal state (Normal, Warm, Throttling, Critical), power draw, CPU and GPU temperatures, fan speeds, CPU load per core, GPU utilization, and the busiest processes. The process list and GPU read only run while the tab is open.
 - Shows an API Value card on Insights: what your primary provider's usage would have cost at API list prices today, this week, over the last 7 days, and this month, next to your plan's price.
+- Records what was left unused when each Claude window resets (5 hour, weekly and per-model weekly) and shows it in a Left at reset card on Runway, with a full page usage report: value at API prices, plan cost, unused allowance, 5 hour windows, daily sessions and model mix.
+- Publishes `usage-feed.json`, a small versioned summary of quota, tokens and cost that other apps such as Tracework can read ([Docs/usage-feed.md](Docs/usage-feed.md)).
 - Opens at login by default (toggle it in the eye menu, or in System Settings > General > Login Items).
 - Installs a local app bundle and recreates the Desktop shortcut so the launcher points at the latest local build.
 
 ## Popover Tabs
 
-- Runway: live Claude and Codex limits, resets, weekly drawdown, the drawdown insight for your primary provider, and a combined session timeline.
-- Insights: models used, token-share distribution, AI usage patterns, output destinations, and AI workflow paths.
+- Runway: live Claude and Codex limits, resets, weekly drawdown, the drawdown insight for your primary provider, what was left at each reset, and a combined session timeline.
+- Insights: API Value, models used, token-share distribution, AI usage patterns, output destinations, and AI workflow paths.
 - Memory: pressure, memory mix, top apps/processes, swap, and sensors.
 - CPU/GPU: thermal state, power, temperatures, fans, CPU and GPU load, and top processes.
 
@@ -79,7 +82,9 @@ swift run MaxxBar -- --sample
 swift run MaxxBar -- --render-popover Artifacts/screenshot-llm.png runway
 swift run MaxxBar -- --render-popover Artifacts/screenshot-insights.png insights
 swift run MaxxBar -- --render-popover Artifacts/screenshot-memory.png memory
+swift run MaxxBar -- --render-popover Artifacts/screenshot-cpugpu.png cpu
 swift run MaxxBar -- --write-ai-report
+swift run MaxxBar -- --write-usage-report
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popover-action
 Dist.noindex/MaxxBar.app/Contents/MacOS/MaxxBar --verify-popout-action
 ```
