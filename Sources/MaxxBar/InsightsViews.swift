@@ -1,6 +1,74 @@
 import AppKit
 import SwiftUI
 
+/// What the primary provider's usage would have cost at API list prices, next to the plan price.
+struct APICostCard: View {
+    let snapshot: LLMUsageSnapshot
+    @AppStorage(ProviderVisibility.showClaudeKey) private var showClaude = true
+    @AppStorage(ProviderVisibility.showCodexKey) private var showCodex = true
+
+    private var provider: String { showClaude || !showCodex ? "Claude" : "Codex" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("API VALUE")
+                    .sectionTitle()
+                Spacer()
+                Text("estimate")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            if let cost = snapshot.apiCost[provider] {
+                row("Today", cost.today)
+                row("This week", cost.thisWeek)
+                row("Last 7 days", cost.lastSevenDays)
+                row("This month", cost.thisMonth)
+                if let planLine = planLine(cost) {
+                    Text(planLine)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .padding(.top, 2)
+                }
+                Text("What \(provider) usage on this Mac would cost at API list prices (as of \(cost.pricingAsOf)), including cache reads and writes.")
+                    .font(.system(size: 10.5, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(provider == "Codex" ? "API value is tracked for Claude only so far." : "Waiting for the first transcript scan.")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+        }
+        .sectionStyle()
+        .help("Each request in your local transcripts is priced at its model's API rate: input, output, cache reads, and 5 minute and 1 hour cache writes. Totals are kept per day in api-cost-ledger.json, so the month includes days before the last week.")
+    }
+
+    private func row(_ label: String, _ dollars: Double) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(.white.opacity(0.78))
+            Spacer()
+            Text(dollarAmount(dollars))
+                .font(.system(size: 12.5, weight: .semibold))
+                .monospacedDigit()
+        }
+    }
+
+    private func planLine(_ cost: APICostSummary) -> String? {
+        let plan = provider == "Claude" ? snapshot.claudePlanType : snapshot.planType
+        guard let price = APICostLedger.monthlyPlanPrice(plan), price > 0, let plan else { return nil }
+        let multiple = cost.thisMonth / price
+        let multipleText = multiple >= 10 ? String(format: "%.0fx", multiple) : String(format: "%.1fx", multiple)
+        return "\(plan) plan: $\(Int(price))/month. This month so far is \(multipleText) the plan price."
+    }
+
+    private func dollarAmount(_ value: Double) -> String {
+        value >= 100 ? String(format: "$%.0f", value) : String(format: "$%.2f", value)
+    }
+}
+
 struct AIUsagePanelView: View {
     let aiUsage: AIUsageSnapshot
     let snapshot: LLMUsageSnapshot
@@ -21,6 +89,7 @@ struct AIUsagePanelView: View {
                         accounts: snapshot.providerAccounts,
                         providerFilter: providerFilter
                     )
+                    APICostCard(snapshot: snapshot)
                     LLMModelUsageCard(snapshot: filteredLLMSnapshot)
                     AITransferCard(snapshot: filteredAIUsage)
                     AIWorkflowMiniCard(snapshot: filteredAIUsage)

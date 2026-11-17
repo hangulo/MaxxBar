@@ -31,6 +31,20 @@ enum MaxxBarLauncher {
             return
         }
 
+        if let index = CommandLine.arguments.firstIndex(of: "--write-usage-report") {
+            // Writes the usage report without opening it: --write-usage-report [path]
+            let arguments = CommandLine.arguments
+            let target = index + 1 < arguments.count ? URL(fileURLWithPath: arguments[index + 1]) : UsageReport.url
+            let historyURL = URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support/MaxxBar/llm-quota-history.json")
+            let history = (try? Data(contentsOf: historyURL))
+                .flatMap { try? JSONDecoder().decode([LLMQuotaHistorySample].self, from: $0) } ?? []
+            let started = Date()
+            let written = UsageReport.write(ledger: QuotaWindowLedgerStore.load(), history: history, to: target)
+            print(written.map { "wrote \($0.path) in \(String(format: "%.1f", Date().timeIntervalSince(started)))s" } ?? "failed")
+            return
+        }
+
         if CommandLine.arguments.contains("--sample") {
             let snapshot = MemoryReader.read()
             print("pressure=\(snapshot.pressurePercent)%")

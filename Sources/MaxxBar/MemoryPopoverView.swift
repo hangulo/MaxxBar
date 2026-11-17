@@ -40,6 +40,8 @@ struct MemoryPopoverView: View {
                 MemoryPanelView(model: model, onPopOut: onPopOut, onQuit: onQuit)
             case .cpuGPU:
                 CPUGPUPanelView(snapshot: model.cpuGPU, sensors: model.sensors, onPopOut: onPopOut, onQuit: onQuit)
+                    .onAppear { model.setPerformanceVisible(true) }
+                    .onDisappear { model.setPerformanceVisible(false) }
             case .llmUsage:
                 AIUsagePanelView(
                     aiUsage: model.aiUsage,
@@ -56,6 +58,9 @@ struct MemoryPopoverView: View {
                     quotaHistory: model.llmQuotaHistory,
                     onSampleQuota: { model.captureLLMQuotaSample() },
                     onCheckClaudeNow: { model.checkClaudeUsageNow() },
+                    quotaWindowLedger: model.quotaWindowLedger,
+                    isBuildingUsageReport: model.isGeneratingUsageReport,
+                    onOpenUsageReport: { model.openUsageReport() },
                     isCheckingClaude: model.isCheckingClaude,
                     claudeCheckNote: model.claudeCheckNote,
                     onPopOut: onPopOut,
@@ -205,7 +210,7 @@ enum StatsPanel: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static var visibleCases: [StatsPanel] {
-        [.runway, .llmUsage, .memory]
+        [.runway, .llmUsage, .memory, .cpuGPU]
     }
 }
 

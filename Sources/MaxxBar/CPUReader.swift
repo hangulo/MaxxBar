@@ -20,12 +20,18 @@ enum CPUReader {
         let coreTicks: [CoreTicks]
     }
 
-    static func read(previous: CPULoadInfo?, sensors: SensorSnapshot = .empty) -> (snapshot: CPUGPUSnapshot, current: CPULoadInfo?) {
+    /// `includeDetail` adds the top process list (one `ps` launch) and GPU utilization. Only the CPU/GPU tab
+    /// shows them, so they are collected only while it is open.
+    static func read(
+        previous: CPULoadInfo?, sensors: SensorSnapshot = .empty, includeDetail: Bool = true
+    ) -> (snapshot: CPUGPUSnapshot, current: CPULoadInfo?) {
         let current = currentCPULoad()
         let percentages = cpuPercentages(previous: previous, current: current)
         let active = percentages.user + percentages.system
         let coreLoads = current.map { makeCoreLoads(previous: previous?.coreTicks, current: $0.coreTicks) } ?? emptyCoreLoads()
         let clusterPercentages = clusterPercentages(from: coreLoads)
+        let gpu = includeDetail ? GPUReader.read() : GPUReader.Reading()
+        let physicalMemory = Double(ProcessInfo.processInfo.physicalMemory)
 
         let snapshot = CPUGPUSnapshot(
             cpuGHz: sensors.frequencyGHz ?? currentFrequencyGHz(),
@@ -36,9 +42,9 @@ enum CPUReader {
             efficiencyPercent: clusterPercentages.efficiency ?? min(max(active, 0), 100),
             performancePercent: clusterPercentages.performance ?? min(max(active, 0), 100),
             coreLoads: coreLoads,
-            processes: readTopCPUProcesses(),
-            gpuPercent: nil,
-            gpuMemoryPercent: nil,
+            processes: includeDetail ? readTopCPUProcesses() : [],
+            gpuPercent: gpu.utilizationPercent,
+            gpuMemoryPercent: gpu.memoryInUseBytes.map { physicalMemory > 0 ? Int((Double($0) / physicalMemory * 100).rounded()) : 0 },
             gpuTemperature: sensors.gpuTemperature,
             gpuGHz: nil,
             fps: nil,

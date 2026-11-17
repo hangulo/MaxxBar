@@ -20,7 +20,8 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 - Provides an Insights tab with detected provider accounts/plans, today’s time and session share, a seven-day model mix and token distribution, output destinations, copy/paste flow metadata, before/after workflow paths, and recent Codex and Claude session context.
 - Generates a separate MaxxBar Hub with Tracework-aligned navigation for Overview, AI Insights, Runway, and Sessions.
 - Keeps Memory visible with pressure, memory breakdown, top processes, swap, and a compact CPU/GPU temperature and fan RPM card beneath Swap.
-- Keeps a deeper CPU/GPU panel with sensor readings in the code (render it with `--render-popover <path> cpu`); it is not in the tab bar yet.
+- Provides a CPU/GPU tab for local model work: macOS thermal state (Normal, Warm, Throttling, Critical), power draw, CPU and GPU temperatures, fan speeds, CPU load per core, GPU utilization, and the busiest processes. The process list and GPU read only run while the tab is open.
+- Shows an API Value card on Insights: what your primary provider's usage would have cost at API list prices today, this week, over the last 7 days, and this month, next to your plan's price.
 - Opens at login by default (toggle it in the eye menu, or in System Settings > General > Login Items).
 - Installs a local app bundle and recreates the Desktop shortcut so the launcher points at the latest local build.
 
@@ -29,8 +30,7 @@ Current release: `v0.2.0`. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the ongo
 - Runway: live Claude and Codex limits, resets, weekly drawdown, the drawdown insight for your primary provider, and a combined session timeline.
 - Insights: models used, token-share distribution, AI usage patterns, output destinations, and AI workflow paths.
 - Memory: pressure, memory mix, top apps/processes, swap, and sensors.
-
-The CPU/GPU tab still exists in the code but is not in the tab bar.
+- CPU/GPU: thermal state, power, temperatures, fans, CPU and GPU load, and top processes.
 
 ## Tracking Claude Or Codex
 
@@ -94,6 +94,7 @@ Scripts/test-claude-credentials.sh
 Scripts/test-usage-feed.sh
 Scripts/test-runway-forecast.sh
 Scripts/test-log-retention.sh
+Scripts/test-quota-ledger.sh
 ```
 
 The project lives in iCloud Drive, so `.build` is a symbolic link to `~/Library/Developer/MaxxBar-build/.build` and build products are not synced. On a new Mac, recreate it with `mkdir -p ~/Library/Developer/MaxxBar-build/.build && ln -s ~/Library/Developer/MaxxBar-build/.build .build`.
@@ -126,6 +127,10 @@ Otherwise, Claude usage refreshes from the endpoint at most every fifteen minute
 
 Other apps can read a small, versioned summary of quota and token use from `usage-feed.json`; its fields are documented in [Docs/usage-feed.md](Docs/usage-feed.md).
 
+When a Claude quota window resets (the 5 hour window, the weekly window, and per-model weeklies such as Fable), MaxxBar records what was left unused in `llm-window-ledger.jsonl`, one line per closed window, append only and never trimmed. The first run backfills from the saved quota history. A reading taken more than 30 minutes before the reset is marked low confidence, and MaxxBar takes a fresh reading two minutes before each known reset. The Runway tab's Left at reset card summarizes it, and Open full report writes `report/usage-report.html` (one self-contained page, no network requests) with value at API prices, plan cost, unused weekly allowance, 5 hour windows, daily sessions and model mix.
+
+API Value prices each Claude request in the local transcripts at its model's API list rate (input, output, cache reads, and 5 minute and 1 hour cache writes; the price table records the date it was checked). Daily totals are kept in `api-cost-ledger.json`, backfilled once from every transcript on disk, so "this month" covers days the live 8 day scan no longer reads. It is an estimate of value, not a bill. Codex is not priced yet.
+
 Local files are stored under:
 
 ```text
@@ -136,6 +141,11 @@ Local files are stored under:
 ~/Library/Application Support/MaxxBar/ai-activity.jsonl
 ~/Library/Application Support/MaxxBar/ai-transfers.jsonl
 ~/Library/Application Support/MaxxBar/llm-5h-usage-windows.jsonl
+~/Library/Application Support/MaxxBar/api-cost-ledger.json
+~/Library/Application Support/MaxxBar/llm-window-ledger.jsonl
+~/Library/Application Support/MaxxBar/report/usage-report.html
+~/Library/Application Support/MaxxBar/claude-parse-cache.json
+~/Library/Application Support/MaxxBar/archive/
 ~/Library/Application Support/MaxxBar/maxxbar-hub.html
 ```
 
