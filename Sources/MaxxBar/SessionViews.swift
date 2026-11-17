@@ -720,7 +720,7 @@ struct LLMUsageProgress: View {
                     .font(.system(size: 13.5, weight: .regular))
                     .foregroundStyle(.white.opacity(0.82))
                 Spacer()
-                Text(window.map { "\($0.remainingPercent)% left" } ?? "-")
+                Text(window.map { "\($0.isEstimate ? "~" : "")\($0.remainingPercent)% left" } ?? "-")
                     .font(.system(size: 13.5, weight: .semibold))
                     .monospacedDigit()
             }

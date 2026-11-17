@@ -98,8 +98,32 @@ extension LLMUsageReader {
                 provider: "Claude",
                 calls: modelEvents.map { (call: $0.call, modelName: $0.modelName) },
                 now: now
-            )
+            ),
+            claudeUsagePoints: minuteUsagePoints(modelEvents, now: now)
         )
+    }
+
+    /// Tokens per minute for the last 8 days, raw and weighted by API price, for the quota estimator.
+    static func minuteUsagePoints(_ events: [ClaudeModelUsageEvent], now: Date) -> [ClaudeQuotaEstimator.UsagePoint] {
+        let cutoff = now.addingTimeInterval(-ClaudeReadingLog.retention)
+        var minutes: [Int: ClaudeQuotaEstimator.UsagePoint] = [:]
+        for event in events {
+            guard let at = event.timestamp, at >= cutoff, at <= now.addingTimeInterval(300),
+                  !event.modelName.localizedCaseInsensitiveContains("synthetic") else { continue }
+            let call = event.call
+            let cost = LLMTokenPricing.rates(for: event.modelName).breakdown(
+                inputTokens: call.inputTokens, cachedInputTokens: call.cachedInputTokens,
+                cacheWriteInputTokens: call.cacheWriteInputTokens, cacheWrite1hInputTokens: call.cacheWrite1hInputTokens,
+                outputTokens: call.outputTokens
+            ).total
+            // Each point is stamped at the end of its minute, so a reading's own minute is placed within a minute.
+            let minute = Int(ceil(at.timeIntervalSince1970 / 60))
+            var point = minutes[minute] ?? .init(at: Date(timeIntervalSince1970: Double(minute) * 60), tokens: 0, weightedTokens: 0)
+            point.tokens += Double(call.inputTokens + call.outputTokens)
+            point.weightedTokens += cost / 5 * 1_000_000
+            minutes[minute] = point
+        }
+        return minutes.values.sorted { $0.at < $1.at }
     }
 
     private static func modelUsageTotals(from sessions: [LLMUsageSession]) -> [LLMModelUsageTotal] {
