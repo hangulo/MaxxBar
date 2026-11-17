@@ -105,6 +105,7 @@ The tests are small programs compiled with `swiftc`:
 
 ```sh
 Scripts/test-claude-polling.sh
+Scripts/test-api-pricing.sh
 Scripts/test-claude-credentials.sh
 Scripts/test-usage-feed.sh
 Scripts/test-runway-forecast.sh
@@ -146,7 +147,7 @@ Other apps can read a small, versioned summary of quota and token use from `usag
 
 When a Claude quota window resets (the 5 hour window, the weekly window, and per-model weeklies such as Fable), MaxxBar records what was left unused in `llm-window-ledger.jsonl`, one line per closed window, append only and never trimmed. The first run backfills from the saved quota history. A reading taken more than 30 minutes before the reset is marked low confidence, and MaxxBar takes a fresh reading two minutes before each known reset. The Runway tab's Left at reset card summarizes it, and Open full report writes `report/usage-report.html` (one self-contained page, no network requests) with value at API prices, plan cost, unused weekly allowance, 5 hour windows, daily sessions and model mix.
 
-API Value prices each Claude request in the local transcripts at its model's API list rate (input, output, cache reads, and 5 minute and 1 hour cache writes; the price table records the date it was checked). Daily totals are kept in `api-cost-ledger.json`, backfilled once from every transcript on disk, so "this month" covers days the live 8 day scan no longer reads. It is an estimate of value, not a bill. Codex is not priced yet.
+API Value prices each Claude request in the local transcripts at its model's API list rate (input, output, cache reads, and 5 minute and 1 hour cache writes; the price table records the date it was checked). Daily totals are kept in `api-cost-ledger.json`, backfilled once from every transcript on disk, so "this month" covers days the live 8 day scan no longer reads. It is an estimate of value, not a bill. Codex is not priced yet. The table (`LLMTokenPricing` in `LLMUsageTypes.swift`) stores each model's input, 5 minute and 1 hour cache write, cache read and output rates, matches the longest model ID prefix (so `claude-fable-5-2[1m]` finds Fable 5.2, not Fable 5), and prices Haiku 5.5 (over 100K prompt tokens) and gpt-5.6 / gpt-5.5 (over 272K input tokens) per request by prompt size. When the table's date changes, the next launch reprices every transcript still on disk into the ledger; days whose transcripts are gone keep their old totals.
 
 Local files are stored under:
 
