@@ -327,18 +327,4 @@ enum ByteFormat {
         let kb = Double(bytes) / 1_000
         return String(format: "%.0f KB", kb)
     }
-
-    static func rate(_ bytesPerSecond: UInt64) -> String {
-        "\(memory(bytesPerSecond))/s"
-    }
-
-    static func compactRate(_ bytesPerSecond: UInt64) -> String {
-        let mb = Double(bytesPerSecond) / 1_000_000
-        if mb >= 1 {
-            return String(format: "%.1f M", mb)
-        }
-
-        let kb = Double(bytesPerSecond) / 1_000
-        return String(format: "%.0f K", kb)
-    }
 }

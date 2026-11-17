@@ -22,16 +22,12 @@ final class MemoryModel: ObservableObject {
     @Published private(set) var history: [MemoryBreakdown] = []
     @Published private(set) var sensors = SensorSnapshot.empty
     @Published private(set) var cpuGPU = CPUGPUSnapshot.empty
-    @Published private(set) var network = NetworkSnapshot.empty
     @Published private(set) var llmUsage = LLMUsageSnapshot.empty
     @Published private(set) var llmQuotaHistory: [LLMQuotaHistorySample] = []
     @Published private(set) var aiUsage = AIUsageSnapshot.empty
-    @Published private(set) var clipboardDebug = ClipboardDebugSnapshot.empty
     private var previousCumulativePageIns: UInt64?
     private var previousCumulativePageOuts: UInt64?
     private var previousCPUInfo: CPUReader.CPULoadInfo?
-    private var previousNetworkCounters: NetworkReader.NetworkCounters?
-    private var networkHistory: [NetworkSample] = []
     private var previousLLMUsageRefresh: Date?
     private var previousLLMQuotaSample: Date?
     private var previousLLMQuotaActivitySignature: LLMQuotaActivitySignature?
@@ -56,34 +52,27 @@ final class MemoryModel: ObservableObject {
     init() {
         llmQuotaHistory = Self.loadLLMQuotaHistory()
         previousLLMQuotaSample = llmQuotaHistory.last?.sampledAt
-        clipboardDebug = ClipboardDebugReader.snapshot()
     }
 
     init(
         snapshot: MemorySnapshot,
         history: [MemoryBreakdown],
-        network: NetworkSnapshot = .demo,
         llmUsage: LLMUsageSnapshot = .demo,
         aiUsage: AIUsageSnapshot = .demo,
-        clipboardDebug: ClipboardDebugSnapshot = .demo,
         llmQuotaHistory: [LLMQuotaHistorySample] = .demo
     ) {
         self.snapshot = snapshot
         self.history = history
-        self.network = network
         self.llmUsage = llmUsage
         self.aiUsage = aiUsage
-        self.clipboardDebug = clipboardDebug
         self.llmQuotaHistory = llmQuotaHistory
     }
 
     func applyDemoSnapshots() {
         sensors = .demo
         cpuGPU = CPUReader.read(previous: nil, sensors: .demo).snapshot
-        network = .demo
         llmUsage = .demo
         aiUsage = .demo
-        clipboardDebug = .demo
         llmQuotaHistory = .demo
     }
 
@@ -107,10 +96,6 @@ final class MemoryModel: ObservableObject {
         let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
         previousCPUInfo = cpuResult.current
         cpuGPU = cpuResult.snapshot
-        let networkResult = NetworkReader.read(previous: previousNetworkCounters, history: networkHistory)
-        previousNetworkCounters = networkResult.counters
-        networkHistory = networkResult.snapshot.history
-        network = networkResult.snapshot
         llmUsage = LLMUsageReader.read()
         aiUsage = AIUsageReader.recordAndRead(memory: snapshot, cpuGPU: cpuGPU, llmUsage: llmUsage)
         previousLLMUsageRefresh = Date()
@@ -132,8 +117,6 @@ final class MemoryModel: ObservableObject {
         let previousPageIns = previousCumulativePageIns
         let previousPageOuts = previousCumulativePageOuts
         let previousCPUInfo = previousCPUInfo
-        let previousNetworkCounters = previousNetworkCounters
-        let networkHistory = networkHistory
         let currentLLMUsage = llmUsage
 
         DispatchQueue.global(qos: .utility).async {
@@ -141,8 +124,6 @@ final class MemoryModel: ObservableObject {
                 previousPageIns: previousPageIns,
                 previousPageOuts: previousPageOuts,
                 previousCPUInfo: previousCPUInfo,
-                previousNetworkCounters: previousNetworkCounters,
-                networkHistory: networkHistory,
                 llmUsage: currentLLMUsage
             )
 
@@ -280,34 +261,6 @@ final class MemoryModel: ObservableObject {
         }
     }
 
-    func openFiveHourUsageLog() {
-        guard let url = Self.fiveHourUsageReportURL ?? Self.fiveHourUsageLogURL else { return }
-        do {
-            try Self.writeFiveHourUsageReport()
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            if !FileManager.default.fileExists(atPath: url.path) {
-                FileManager.default.createFile(atPath: url.path, contents: nil)
-            }
-            NSWorkspace.shared.open(url)
-        } catch {
-            NSWorkspace.shared.open(url.deletingLastPathComponent())
-        }
-    }
-
-    func captureMaxxMoment(sentiment: String, note: String, includeScreenshot: Bool) {
-        aiUsage = AIUsageReader.captureMoment(
-            memory: snapshot,
-            cpuGPU: cpuGPU,
-            llmUsage: llmUsage,
-            sentiment: sentiment,
-            note: note,
-            includeScreenshot: includeScreenshot
-        )
-    }
-
     func openAIUsageReport() {
         guard let url = AIUsageReader.prepareReportForOpening() else { return }
         NSWorkspace.shared.open(url)
@@ -325,55 +278,12 @@ final class MemoryModel: ObservableObject {
     }
 
     func recordClipboardEvent(_ eventType: String) {
+        guard eventType == "paste" || eventType == "copy" else { return }
         clipboardProcessingQueue.async { [weak self] in
-            let clipboardDebug = ClipboardDebugReader.recordShortcut(eventType)
-            // Copies and pastes both come from the ⌘C/⌘V listener now that clipboard polling is gone.
-            let aiUsage = eventType == "paste" || eventType == "copy"
-                ? AIUsageReader.recordClipboardEvent(eventType)
-                : nil
+            // Copies and pastes both come from the ⌘C/⌘V listener; they feed the ai-transfers.jsonl flow records.
+            let aiUsage = AIUsageReader.recordClipboardEvent(eventType)
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.clipboardDebug = clipboardDebug
-                if let aiUsage {
-                    self.aiUsage = aiUsage
-                }
-            }
-        }
-    }
-
-    func recordClipboardChange(
-        changeCount: Int,
-        itemCount: Int,
-        typeIdentifiers: [String],
-        imagePayload: ClipboardImagePayload?
-    ) {
-        clipboardProcessingQueue.async { [weak self] in
-            let storedImage = imagePayload.flatMap {
-                ClipboardImageStore.save($0, changeCount: changeCount)
-            }
-            let clipboardDebug = ClipboardDebugReader.recordWrite(
-                changeCount: changeCount,
-                itemCount: itemCount,
-                typeIdentifiers: typeIdentifiers,
-                storedImage: storedImage
-            )
-            let aiUsage = AIUsageReader.recordClipboardEvent("copy")
-            DispatchQueue.main.async { [weak self] in
-                self?.clipboardDebug = clipboardDebug
                 self?.aiUsage = aiUsage
-            }
-        }
-    }
-
-    func recordCurrentClipboardState(changeCount: Int, itemCount: Int, typeIdentifiers: [String]) {
-        clipboardProcessingQueue.async { [weak self] in
-            let clipboardDebug = ClipboardDebugReader.recordCurrentState(
-                changeCount: changeCount,
-                itemCount: itemCount,
-                typeIdentifiers: typeIdentifiers
-            )
-            DispatchQueue.main.async { [weak self] in
-                self?.clipboardDebug = clipboardDebug
             }
         }
     }
@@ -387,7 +297,6 @@ final class MemoryModel: ObservableObject {
         let displayStats: MemorySnapshot
         let sensors: SensorSnapshot
         let cpuResult: (snapshot: CPUGPUSnapshot, current: CPUReader.CPULoadInfo?)
-        let networkResult: (snapshot: NetworkSnapshot, counters: NetworkReader.NetworkCounters?)
         let aiUsage: AIUsageSnapshot
     }
 
@@ -395,8 +304,6 @@ final class MemoryModel: ObservableObject {
         previousPageIns: UInt64?,
         previousPageOuts: UInt64?,
         previousCPUInfo: CPUReader.CPULoadInfo?,
-        previousNetworkCounters: NetworkReader.NetworkCounters?,
-        networkHistory: [NetworkSample],
         llmUsage: LLMUsageSnapshot
     ) -> RefreshResult {
         let stats = MemoryReader.read()
@@ -405,7 +312,6 @@ final class MemoryModel: ObservableObject {
         displayStats.pageOuts = deltaValue(from: previousPageOuts, to: stats.cumulativePageOuts)
         let sensors = SensorReader.read()
         let cpuResult = CPUReader.read(previous: previousCPUInfo, sensors: sensors)
-        let networkResult = NetworkReader.read(previous: previousNetworkCounters, history: networkHistory)
         let aiUsage = AIUsageReader.recordAndRead(
             memory: displayStats,
             cpuGPU: cpuResult.snapshot,
@@ -417,7 +323,6 @@ final class MemoryModel: ObservableObject {
             displayStats: displayStats,
             sensors: sensors,
             cpuResult: cpuResult,
-            networkResult: networkResult,
             aiUsage: aiUsage
         )
     }
@@ -429,9 +334,6 @@ final class MemoryModel: ObservableObject {
         sensors = result.sensors
         previousCPUInfo = result.cpuResult.current
         cpuGPU = result.cpuResult.snapshot
-        previousNetworkCounters = result.networkResult.counters
-        networkHistory = result.networkResult.snapshot.history
-        network = result.networkResult.snapshot
         aiUsage = result.aiUsage
         history.append(result.stats.breakdown)
         if history.count > 60 {
@@ -517,15 +419,6 @@ final class MemoryModel: ObservableObject {
         return directory
             .appendingPathComponent("MaxxBar", isDirectory: true)
             .appendingPathComponent("llm-5h-usage-windows.jsonl")
-    }
-
-    static var fiveHourUsageReportURL: URL? {
-        guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        return directory
-            .appendingPathComponent("MaxxBar", isDirectory: true)
-            .appendingPathComponent("llm-5h-usage-windows.html")
     }
 
     private static func loadLLMQuotaHistory() -> [LLMQuotaHistorySample] {

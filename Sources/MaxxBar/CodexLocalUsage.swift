@@ -333,11 +333,6 @@ extension LLMUsageReader {
         return 0
     }
 
-    private static func sqliteUInt64(databasePath: String, query: String) -> UInt64 {
-        let value = sqliteRows(databasePath: databasePath, query: query).first?.first
-        return value.flatMap(UInt64.init) ?? 0
-    }
-
     private static func sqliteRows(databasePath: String, query: String) -> [[String]] {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
