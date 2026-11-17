@@ -50,6 +50,11 @@ records = [weekly(-14, left: 60, plan: "Pro"), weekly(-7, left: 70, plan: "Pro")
 summary = WeeklyShareCard.summary(records: records, live: nil, plan: nil, period: .lastFullWeek, now: days(1), calendar: calendar, loadDays: ledger)!
 assert(summary.baselineLeftPercent == nil && summary.baselineWeeks == 0 && summary.rescuedPoints == nil)
 
+// Low confidence weeks do not count toward the baseline.
+records = [weekly(-14, left: 20), weekly(-7, left: 80, lowConfidence: true), weekly(0, left: 10)]
+summary = WeeklyShareCard.summary(records: records, live: nil, plan: nil, period: .lastFullWeek, now: days(1), calendar: calendar, loadDays: ledger)!
+assert(summary.baselineWeeks == 1 && summary.baselineLeftPercent == 20 && summary.rescuedPoints == 10, "\(summary)")
+
 // Low confidence carries through with the reading age.
 summary = WeeklyShareCard.summary(records: [weekly(0, left: 30, lowConfidence: true)], live: nil, plan: nil, period: .lastFullWeek, now: days(1), calendar: calendar, loadDays: ledger)!
 assert(summary.lowConfidence && summary.lastReadingMinutesBeforeReset == 90)

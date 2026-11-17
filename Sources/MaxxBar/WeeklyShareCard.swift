@@ -84,8 +84,9 @@ enum WeeklyShareCard {
         }
 
         // Earlier closed weeks on the same plan; a plan change resizes the allowance, so older weeks do not compare.
+        // Low confidence weeks are left out too: a reading taken days before the reset overstates what expired.
         let earlier = weekly.filter {
-            $0.windowResetAt < resetAt.addingTimeInterval(-86_400)
+            $0.windowResetAt < resetAt.addingTimeInterval(-86_400) && !$0.lowConfidence
                 && (ClaudePlanTimeline.normalized($0.plan) ?? ClaudePlanTimeline.entry(at: $0.windowResetAt).plan) == currentPlan
         }.suffix(baselineWeekCount)
         let baseline = earlier.isEmpty ? nil
