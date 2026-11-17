@@ -19,6 +19,7 @@ enum LLMUsageReader {
         let modelUsage: [LLMModelUsageTotal]
         let dailyModelUsage: [LLMModelUsageTotal]
         var usageBuckets: [LLMUsageBucket] = []
+        var claudeUsagePoints: [ClaudeQuotaEstimator.UsagePoint] = []
     }
 
     struct ClaudeModelUsageEvent {
@@ -328,7 +329,7 @@ enum LLMUsageReader {
         let claudeSessions = (snapshot.recentSessions + snapshot.topWeeklySessions).filter { $0.provider == "Claude" }
         applyClaudeLimits(
             to: &updated, lastActivity: claudeSessions.compactMap(\.updatedAt).max(),
-            hasClaudeSessions: !claudeSessions.isEmpty, manual: true
+            hasClaudeSessions: !claudeSessions.isEmpty, trigger: .manual
         )
         // Every click ends with a visible outcome: if no new reading arrived, say why (e.g. an expired sign-in).
         let after = ClaudeUsagePollingState.load(from: claudeCacheURL)
@@ -339,11 +340,18 @@ enum LLMUsageReader {
     }
 
     private static func applyClaudeLimits(
-        to snapshot: inout LLMUsageSnapshot, lastActivity: Date?, hasClaudeSessions: Bool, manual: Bool
+        to snapshot: inout LLMUsageSnapshot, lastActivity: Date?, hasClaudeSessions: Bool, trigger: ClaudePollTrigger
     ) {
         snapshot.limits.removeAll { $0.name.hasPrefix("Claude") }
         snapshot.providerErrors["Claude"] = nil
         let now = Date()
+        let estimator = ClaudeEstimateContext(
+            readings: ClaudeReadingLog.record([], now: now), usage: snapshot.claudeUsagePoints,
+            plan: snapshot.claudePlanType
+        )
+        // Heavy local use since the last reading is a good moment for a real one (still subject to every limit).
+        let trigger = trigger == .scheduled && estimator.isHeavyUse(at: now) ? .heavyUse : trigger
+        defer { applyClaudeEstimates(to: &snapshot, estimator: estimator, now: now) }
         let tapped = ClaudeStatusLineLimits.read()?.current(at: now)
         let tappedLimit = tapped.flatMap { claudeLimit(fromStatusLine: $0, now: now) }
         let claudeCredential = ClaudeCredentialManager.shared.read()
@@ -355,7 +363,7 @@ enum LLMUsageReader {
                 minimumRefreshAge: tappedIsFresh ? 3_600 : 0,
                 lastActivity: lastActivity,
                 // A just-refreshed sign-in reads usage right away (429 cooldowns still apply).
-                manual: manual || claudeCredential.refreshed
+                trigger: claudeCredential.refreshed ? .manual : trigger
             ) {
             case .success(var limits, let warning):
                 if let tappedLimit, tappedIsFresh || isNewer(tappedLimit, than: limits.first { $0.name == "Claude" }) {
@@ -397,6 +405,81 @@ enum LLMUsageReader {
             : snapshot.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
     }
 
+    /// Real readings, local token points and the plan, for calibrating and applying Claude estimates.
+    private struct ClaudeEstimateContext {
+        let readings: [ClaudeQuotaEstimator.Reading]
+        let ledger: ClaudeQuotaEstimator.Ledger
+        let plan: String?
+
+        init(readings: [ClaudeQuotaEstimator.Reading], usage: [ClaudeQuotaEstimator.UsagePoint], plan: String?) {
+            self.init(readings: readings, ledger: ClaudeQuotaEstimator.Ledger(usage), plan: plan)
+        }
+
+        init(readings: [ClaudeQuotaEstimator.Reading], ledger: ClaudeQuotaEstimator.Ledger, plan: String?) {
+            self.readings = readings
+            self.ledger = ledger
+            self.plan = plan
+        }
+
+        /// Pairs count only on the current plan and since the current weekly window began.
+        func calibration(_ kind: ClaudeQuotaEstimator.Kind) -> ClaudeQuotaEstimator.Calibration? {
+            guard let planStart = ClaudeQuotaEstimator.planStart(of: readings, plan: plan) else { return nil }
+            let weekStart = readings.last { $0.kind == .weekly }?.resetAt?.addingTimeInterval(-604_800) ?? .distantPast
+            return ClaudeQuotaEstimator.calibrate(
+                readings: readings, ledger: ledger, kind: kind, plan: plan, since: max(planStart, weekStart)
+            )
+        }
+
+        func isHeavyUse(at now: Date) -> Bool {
+            guard let last = readings.last(where: { $0.kind == .fiveHour }), let calibration = calibration(.fiveHour),
+                  let estimate = ClaudeQuotaEstimator.estimate(from: last, calibration: calibration, ledger: ledger, now: now)
+            else { return false }
+            return estimate.usedPercent - last.usedPercent >= ClaudeUsagePollingState.heavyUsePercent
+        }
+    }
+
+    /// Previous estimates per window, so an estimate never steps down between two readings.
+    nonisolated(unsafe) private static var lastClaudeEstimates: [ClaudeQuotaEstimator.Kind: ClaudeQuotaEstimator.Estimate] = [:]
+    private static let claudeEstimateLock = NSLock()
+
+    /// Logs the Claude reading on screen (real readings only), then shows an estimate from the tokens counted
+    /// since it when the calibration allows. The real value stays in `measuredUsedPercent`.
+    private static func applyClaudeEstimates(to snapshot: inout LLMUsageSnapshot, estimator: ClaudeEstimateContext, now: Date) {
+        guard let index = snapshot.limits.firstIndex(where: { $0.name == "Claude" }),
+              let checkedAt = snapshot.limits[index].checkedAt else { return }
+        var limit = snapshot.limits[index]
+        func reading(_ window: LLMUsageWindow?, _ kind: ClaudeQuotaEstimator.Kind, source: String?) -> ClaudeQuotaEstimator.Reading? {
+            window.map {
+                .init(at: checkedAt, kind: kind, usedPercent: Double($0.usedPercent), resetAt: $0.resetAt,
+                      plan: estimator.plan, source: source)
+            }
+        }
+        let logged = [reading(limit.primary, .fiveHour, source: limit.source), reading(limit.secondary, .weekly, source: limit.source)]
+        var context = estimator
+        if logged.contains(where: { $0 != nil }) {
+            let readings = ClaudeReadingLog.record(logged.compactMap { $0 }, now: now)
+            context = ClaudeEstimateContext(readings: readings, ledger: estimator.ledger, plan: estimator.plan)
+        }
+        claudeEstimateLock.lock()
+        defer { claudeEstimateLock.unlock() }
+        func estimated(_ window: LLMUsageWindow?, _ kind: ClaudeQuotaEstimator.Kind) -> LLMUsageWindow? {
+            guard var window, let base = reading(window, kind, source: nil), let calibration = context.calibration(kind),
+                  let estimate = ClaudeQuotaEstimator.estimate(
+                      from: base, calibration: calibration, ledger: context.ledger, now: now, previous: lastClaudeEstimates[kind]
+                  ) else { return window }
+            lastClaudeEstimates[kind] = estimate
+            let used = min(max(Int(estimate.usedPercent.rounded()), 0), 100)
+            guard used > window.usedPercent else { return window }
+            window.measuredUsedPercent = window.usedPercent
+            window.usedPercent = used
+            window.remainingPercent = 100 - used
+            return window
+        }
+        limit.primary = estimated(limit.primary, .fiveHour)
+        limit.secondary = estimated(limit.secondary, .weekly)
+        snapshot.limits[index] = limit
+    }
+
     /// `checkClaudeNow` asks the Claude usage endpoint immediately unless a cooldown is active or it was read under 30s ago.
     /// Local scans (Claude transcripts, Codex sqlite) are the expensive part of a read. The menu bar only needs the
     /// quotas, so while the popover is closed callers pass refreshLocal: false and reuse the last scan for a while.
@@ -420,7 +503,9 @@ enum LLMUsageReader {
         return (codex, claude)
     }
 
-    static func read(checkClaudeNow: Bool = false, refreshLocal: Bool = true) -> LLMUsageSnapshot {
+    static func read(
+        checkClaudeNow: Bool = false, refreshLocal: Bool = true, claudeTrigger: ClaudePollTrigger = .scheduled
+    ) -> LLMUsageSnapshot {
         let (codexLocal, claudeLocal) = localUsage(refresh: refreshLocal)
         let local = mergedLocalUsage(codexLocal, claudeLocal)
         var snapshot = ProviderVisibility.showCodex
@@ -445,10 +530,11 @@ enum LLMUsageReader {
             return snapshot
         }
         snapshot.apiCost["Claude"] = APICostLedger.summary(provider: "Claude")
+        snapshot.claudeUsagePoints = claudeLocal.claudeUsagePoints
         let claudeActivity = (claudeLocal.recentSessions + claudeLocal.topWeeklySessions).compactMap(\.updatedAt).max()
         applyClaudeLimits(
             to: &snapshot, lastActivity: claudeActivity,
-            hasClaudeSessions: !claudeLocal.recentSessions.isEmpty, manual: checkClaudeNow
+            hasClaudeSessions: !claudeLocal.recentSessions.isEmpty, trigger: checkClaudeNow ? .manual : claudeTrigger
         )
         return snapshot
     }
@@ -752,10 +838,11 @@ enum LLMUsageReader {
     }
 
     private static func readClaudeLimits(
-        accessToken: String, minimumRefreshAge: TimeInterval = 0, lastActivity: Date? = nil, manual: Bool = false
+        accessToken: String, minimumRefreshAge: TimeInterval = 0, lastActivity: Date? = nil,
+        trigger: ClaudePollTrigger = .scheduled
     ) -> ClaudeLimitReadResult {
         let result = fetchClaudeLimits(
-            accessToken: accessToken, minimumRefreshAge: minimumRefreshAge, lastActivity: lastActivity, manual: manual
+            accessToken: accessToken, minimumRefreshAge: minimumRefreshAge, lastActivity: lastActivity, trigger: trigger
         )
         guard case .unauthorized = result else { return result }
         // A revoked or early-expiring access token can fail before its recorded expiry.
@@ -764,7 +851,7 @@ enum LLMUsageReader {
         guard let newToken = refreshed.accessToken, newToken != accessToken else {
             return .failure(refreshed.error ?? "Claude rejected its access token and automatic renewal failed; run claude auth login --claudeai.")
         }
-        let retried = fetchClaudeLimits(accessToken: newToken, minimumRefreshAge: 0, renewedCredential: true)
+        let retried = fetchClaudeLimits(accessToken: newToken, minimumRefreshAge: 0, trigger: .manual, renewedCredential: true)
         if case .unauthorized = retried {
             return .failure("Claude rejected its renewed access token; run claude auth login --claudeai once.")
         }
@@ -798,8 +885,8 @@ enum LLMUsageReader {
     }
 
     private static func fetchClaudeLimits(
-        accessToken: String, minimumRefreshAge: TimeInterval, lastActivity: Date? = nil, manual: Bool = false,
-        renewedCredential: Bool = false
+        accessToken: String, minimumRefreshAge: TimeInterval, lastActivity: Date? = nil,
+        trigger: ClaudePollTrigger = .scheduled, renewedCredential: Bool = false
     ) -> ClaudeLimitReadResult {
         // Serialize reads and persist the cooldown so reopening the app cannot bypass it.
         claudePollingLock.lock()
@@ -838,9 +925,12 @@ enum LLMUsageReader {
             return .success(limits, warning: warning)
         }
 
-        // Adaptive schedule: 2 min while Claude is in use, 5 min normally, 15 min when idle; never under the 429 floor.
+        // Adaptive schedule: 3 min while Claude is in use, 5 min normally, 30 min when idle; never under the 429 floor.
+        // Events (popover, wake, heavy use, a passed reset) can ask sooner, but every request passes the same
+        // cooldown, 60-second hard gap and 30-per-hour limit.
         let interval = max(state.refreshInterval(lastActivity: lastActivity, at: now), minimumRefreshAge)
-        guard manual ? state.allowsManualCheck(at: now) : state.isDue(at: now, interval: interval) else {
+        let trigger = trigger == .manual || !state.resetPassedSinceFetch(at: now) ? trigger : .resetPassed
+        guard state.allowsRequest(trigger: trigger, at: now, interval: interval, liveFeed: minimumRefreshAge > 0) else {
             return cachedResult()
         }
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
@@ -984,7 +1074,8 @@ enum LLMUsageReader {
             dailyModelUsage: mergedModelUsage(codex.dailyModelUsage + claude.dailyModelUsage),
             usageBuckets: (codex.usageBuckets + claude.usageBuckets).sorted {
                 $0.hourStart == $1.hourStart ? $0.provider < $1.provider : $0.hourStart < $1.hourStart
-            }
+            },
+            claudeUsagePoints: claude.claudeUsagePoints
         )
     }
 

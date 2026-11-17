@@ -252,10 +252,11 @@ final class MemoryModel: ObservableObject {
 
     func refreshLLMUsageInBackground(
         force: Bool = false, checkClaudeNow: Bool = false, refreshLocal: Bool = true,
+        claudeTrigger: ClaudePollTrigger = .scheduled,
         completion: (@MainActor @Sendable () -> Void)? = nil
     ) {
         guard !isRefreshingLLMUsage else { return }
-        // 30s keeps the reader's 2-minute Claude schedule on time with the 15s app timer.
+        // 30s keeps the reader's 3-minute Claude schedule on time with the 15s app timer.
         if !force,
            let previousLLMUsageRefresh,
            Date().timeIntervalSince(previousLLMUsageRefresh) < 30 {
@@ -266,7 +267,9 @@ final class MemoryModel: ObservableObject {
         isRefreshingLLMUsage = true
         let closedWindows = Self.feedClosedWindows(quotaWindowLedger)
         DispatchQueue.global(qos: .utility).async {
-            let usage = LLMUsageReader.read(checkClaudeNow: checkClaudeNow, refreshLocal: refreshLocal)
+            let usage = LLMUsageReader.read(
+                checkClaudeNow: checkClaudeNow, refreshLocal: refreshLocal, claudeTrigger: claudeTrigger
+            )
             Self.logFiveHourUsageWindow(from: usage)
             UsageFeedWriter.publish(usage, closedWindows: closedWindows)
             let refreshedAt = Date()
@@ -412,8 +415,9 @@ final class MemoryModel: ObservableObject {
                 primaryRemainingPercent: codex?.shortWindow?.remainingPercent,
                 weeklyRemainingPercent: codex?.weeklyWindow?.remainingPercent,
                 planType: codex == nil ? nil : llmUsage.planType,
-                claudeWeeklyRemainingPercent: claude?.weeklyWindow?.remainingPercent,
-                claudeFiveHourRemainingPercent: claude?.shortWindow?.remainingPercent,
+                // History holds real readings only; an estimate on screen is never saved as one.
+                claudeWeeklyRemainingPercent: claude?.weeklyWindow?.measuredRemainingPercent,
+                claudeFiveHourRemainingPercent: claude?.shortWindow?.measuredRemainingPercent,
                 claudePlanType: claude == nil ? nil : llmUsage.claudePlanType,
                 claudeSource: claude?.source,
                 codexFiveHourResetAt: codex?.shortWindow?.resetAt,

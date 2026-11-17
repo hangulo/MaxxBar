@@ -95,6 +95,22 @@ assert(feed.closedWindows.isEmpty)
 let windowText = String(decoding: try UsageFeed.encoder().encode(withWindows), as: UTF8.self)
 assert(windowText.contains("\"leftPercent\" : 74"))
 
+// Estimates are marked, with the real reading beside them; measured values say so.
+assert(claude.fiveHour?.basis == "measured" && claude.fiveHour?.measuredUsedPercent == nil)
+var estimatedSnapshot = snapshot
+estimatedSnapshot.limits[0].primary?.measuredUsedPercent = 30
+estimatedSnapshot.limits[0].primary?.usedPercent = 36
+estimatedSnapshot.limits[0].primary?.remainingPercent = 64
+let estimatedFeed = UsageFeed(snapshot: estimatedSnapshot, now: now, calendar: calendar, appVersion: "test")
+let estimatedWindow = estimatedFeed.providers[0].fiveHour!
+assert(estimatedWindow.basis == "estimated" && estimatedWindow.remainingPercent == 64)
+assert(estimatedWindow.measuredRemainingPercent == 70 && estimatedWindow.measuredUsedPercent == 30)
+assert(estimatedFeed.providers[0].weekly?.basis == "measured")
+assert(estimatedFeed.providers[0].checkedAt == claude.checkedAt, "checkedAt stays the real reading's time")
+// A feed written before these fields existed still decodes.
+let legacyWindow = try UsageFeed.decoder().decode(UsageFeed.Window.self, from: Data(#"{"remainingPercent":70,"usedPercent":30,"windowSeconds":18000}"#.utf8))
+assert(legacyWindow.basis == nil && legacyWindow.measuredUsedPercent == nil)
+
 // Writer: writes once, skips identical content, skips an empty snapshot.
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("usage-feed-\(UUID().uuidString)")
 let target = dir.appendingPathComponent("usage-feed.json")

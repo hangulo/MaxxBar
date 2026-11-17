@@ -32,6 +32,8 @@ Read this file instead of MaxxBar's internal files. Its fields keep their names 
 | `providers[].source` | Where the quota reading came from. Claude: `statusline` (Claude Code's own `rate_limits`), `endpoint` (a live usage request) or `cache` (the last saved response). Codex: `endpoint`. |
 | `providers[].checkedAt` | When the quota reading was taken. Reading age is now minus this. |
 | `providers[].fiveHour`, `providers[].weekly` | `remainingPercent`, `usedPercent` (0 to 100), `resetsAt` (ISO 8601, can be missing) and `windowSeconds` (18000 or 604800). Either can be missing. |
+| `providers[].fiveHour.basis`, `providers[].weekly.basis` | `measured` when the numbers are a real reading, `estimated` when they are the last real reading plus the tokens counted locally since (Claude only, between readings). Missing in files written before this field was added, which means measured. |
+| `providers[].fiveHour.measuredRemainingPercent`, `.measuredUsedPercent` (and the same on `weekly`) | Only on an estimated window: the real reading the estimate builds on, taken at `checkedAt`. |
 | `providers[].error` | The last error for that provider, if any. The numbers may then be from an older reading; check `checkedAt`. |
 | `daily[]` | Token and cost totals per local day and provider, for the last 7 days, oldest first. `date` is `yyyy-MM-dd`. Days with no use are left out. |
 | `hourly[]` | The same totals per clock hour (`hourStart`, ISO 8601), for the last 7 days, oldest first. Use these to total usage for any time range, such as a work session. |
