@@ -18,6 +18,7 @@ enum LLMUsageReader {
         let topWeeklySessions: [LLMUsageSession]
         let modelUsage: [LLMModelUsageTotal]
         let dailyModelUsage: [LLMModelUsageTotal]
+        var usageBuckets: [LLMUsageBucket] = []
     }
 
     struct ClaudeModelUsageEvent {
@@ -26,6 +27,7 @@ enum LLMUsageReader {
         let modelName: String
         let tokens: UInt64
         let timestamp: Date?
+        let call: LLMTokenCall
     }
 
     struct ClaudeTranscript {
@@ -389,6 +391,7 @@ enum LLMUsageReader {
             : snapshotWithLocalUsage(local, error: nil)
         snapshot.weeklyModelUsage = local.modelUsage
         snapshot.dailyModelUsage = local.dailyModelUsage
+        snapshot.usageBuckets = local.usageBuckets
         snapshot.providerAccounts = providerAccounts(
             codexEmail: snapshot.email,
             codexPlan: snapshot.planType,
@@ -931,7 +934,10 @@ enum LLMUsageReader {
             recentSessions: Array(recent.prefix(30)),
             topWeeklySessions: Array(topWeekly.prefix(30)),
             modelUsage: mergedModelUsage(codex.modelUsage + claude.modelUsage),
-            dailyModelUsage: mergedModelUsage(codex.dailyModelUsage + claude.dailyModelUsage)
+            dailyModelUsage: mergedModelUsage(codex.dailyModelUsage + claude.dailyModelUsage),
+            usageBuckets: (codex.usageBuckets + claude.usageBuckets).sorted {
+                $0.hourStart == $1.hourStart ? $0.provider < $1.provider : $0.hourStart < $1.hourStart
+            }
         )
     }
 

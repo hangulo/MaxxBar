@@ -207,6 +207,8 @@ final class MemoryModel: ObservableObject {
                     ? nil
                     : merged.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
                 self.llmUsage = merged
+                let published = merged
+                DispatchQueue.global(qos: .utility).async { _ = UsageFeedWriter.publish(published) }
                 // Keep "Checking…" visible briefly so an instant answer still reads as a response.
                 let remaining = max(0, 0.6 - Date().timeIntervalSince(started))
                 DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
@@ -245,6 +247,7 @@ final class MemoryModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             let usage = LLMUsageReader.read(checkClaudeNow: checkClaudeNow, refreshLocal: refreshLocal)
             Self.logFiveHourUsageWindow(from: usage)
+            UsageFeedWriter.publish(usage)
             let refreshedAt = Date()
 
             DispatchQueue.main.async { [weak self] in

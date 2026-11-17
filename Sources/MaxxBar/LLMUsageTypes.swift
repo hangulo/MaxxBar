@@ -37,6 +37,68 @@ struct LLMUsageLimit: Identifiable, Equatable {
     }
 }
 
+/// Token use and estimated API-price cost of one provider in one clock hour (local time).
+/// Published to other apps through `usage-feed.json` (see `UsageFeed`).
+struct LLMUsageBucket: Equatable {
+    var provider: String
+    var hourStart: Date
+    var tokens: UInt64 = 0
+    var inputTokens: UInt64 = 0
+    var cachedInputTokens: UInt64 = 0
+    var cacheWriteInputTokens: UInt64 = 0
+    var outputTokens: UInt64 = 0
+    var requests = 0
+    var estimatedCostUSD: Double = 0
+
+    mutating func add(_ call: LLMTokenCall, modelName: String) {
+        let cost = LLMTokenPricing.rates(for: modelName).breakdown(
+            inputTokens: call.inputTokens,
+            cachedInputTokens: call.cachedInputTokens,
+            cacheWriteInputTokens: call.cacheWriteInputTokens,
+            cacheWrite1hInputTokens: call.cacheWrite1hInputTokens,
+            outputTokens: call.outputTokens
+        ).total
+        tokens += call.inputTokens + call.outputTokens
+        inputTokens += call.inputTokens
+        cachedInputTokens += call.cachedInputTokens
+        cacheWriteInputTokens += call.cacheWriteInputTokens
+        outputTokens += call.outputTokens
+        requests += 1
+        estimatedCostUSD += cost
+    }
+
+    mutating func add(_ other: LLMUsageBucket) {
+        tokens += other.tokens
+        inputTokens += other.inputTokens
+        cachedInputTokens += other.cachedInputTokens
+        cacheWriteInputTokens += other.cacheWriteInputTokens
+        outputTokens += other.outputTokens
+        requests += other.requests
+        estimatedCostUSD += other.estimatedCostUSD
+    }
+
+    /// How many days of hourly buckets the readers keep.
+    static let retentionSeconds: TimeInterval = 7 * 86_400
+
+    /// Groups timestamped calls into hourly buckets for `provider`, dropping calls older than the retention window.
+    static func hourly(
+        provider: String,
+        calls: [(call: LLMTokenCall, modelName: String)],
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> [LLMUsageBucket] {
+        let cutoff = now.addingTimeInterval(-retentionSeconds)
+        var buckets: [Date: LLMUsageBucket] = [:]
+        for item in calls {
+            guard let timestamp = item.call.timestamp, timestamp >= cutoff, timestamp <= now.addingTimeInterval(300),
+                  !item.modelName.localizedCaseInsensitiveContains("synthetic"),
+                  let hour = calendar.dateInterval(of: .hour, for: timestamp)?.start else { continue }
+            buckets[hour, default: LLMUsageBucket(provider: provider, hourStart: hour)].add(item.call, modelName: item.modelName)
+        }
+        return buckets.values.filter { $0.requests > 0 }.sorted { $0.hourStart < $1.hourStart }
+    }
+}
+
 struct LLMResetCreditExpiration: Identifiable, Equatable {
     var id: String { "\(Int(expiresAt.timeIntervalSince1970))-\(count)" }
     var count: Int
@@ -469,6 +531,8 @@ struct LLMUsageSnapshot: Equatable {
     var weeklyModelUsage: [LLMModelUsageTotal] = []
     var dailyModelUsage: [LLMModelUsageTotal] = []
     var providerAccounts: [LLMProviderAccount] = []
+    /// Hourly token and cost totals per provider for the last 7 days, oldest first.
+    var usageBuckets: [LLMUsageBucket] = []
 
     /// The Claude plan from the local Claude profile. `planType` above is the Codex plan.
     var claudePlanType: String? {
