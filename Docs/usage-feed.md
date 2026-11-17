@@ -35,6 +35,7 @@ Read this file instead of MaxxBar's internal files. Its fields keep their names 
 | `providers[].error` | The last error for that provider, if any. The numbers may then be from an older reading; check `checkedAt`. |
 | `daily[]` | Token and cost totals per local day and provider, for the last 7 days, oldest first. `date` is `yyyy-MM-dd`. Days with no use are left out. |
 | `hourly[]` | The same totals per clock hour (`hourStart`, ISO 8601), for the last 7 days, oldest first. Use these to total usage for any time range, such as a work session. |
+| `closedWindows[]` | Quota windows that have closed in the last 30 days, oldest first, with what was left unused: `provider`, `kind` (`fiveHour`, `weekly` for all models, or `weeklyModel` for one model's weekly limit such as Fable, named in `model`), `resetAt`, `usedPercent` and `leftPercent` at the close, `lowConfidence` (the last reading was more than 30 minutes before the reset), `backfilled` (reconstructed from older quota history) and `plan`. Empty until MaxxBar's window ledger has rows. A 5h window that was never used has no row. |
 | `totals` | `tokens` (prompt plus output), `inputTokens` (whole prompt, including cache reads and writes), `cachedInputTokens` (cache reads), `cacheWriteInputTokens`, `outputTokens`, `requests` and `estimatedCostUSD` (rounded to 4 decimals). |
 
 Token totals come from local transcripts (`~/.claude/projects`) and Codex rollouts, so they cover only this Mac. Quota percentages cover the whole account.
@@ -78,6 +79,9 @@ The file holds no email address, prompt text, project name or file path.
       "source" : "endpoint",
       "weekly" : { "remainingPercent" : 64, "resetsAt" : "2026-11-20T17:00:00Z", "usedPercent" : 36, "windowSeconds" : 604800 }
     }
+  ],
+  "closedWindows" : [
+    { "backfilled" : false, "kind" : "fiveHour", "leftPercent" : 84, "lowConfidence" : false, "plan" : "Max 5x", "provider" : "Claude", "resetAt" : "2026-11-14T21:20:00Z", "usedPercent" : 16 }
   ],
   "schema" : "maxxbar.usage-feed",
   "schemaVersion" : 1,
