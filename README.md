@@ -26,6 +26,7 @@ The popover screenshots use built-in demo data.
 - **One provider or both.** Track Claude, Codex, or both from the eye menu. A hidden provider costs nothing: it is not polled or scanned.
 - **Burn rate that survives plan changes.** The drawdown card shows your pace since the last reset or plan upgrade.
 - **What you left on the table.** Left at reset records how much of each 5 hour and weekly window expired unused.
+- **What you are about to leave.** Waste forecast predicts how much of this week's allowance will expire at your usual pace, and how much more to spend to finish near 90%.
 - **What it is worth.** API Value prices your usage at API list rates for today, this week, 7 days and the month, next to your plan price.
 - **Weekly share card.** A 1080 x 1350 image of how much of your Claude plan went to work, what expired at the reset, and the points rescued against your usual week. Copy it or save it from the Runway tab. It carries no names, accounts, projects or paths, and the API dollar figure is off unless you switch it on.
 - **Full usage report.** One offline page with value, plan cost, unused allowance, 5 hour windows, daily sessions and model mix.
@@ -37,7 +38,7 @@ The popover screenshots use built-in demo data.
 
 ## Popover Tabs
 
-- **Runway:** live limits and resets, weekly drawdown, your pace, left at reset, session timeline.
+- **Runway:** live limits and resets, weekly drawdown, your pace, waste forecast, left at reset, session timeline.
 - **Insights:** API Value, accounts and plans, model mix, output destinations, workflow paths.
 - **Memory:** pressure, memory mix, top apps, swap, sensors.
 - **CPU/GPU:** thermal state, power, temperatures, fans, CPU and GPU load, top processes.
@@ -109,6 +110,7 @@ Scripts/test-usage-feed.sh
 Scripts/test-runway-forecast.sh
 Scripts/test-log-retention.sh
 Scripts/test-quota-ledger.sh
+Scripts/test-waste-forecast.sh
 Scripts/test-share-card.sh
 ```
 

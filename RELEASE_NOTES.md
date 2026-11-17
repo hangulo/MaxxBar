@@ -1,5 +1,9 @@
 # Release Notes
 
+## Unreleased
+
+- New Waste forecast card on Runway, above Left at reset: how much of this week's Claude allowance is likely to expire unused at your usual pace, how much more to spend to finish near 90% used, the same for per-model weeklies such as Fable, and where the current 5 hour window is heading. Weekly habits come from a 28 slot profile (each weekday in four 6 hour parts, median of past weeks) built from the saved quota history, with older plans rescaled. `Scripts/test-waste-forecast.sh` covers it.
+
 ## v0.3.0 - 2026-11-16
 
 Everything merged after the 14 Nov Claude work, in PRs #16, #17 and #18.

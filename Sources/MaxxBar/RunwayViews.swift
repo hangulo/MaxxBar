@@ -45,6 +45,7 @@ struct LLMRunwayPanelView: View {
                     LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
                     DrawdownInsightCard(snapshot: snapshot, quotaHistory: quotaHistory)
                     if showClaude || !showCodex {
+                        QuotaWasteForecastCard(snapshot: snapshot, quotaHistory: quotaHistory, records: quotaWindowLedger)
                         QuotaLeftAtResetCard(
                             snapshot: snapshot, records: quotaWindowLedger,
                             isBuildingReport: isBuildingUsageReport, onOpenReport: onOpenUsageReport
