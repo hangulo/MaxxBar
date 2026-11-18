@@ -800,6 +800,7 @@ struct SwapView: View {
 }
 
 struct ActionBarView: View {
+    var onOpenUsageReport: (() -> Void)?
     var onOpenHub: (() -> Void)?
     var onStartDeepTrace: (() -> Void)?
     var onPopOut: (() -> Void)?
@@ -812,6 +813,10 @@ struct ActionBarView: View {
             Spacer()
 
             ProviderVisibilityMenu()
+
+            if let onOpenUsageReport {
+                IconActionButton(systemName: "chart.bar.doc.horizontal", help: "Rebuild and open the Claude usage report", action: onOpenUsageReport)
+            }
 
             if let onOpenHub {
                 IconActionButton(systemName: "rectangle.3.group", help: "Open MaxxBar Hub", action: onOpenHub)

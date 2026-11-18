@@ -69,6 +69,7 @@ struct MemoryPopoverView: View {
             }
 
             ActionBarView(
+                onOpenUsageReport: { model.openUsageReport() },
                 onOpenHub: { model.openAIUsageReport() },
                 onStartDeepTrace: onStartDeepTrace,
                 onPopOut: onPopOut,
