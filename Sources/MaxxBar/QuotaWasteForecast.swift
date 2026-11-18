@@ -208,6 +208,37 @@ enum QuotaWasteForecast {
         )
     }
 
+    /// How long a weekly window must have run before the menu bar may warn that it runs out. A fresh week's pace
+    /// is mostly one busy evening and says little about the nights and weekend still ahead.
+    static let minimumWeekAgeForEmptyWarning: TimeInterval = 24 * 3_600
+
+    /// When a weekly window is expected to hit 0%, walking the habit profile slot by slot from now (this window's
+    /// own pace fills slots with no history). Nil when it lasts until the reset, when the window is younger than
+    /// `minimumWeekAgeForEmptyWarning`, or when nothing predicts the rate.
+    static func weeklyEmptyAt(history: [Point], current: Point, now: Date, calendar: Calendar = .current) -> Date? {
+        guard let resetAt = current.resetAt, resetAt > now, current.remaining > 0,
+              now.timeIntervalSince(resetAt.addingTimeInterval(-week)) >= minimumWeekAgeForEmptyWarning else { return nil }
+        let past = history.filter { $0.at < current.at }
+        let habits = profile(from: past + [current], calendar: calendar)
+        let fallback = currentWindowRate(past, current: current, minimumSpan: minimumWeekAgeForEmptyWarning)
+        guard !habits.isEmpty || fallback != nil else { return nil }
+
+        let budget = Double(current.remaining) * planScale(current.plan)
+        var units = 0.0
+        var cursor = now
+        while cursor < resetAt {
+            let end = min(slotEnd(after: cursor, calendar: calendar), resetAt)
+            let rate = habits.unitsPerHour[slotIndex(cursor, calendar: calendar)] ?? fallback ?? 0
+            let hours = end.timeIntervalSince(cursor) / 3_600
+            if rate > 0, units + rate * hours >= budget {
+                return cursor.addingTimeInterval((budget - units) / rate * 3_600)
+            }
+            units += rate * hours
+            cursor = end
+        }
+        return nil
+    }
+
     /// Forecast for the 5 hour window at the current window's own pace. Nil when the window is idle (nothing used
     /// yet), the reset time is unknown, or the window is too young to have a pace.
     static func fiveHour(history: [Point], current: Point, now: Date) -> Forecast? {
