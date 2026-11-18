@@ -31,46 +31,6 @@ enum MaxxBarLauncher {
             return
         }
 
-        if let index = CommandLine.arguments.firstIndex(of: "--render-share-card"),
-           CommandLine.arguments.indices.contains(index + 1) {
-            // --render-share-card <path> [demo] [so-far] [dollars]: writes the weekly share card PNG and exits.
-            let arguments = CommandLine.arguments
-            let path = arguments[index + 1]
-            let summary: WeeklyShareSummary?
-            if arguments.contains("demo") {
-                summary = WeeklyShareCard.demo()
-            } else {
-                let historyURL = URL(fileURLWithPath: NSHomeDirectory())
-                    .appendingPathComponent("Library/Application Support/MaxxBar/llm-quota-history.json")
-                let history = (try? Data(contentsOf: historyURL))
-                    .flatMap { try? JSONDecoder().decode([LLMQuotaHistorySample].self, from: $0) } ?? []
-                let latest = history.filter { $0.claudeWeeklyRemainingPercent != nil }.max { $0.sampledAt < $1.sampledAt }
-                let live = latest.flatMap { sample in
-                    sample.claudeWeeklyResetAt.flatMap { reset in
-                        reset > Date() ? WeeklyShareCard.LiveWeek(
-                            usedPercent: 100 - (sample.claudeWeeklyRemainingPercent ?? 100), resetAt: reset
-                        ) : nil
-                    }
-                }
-                summary = WeeklyShareCard.summary(
-                    records: QuotaWindowLedgerStore.load(), live: live, plan: latest?.claudePlanType,
-                    period: arguments.contains("so-far") ? .thisWeekSoFar : .lastFullWeek
-                ) { APICostLedger.days(provider: "Claude", from: $0, through: $1) }
-            }
-            guard let summary else {
-                fputs("no closed weekly window or live weekly reading yet\n", stderr)
-                exit(1)
-            }
-            do {
-                try WeeklyShareCardExporter.write(summary, showDollars: arguments.contains("dollars"), to: URL(fileURLWithPath: path))
-                print("rendered=\(path)")
-            } catch {
-                fputs("render failed: \(error)\n", stderr)
-                exit(1)
-            }
-            return
-        }
-
         if let index = CommandLine.arguments.firstIndex(of: "--write-usage-report") {
             // Writes the usage report without opening it: --write-usage-report [path]
             let arguments = CommandLine.arguments
