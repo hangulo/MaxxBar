@@ -50,7 +50,6 @@ struct LLMRunwayPanelView: View {
                             snapshot: snapshot, records: quotaWindowLedger,
                             isBuildingReport: isBuildingUsageReport, onOpenReport: onOpenUsageReport
                         )
-                        WeeklyShareCardSection(snapshot: snapshot, records: quotaWindowLedger)
                     }
                     LLMAdvancedUsageCard(snapshot: snapshot, isExpanded: $advancedExpanded)
                 }

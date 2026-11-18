@@ -115,21 +115,6 @@ enum APICostLedger {
         )
     }
 
-    /// Per day totals for one provider, keyed by local "yyyy-MM-dd", for days from `start` through `end`.
-    static func days(provider: String, from start: Date, through end: Date, calendar: Calendar = .current) -> [String: APICostDay] {
-        lock.lock()
-        let file = load()
-        lock.unlock()
-        guard let file else { return [:] }
-        let first = dayKey(start, calendar: calendar)
-        let last = dayKey(end, calendar: calendar)
-        var result: [String: APICostDay] = [:]
-        for (key, providers) in file.days where key >= first && key <= last {
-            if let day = providers[provider] { result[key] = day }
-        }
-        return result
-    }
-
     /// Monthly subscription price for a plan name, for the comparison line. Nil when unknown.
     static func monthlyPlanPrice(_ plan: String?) -> Double? {
         guard let plan = plan?.lowercased() else { return nil }

@@ -31,46 +31,6 @@ enum MaxxBarLauncher {
             return
         }
 
-        if let index = CommandLine.arguments.firstIndex(of: "--render-share-card"),
-           CommandLine.arguments.indices.contains(index + 1) {
-            // --render-share-card <path> [demo] [so-far] [dollars]: writes the weekly share card PNG and exits.
-            let arguments = CommandLine.arguments
-            let path = arguments[index + 1]
-            let summary: WeeklyShareSummary?
-            if arguments.contains("demo") {
-                summary = WeeklyShareCard.demo()
-            } else {
-                let historyURL = URL(fileURLWithPath: NSHomeDirectory())
-                    .appendingPathComponent("Library/Application Support/MaxxBar/llm-quota-history.json")
-                let history = (try? Data(contentsOf: historyURL))
-                    .flatMap { try? JSONDecoder().decode([LLMQuotaHistorySample].self, from: $0) } ?? []
-                let latest = history.filter { $0.claudeWeeklyRemainingPercent != nil }.max { $0.sampledAt < $1.sampledAt }
-                let live = latest.flatMap { sample in
-                    sample.claudeWeeklyResetAt.flatMap { reset in
-                        reset > Date() ? WeeklyShareCard.LiveWeek(
-                            usedPercent: 100 - (sample.claudeWeeklyRemainingPercent ?? 100), resetAt: reset
-                        ) : nil
-                    }
-                }
-                summary = WeeklyShareCard.summary(
-                    records: QuotaWindowLedgerStore.load(), live: live, plan: latest?.claudePlanType,
-                    period: arguments.contains("so-far") ? .thisWeekSoFar : .lastFullWeek
-                ) { APICostLedger.days(provider: "Claude", from: $0, through: $1) }
-            }
-            guard let summary else {
-                fputs("no closed weekly window or live weekly reading yet\n", stderr)
-                exit(1)
-            }
-            do {
-                try WeeklyShareCardExporter.write(summary, showDollars: arguments.contains("dollars"), to: URL(fileURLWithPath: path))
-                print("rendered=\(path)")
-            } catch {
-                fputs("render failed: \(error)\n", stderr)
-                exit(1)
-            }
-            return
-        }
-
         if let index = CommandLine.arguments.firstIndex(of: "--write-usage-report") {
             // Writes the usage report without opening it: --write-usage-report [path]
             let arguments = CommandLine.arguments
@@ -506,13 +466,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return "\(formatter.string(from: date)) \(hour % 12 == 0 ? 12 : hour % 12)\(suffix)"
     }
 
+    /// Time until reset, rounded down so it reads at a glance: minutes under an hour, then half hours
+    /// ("3h", "3.5h"), then quarter days ("6.75d").
     private func timeLeftLabel(_ resetAt: Date?) -> String {
         guard let resetAt else { return "--" }
         let minutes = max(Int(ceil(resetAt.timeIntervalSinceNow / 60)), 0)
         if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        if hours < 24 { return minutes % 60 == 0 ? "\(hours)h" : "\(hours)h\(minutes % 60)m" }
-        return hours % 24 == 0 ? "\(hours / 24)d" : "\(hours / 24)d\(hours % 24)h"
+        func number(_ value: Double) -> String { String(format: "%g", value) }
+        if minutes < 24 * 60 { return number(Double(minutes / 30) / 2) + "h" }
+        return number(Double(minutes / (6 * 60)) / 4) + "d"
     }
 
     private func statusTextLines() -> (top: String, bottom: String) {
@@ -695,6 +657,7 @@ final class StatusTitleView: NSView {
         let regularBottomFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
         let warningTopFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
         let warningBottomFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        let labelFont = NSFont.systemFont(ofSize: 10, weight: .bold)
         let topY = max(0, floor((bounds.height - 24) / 2) - 1)
         let bottomY = topY + 11
 
@@ -711,7 +674,8 @@ final class StatusTitleView: NSView {
                 attributes: [
                     .font: isWarning ? warningTopFont : regularTopFont,
                     .foregroundColor: itemColor
-                ]
+                ],
+                leadingWordFont: labelFont
             )
             let bottomRect = drawCentered(
                 bottomItems.indices.contains(index) ? bottomItems[index] : "",
@@ -769,12 +733,18 @@ final class StatusTitleView: NSView {
         x: CGFloat,
         y: CGFloat,
         width: CGFloat,
-        attributes: [NSAttributedString.Key: Any]
+        attributes: [NSAttributedString.Key: Any],
+        leadingWordFont: NSFont? = nil
     ) -> NSRect {
         guard !text.isEmpty else { return .zero }
-        let size = text.size(withAttributes: attributes)
+        // "5H 72%": the window label before the first space is drawn in `leadingWordFont`.
+        let string = NSMutableAttributedString(string: text, attributes: attributes)
+        if let leadingWordFont, let space = text.firstIndex(of: " ") {
+            string.addAttribute(.font, value: leadingWordFont, range: NSRange(text.startIndex..<space, in: text))
+        }
+        let size = string.size()
         let rect = NSRect(x: x + (width - size.width) / 2, y: y, width: size.width, height: size.height)
-        text.draw(in: rect, withAttributes: attributes)
+        string.draw(in: rect)
         return rect
     }
 }

@@ -74,6 +74,9 @@ enum UsageReport {
             var models: [String: Int] = [:]
             var modelResets: [String: Date] = [:]
             var plan: String?
+            /// Waste forecast for the current weekly window: percent expected to expire at the reset, and to be used before it.
+            var weekForecastLeft: Int?
+            var weekForecastUse: Int?
         }
 
         let generatedAt: Date
@@ -174,6 +177,13 @@ enum UsageReport {
             live.models = last.claudeModelWeeklyRemaining ?? [:]
             live.modelResets = last.claudeModelWeeklyResetAt ?? [:]
             live.plan = ClaudePlanTimeline.normalized(last.claudePlanType) ?? ClaudePlanTimeline.entry(at: last.sampledAt).plan
+            if let current = QuotaWasteForecast.weeklyPoints([last]).first,
+               let forecast = QuotaWasteForecast.weekly(
+                   history: QuotaWasteForecast.weeklyPoints(claudeSamples), current: current, now: now, calendar: calendar
+               ) {
+                live.weekForecastLeft = forecast.predictedLeft
+                live.weekForecastUse = forecast.expectedUse
+            }
         }
 
         return Payload(
@@ -432,11 +442,13 @@ function renderKpis() {
   const unusedHtml = closed.length
     ? `<div class="value">${pct(sum(closed.map(w => w.left)) / closed.length)}</div><div class="note">weekly allowance left at ${closed.length} reset${closed.length > 1 ? "s" : ""}${est.length ? ", about " + money(sum(est)) + " at API prices" : ""}</div>`
     : `<div class="value">${D.live.weekLeft != null ? pct(D.live.weekLeft) : "n/a"}</div><div class="note">no weekly reset in ${label}; left this week so far${D.live.weekReset ? ", resets " + fmtTime(D.live.weekReset) : ""}</div>`;
+  const forecastHtml = D.live.weekForecastLeft != null
+    ? `<div class="note">Forecast: about ${pct(D.live.weekForecastLeft)} of this week will expire at the reset (${pct(D.live.weekForecastUse)} more use expected)</div>` : "";
   $("kpis").innerHTML = `
     <div class="kpi"><div class="label">Value at API prices</div><div class="value">${money(value)}</div><div class="note">${sum(keys.map(k => byDay[k]?.n || 0)).toLocaleString()} requests in ${label}</div></div>
     <div class="kpi"><div class="label">Plan cost</div><div class="value">${money(plan)}</div><div class="note">prorated per day: ${[...new Set(keys.map(k => planOn(k).plan))].join(", ")}</div></div>
     <div class="kpi hero"><div class="label">Saved</div><div class="value">${money(value - plan)}</div><div class="note">${plan > 0 ? (value / plan).toFixed(1) + "x the plan cost" : ""}</div></div>
-    <div class="kpi"><div class="label">Credits left unused</div>${unusedHtml}${five.length ? `<div class="note">5h: ${pct(sum(five.map(w => w.left)) / five.length)} average left in window over ${five.length} windows</div>` : ""}</div>`;
+    <div class="kpi"><div class="label">Credits left unused</div>${unusedHtml}${forecastHtml}${five.length ? `<div class="note">5h: ${pct(sum(five.map(w => w.left)) / five.length)} average left in window over ${five.length} windows</div>` : ""}</div>`;
 }
 
 function renderWeeks() {

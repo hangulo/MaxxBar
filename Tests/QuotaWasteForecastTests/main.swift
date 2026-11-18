@@ -98,4 +98,24 @@ assert(QuotaWasteForecast.recentWeeklyLeftAverage([]) == nil)
 // Plan scale.
 assert(QuotaWasteForecast.planScale("max_5x") == 5 && QuotaWasteForecast.planScale("Pro") == 1 && QuotaWasteForecast.planScale(nil) == 1)
 
+// DST: on a fall-back day (1 Nov 2026 in Los Angeles) dayparts still end at 06:00 wall time, and walking slots
+// across the change ends instead of looping forever on 05:00.
+var pacific = Calendar(identifier: .gregorian)
+pacific.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+let fallBack = pacific.date(from: DateComponents(year: 2026, month: 11, day: 1))!
+let fiveThirty = fallBack.addingTimeInterval(6.5 * hour) // 05:30 PST, 6.5 hours after midnight PDT
+let sixAM = QuotaWasteForecast.slotEnd(after: fiveThirty, calendar: pacific)
+assert(sixAM == fallBack.addingTimeInterval(7 * hour), "\(sixAM)")
+for minutes in stride(from: 0, to: 48 * 60, by: 15) {
+    let date = fallBack.addingTimeInterval(Double(minutes) * 60 - 12 * hour)
+    assert(QuotaWasteForecast.slotEnd(after: date, calendar: pacific) > date, "\(date)")
+}
+let dstHistory = (0..<48).map { h in
+    Point(at: fallBack.addingTimeInterval(Double(h - 12) * hour), remaining: 100 - h / 4, resetAt: fallBack.addingTimeInterval(4 * 86_400), plan: "Max 5x")
+}
+let dstProfile = QuotaWasteForecast.profile(from: dstHistory, calendar: pacific)
+assert(!dstProfile.isEmpty)
+let dstNow = dstHistory.last!
+assert(QuotaWasteForecast.weekly(history: Array(dstHistory.dropLast()), current: dstNow, now: dstNow.at, calendar: pacific) != nil)
+
 print("waste forecast tests passed")

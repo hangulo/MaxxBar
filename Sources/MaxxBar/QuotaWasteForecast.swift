@@ -63,15 +63,19 @@ enum QuotaWasteForecast {
         return weekday * slotsPerDay + daypart
     }
 
-    /// The end of the six-hour daypart that holds `date`.
+    /// The end of the six-hour daypart that holds `date`, always later than `date`.
+    /// Boundaries are wall-clock times (06:00, 12:00, 18:00, midnight), so a day with a DST change still splits at
+    /// them. Adding hours to midnight would land at 05:00 on a fall-back day, before a 05:30 cursor, and the loops
+    /// that walk slots would never advance.
     static func slotEnd(after date: Date, calendar: Calendar) -> Date {
         let start = calendar.startOfDay(for: date)
         let daypart = min(calendar.component(.hour, from: date) / 6, slotsPerDay - 1)
         let next = daypart + 1
-        if next >= slotsPerDay {
-            return calendar.date(byAdding: .day, value: 1, to: start) ?? date.addingTimeInterval(slotLength)
-        }
-        return calendar.date(byAdding: .hour, value: next * 6, to: start) ?? date.addingTimeInterval(slotLength)
+        let end = next >= slotsPerDay
+            ? calendar.date(byAdding: .day, value: 1, to: start)
+            : calendar.date(bySettingHour: next * 6, minute: 0, second: 0, of: start)
+        guard let end, end > date else { return date.addingTimeInterval(3_600) }
+        return end
     }
 
     /// Builds the habit profile from a weekly series, oldest first.
