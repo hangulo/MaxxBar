@@ -1,25 +1,27 @@
 import SwiftUI
 
 let leftAtResetHelp = """
-What was still unused when each Claude window reset, from llm-window-ledger.jsonl.
+Your weekly Claude allowance at each reset, from llm-window-ledger.jsonl: orange is what you used, gray is what expired unused. The last bar, outlined, is this week so far.
 
-5 hour figures are what was left in that window. An idle 5 hour window only costs something if the weekly allowance also resets with credit left, so the weekly figure is the real expiry.
-
-Gray values are low confidence: the last reading came more than 30 minutes before the reset.
+The weekly allowance is the real expiry, so 5 hour windows are left to the full report. Faded bars are low confidence: the last reading came more than 30 minutes before the reset. A question mark means it came more than 12 hours before, so the figure is unknown.
 """
 
-/// "Left at reset": unused share of the last closed Claude windows, with a link to the full usage report.
+/// "Unused credits": a compact bar per weekly reset (used vs expired unused), with a link to the full usage report.
 struct QuotaLeftAtResetCard: View {
     let snapshot: LLMUsageSnapshot
     let records: [QuotaWindowRecord]
     var isBuildingReport = false
     var onOpenReport: (() -> Void)?
 
+    static let maxBars = 6
+    /// Same cutoff the report uses: a reading this long before the reset says nothing about the end of the week.
+    static let unknownAge = 12 * 3_600
+
     var body: some View {
-        let summary = QuotaLeftAtReset(records: records)
+        let bars = self.bars
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                InstantHelpTitle("LEFT AT RESET", help: leftAtResetHelp, color: .claudeCoral)
+                InstantHelpTitle("UNUSED CREDITS", help: leftAtResetHelp, color: .claudeCoral)
                 Spacer()
                 Button(isBuildingReport ? "Building report…" : "Open full report") { onOpenReport?() }
                     .buttonStyle(.plain)
@@ -29,80 +31,136 @@ struct QuotaLeftAtResetCard: View {
                     .help("Write the usage report with drill downs and open it in your browser")
             }
 
-            if records.isEmpty {
-                Text("No closed window yet")
+            if bars.isEmpty {
+                Text("No weekly reset yet")
                     .font(.system(size: 12.5))
                     .foregroundStyle(.white.opacity(0.58))
             } else {
-                row("Last 5h window", record: summary.lastFiveHour, suffix: "left in window")
-                averageRow("5h today", summary.fiveHourAverageToday, count: summary.fiveHourCountToday)
-                averageRow("5h, 7 days", summary.fiveHourAverageWeek, count: summary.fiveHourCountWeek)
-                row("Last weekly reset", record: summary.lastWeekly, suffix: "expired unused")
-            }
-            if let weekly = claude?.weeklyWindow {
-                liveRow("This week so far", window: weekly)
-            }
-            ForEach(modelLimits, id: \.name) { limit in
-                if let window = limit.weeklyWindow {
-                    liveRow("\(limit.name.dropFirst("Claude ".count)) weekly", window: window,
-                            closed: summary.lastModelWeekly[String(limit.name.dropFirst("Claude ".count))])
+                HStack(alignment: .bottom, spacing: 8) {
+                    ForEach(bars) { bar in
+                        WeeklyResetBar(bar: bar)
+                    }
                 }
+                .frame(maxWidth: .infinity)
+
+                HStack(spacing: 10) {
+                    legend(Color.claudeCoral, "Used")
+                    legend(Color.freeGray, "Expired unused")
+                    Spacer()
+                    if let average {
+                        Text("\(average)% left on avg")
+                            .foregroundStyle(.white.opacity(0.5))
+                            .monospacedDigit()
+                    }
+                }
+                .font(.system(size: 10, weight: .medium))
             }
         }
         .sectionStyle()
     }
 
-    private var claude: LLMUsageLimit? { snapshot.limits.first { $0.name == "Claude" } }
-    private var modelLimits: [LLMUsageLimit] {
-        snapshot.limits.filter { $0.name.hasPrefix("Claude ") && $0.weeklyWindow != nil }
+    private func legend(_ color: Color, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 7, height: 7)
+            Text(label).foregroundStyle(.white.opacity(0.6))
+        }
     }
 
-    private func row(_ label: String, record: QuotaWindowRecord?, suffix: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.white.opacity(0.62))
-            Spacer()
-            if let record {
-                Text("\(record.leftPercent)% \(suffix)")
-                    .foregroundStyle(.white.opacity(record.lowConfidence ? 0.4 : 0.9))
-                Text(record.windowResetAt.formatted(.dateTime.weekday(.abbreviated).hour().minute()))
-                    .foregroundStyle(.white.opacity(0.4))
-            } else {
-                Text("None yet").foregroundStyle(.white.opacity(0.4))
-            }
-        }
-        .font(.system(size: 12, weight: .medium))
-        .monospacedDigit()
-        .help(record.map { $0.lowConfidence
-            ? "Low confidence: the last reading was \($0.sampleAgeAtResetSeconds / 60) minutes before the reset"
-            : "Last reading \($0.sampleAgeAtResetSeconds / 60) minutes before the reset" } ?? "")
+    private var weekly: [QuotaWindowRecord] {
+        records.filter { $0.kind == .weekly }.sorted { $0.windowResetAt < $1.windowResetAt }
     }
 
-    private func averageRow(_ label: String, _ value: Double?, count: Int) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.white.opacity(0.62))
-            Spacer()
-            Text(value.map { "\(Int($0.rounded()))% left in window" } ?? "No window closed")
-                .foregroundStyle(.white.opacity(value == nil ? 0.4 : 0.9))
-            if count > 0 {
-                Text("\(count) window\(count == 1 ? "" : "s")").foregroundStyle(.white.opacity(0.4))
-            }
-        }
-        .font(.system(size: 12, weight: .medium))
-        .monospacedDigit()
+    private var average: Int? {
+        let known = weekly.filter { $0.sampleAgeAtResetSeconds <= Self.unknownAge }
+        guard !known.isEmpty else { return nil }
+        return Int((Double(known.map(\.leftPercent).reduce(0, +)) / Double(known.count)).rounded())
     }
 
-    private func liveRow(_ label: String, window: LLMUsageWindow, closed: QuotaWindowRecord? = nil) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.white.opacity(0.62))
-            Spacer()
-            Text("\(window.remainingPercent)% left").foregroundStyle(.white.opacity(0.9))
-            if let reset = window.resetAt {
-                Text("resets \(reset.formatted(.dateTime.weekday(.abbreviated).hour().minute()))")
-                    .foregroundStyle(.white.opacity(0.4))
-            }
+    private var bars: [WeeklyResetBar.Model] {
+        let live = snapshot.limits.first { $0.name == "Claude" }?.weeklyWindow
+        let liveBar = live.flatMap { window -> WeeklyResetBar.Model? in
+            guard let reset = window.resetAt,
+                  !weekly.contains(where: { abs($0.windowResetAt.timeIntervalSince(reset)) < QuotaWindowLedger.sameResetTolerance })
+            else { return nil }
+            return WeeklyResetBar.Model(resetAt: reset, left: window.remainingPercent, state: .live)
         }
-        .font(.system(size: 12, weight: .medium))
-        .monospacedDigit()
-        .help(closed.map { "Last reset left \($0.leftPercent)% unused\($0.lowConfidence ? " (low confidence)" : "")" } ?? "")
+        let closed = weekly.suffix(Self.maxBars - (liveBar == nil ? 0 : 1)).map { record in
+            WeeklyResetBar.Model(
+                resetAt: record.windowResetAt, left: record.leftPercent,
+                state: record.sampleAgeAtResetSeconds > Self.unknownAge ? .unknown
+                    : record.lowConfidence ? .lowConfidence : .closed,
+                ageMinutes: record.sampleAgeAtResetSeconds / 60
+            )
+        }
+        return closed + (liveBar.map { [$0] } ?? [])
+    }
+}
+
+/// One week: used (orange) at the bottom, expired unused (gray) on top, unused percentage above.
+struct WeeklyResetBar: View {
+    struct Model: Identifiable {
+        enum State { case closed, lowConfidence, unknown, live }
+        var id: Date { resetAt }
+        let resetAt: Date
+        let left: Int
+        let state: State
+        var ageMinutes = 0
+    }
+
+    let bar: Model
+    static let plotHeight: CGFloat = 64
+
+    var body: some View {
+        let left = CGFloat(min(max(bar.left, 0), 100)) / 100
+        VStack(spacing: 3) {
+            Text(bar.state == .unknown ? "?" : "\(bar.left)%")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(bar.state == .closed || bar.state == .live ? 0.78 : 0.45))
+                .monospacedDigit()
+            VStack(spacing: 0) {
+                unused
+                    .frame(height: Self.plotHeight * left)
+                Rectangle()
+                    .fill(Color.claudeCoral)
+                    .frame(height: Self.plotHeight * (1 - left))
+            }
+            .frame(maxWidth: 30)
+            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+            .overlay {
+                if bar.state == .live {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .stroke(Color.freeGray.opacity(0.8), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                }
+            }
+            Text(bar.state == .live ? "so far" : bar.resetAt.formatted(.dateTime.month(.abbreviated).day()))
+                .font(.system(size: 9.5))
+                .foregroundStyle(.white.opacity(0.5))
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .help(help)
+    }
+
+    @ViewBuilder private var unused: some View {
+        switch bar.state {
+        case .closed: Rectangle().fill(Color.freeGray.opacity(0.75))
+        case .lowConfidence: Rectangle().fill(Color.freeGray.opacity(0.4))
+        case .unknown: Rectangle().fill(Color.freeGray.opacity(0.18))
+        case .live: Rectangle().fill(Color.clear)
+        }
+    }
+
+    private var help: String {
+        let reset = bar.resetAt.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
+        switch bar.state {
+        case .live: return "This week so far: \(bar.left)% left, resets \(reset)"
+        case .closed: return "Week ending \(reset): \(bar.left)% expired unused, \(100 - bar.left)% used"
+        case .lowConfidence:
+            return "Week ending \(reset): \(bar.left)% expired unused (low confidence, last reading \(bar.ageMinutes) minutes before the reset)"
+        case .unknown:
+            return "Week ending \(reset): unknown, the last reading was \(bar.ageMinutes / 60) hours before the reset"
+        }
     }
 }
