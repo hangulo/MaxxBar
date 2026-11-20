@@ -409,8 +409,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let limit = model.llmUsage.limits.first { $0.name == provider }
         let stale = limit?.cachedAt == nil && limit?.isEstimate != true ? "" : "~"
         let plan = provider == "Claude" ? model.llmUsage.claudePlanType : model.llmUsage.planType
-        // The bottom line switches from time until reset to time until empty only when, at the current
-        // burn rate, the window runs out before it resets.
+        // The bottom line switches from time until reset to "out" plus when the window is expected to hit 0%,
+        // only when that comes before the reset.
         func column(
             _ label: String, _ window: LLMUsageWindow?, weekly: Bool
         ) -> (top: String, bottom: String, percent: Int?, runningOut: Bool) {
@@ -419,7 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let window, let emptyAt = forecastEmpty(provider: provider, window: window, plan: plan, weekly: weekly) else {
                 return (top, timeLeftLabel(window?.resetAt), percent, false)
             }
-            return (top, weekly ? emptyDayLabel(emptyAt) : "out \(shortDuration(until: emptyAt))", percent, true)
+            return (top, "out " + (weekly ? emptyDayLabel(emptyAt) : shortDuration(until: emptyAt)), percent, true)
         }
         let columns = [
             column("5H", limit?.shortWindow, weekly: false),
@@ -433,23 +433,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    /// When the window is expected to hit 0% before it resets. The 5 hour window uses its own straight-line pace;
+    /// the weekly window follows the usual weekday and time-of-day pattern (QuotaWasteForecast.weeklyEmptyAt).
     private func forecastEmpty(provider: String, window: LLMUsageWindow, plan: String?, weekly: Bool) -> Date? {
-        let history = model.llmQuotaHistory.suffix(weekly ? 1_000 : 120).compactMap { sample -> RunwayForecast.Reading? in
-            let percent = weekly ? sample.weeklyRemainingPercent(for: provider) : sample.fiveHourRemainingPercent(for: provider)
-            guard let percent else { return nil }
-            return RunwayForecast.Reading(
-                at: sample.sampledAt,
-                remainingPercent: percent,
-                resetAt: weekly ? sample.weeklyResetAt(for: provider) : sample.fiveHourResetAt(for: provider),
-                plan: sample.plan(for: provider)
+        let now = model.llmUsage.lastUpdated ?? Date()
+        guard weekly else {
+            let history = model.llmQuotaHistory.suffix(120).compactMap { sample -> RunwayForecast.Reading? in
+                guard let percent = sample.fiveHourRemainingPercent(for: provider) else { return nil }
+                return RunwayForecast.Reading(
+                    at: sample.sampledAt, remainingPercent: percent,
+                    resetAt: sample.fiveHourResetAt(for: provider), plan: sample.plan(for: provider)
+                )
+            }
+            let current = RunwayForecast.Reading(at: now, remainingPercent: window.remainingPercent, resetAt: window.resetAt, plan: plan)
+            return RunwayForecast.emptyAt(history.filter { $0.at < now } + [current], minimumSpan: 15 * 60)
+        }
+        let history = model.llmQuotaHistory.compactMap { sample -> QuotaWasteForecast.Point? in
+            guard let percent = sample.weeklyRemainingPercent(for: provider) else { return nil }
+            return QuotaWasteForecast.Point(
+                at: sample.sampledAt, remaining: percent,
+                resetAt: sample.weeklyResetAt(for: provider), plan: sample.plan(for: provider)
             )
         }
-        let current = RunwayForecast.Reading(
-            at: model.llmUsage.lastUpdated ?? Date(), remainingPercent: window.remainingPercent,
-            resetAt: window.resetAt, plan: plan
-        )
-        let readings = history.filter { $0.at < current.at } + [current]
-        return RunwayForecast.emptyAt(readings, minimumSpan: weekly ? 6 * 3_600 : 15 * 60)
+        let current = QuotaWasteForecast.Point(at: now, remaining: window.remainingPercent, resetAt: window.resetAt, plan: plan)
+        return QuotaWasteForecast.weeklyEmptyAt(history: history, current: current, now: Date())
     }
 
     private func shortDuration(until date: Date) -> String {
@@ -457,7 +464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h\(minutes % 60 == 0 ? "" : String(minutes % 60))"
     }
 
-    /// "Thu 2p": the day and hour the week runs out at this pace.
+    /// "Thu 2p": the day and hour the week runs out at this pace (shown after "out ").
     private func emptyDayLabel(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE"

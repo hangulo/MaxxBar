@@ -118,4 +118,26 @@ assert(!dstProfile.isEmpty)
 let dstNow = dstHistory.last!
 assert(QuotaWasteForecast.weekly(history: Array(dstHistory.dropLast()), current: dstNow, now: dstNow.at, calendar: pacific) != nil)
 
+// Weekly empty time for the menu bar. Two past weeks burn 1% per hour on Monday 12:00 to 18:00 and idle otherwise.
+// With 4% left on Monday 08:00, the burst empties it 4 hours in, at 16:00, even though the last hours were idle.
+var emptyHistory = habitWeek(0) + habitWeek(1)
+emptyHistory += (0...31).map { Point(at: t(2, Double($0)), remaining: 4, resetAt: t(3, 0), plan: "Max 5x") }
+var emptyCurrent = Point(at: t(2, 32), remaining: 4, resetAt: t(3, 0), plan: "Max 5x")
+var emptyAt = QuotaWasteForecast.weeklyEmptyAt(history: emptyHistory, current: emptyCurrent, now: emptyCurrent.at, calendar: calendar)
+assert(emptyAt.map { near($0.timeIntervalSince(t(2, 40)), 0, 1) } == true, "\(String(describing: emptyAt))")
+// 10% outlasts the usual 6% burst: no warning.
+emptyCurrent.remaining = 10
+assert(QuotaWasteForecast.weeklyEmptyAt(history: emptyHistory, current: emptyCurrent, now: emptyCurrent.at, calendar: calendar) == nil)
+// Less than a day into the week: no warning yet, however fast the start.
+let freshWeek = Point(at: t(2, 20), remaining: 4, resetAt: t(3, 0), plan: "Max 5x")
+assert(QuotaWasteForecast.weeklyEmptyAt(history: emptyHistory, current: freshWeek, now: freshWeek.at, calendar: calendar) == nil)
+// No usable profile (readings 16 hours apart): this week's straight-line pace, 2.5% per hour, empties 20% in 8 hours.
+emptyHistory = [
+    Point(at: t(0, 0), remaining: 100, resetAt: t(1, 0), plan: "Max 5x"),
+    Point(at: t(0, 16), remaining: 60, resetAt: t(1, 0), plan: "Max 5x")
+]
+emptyCurrent = Point(at: t(0, 32), remaining: 20, resetAt: t(1, 0), plan: "Max 5x")
+emptyAt = QuotaWasteForecast.weeklyEmptyAt(history: emptyHistory, current: emptyCurrent, now: emptyCurrent.at, calendar: calendar)
+assert(emptyAt.map { near($0.timeIntervalSince(t(0, 40)), 0, 1) } == true, "\(String(describing: emptyAt))")
+
 print("waste forecast tests passed")
