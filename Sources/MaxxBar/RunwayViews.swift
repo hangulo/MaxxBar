@@ -38,8 +38,9 @@ struct LLMRunwayPanelView: View {
                         }
                     }
 
-                    if !snapshot.providerErrors.isEmpty {
-                        LLMProviderStatusCard(errors: snapshot.providerErrors)
+                    let statusErrors = providerStatusErrors
+                    if !statusErrors.isEmpty {
+                        LLMProviderStatusCard(errors: statusErrors)
                     }
 
                     LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
@@ -71,6 +72,13 @@ struct LLMRunwayPanelView: View {
             default: return true
             }
         }
+    }
+
+    // A runway card with no windows already shows its provider's error in its body,
+    // so the status card only lists errors no runway card is showing.
+    private var providerStatusErrors: [String: String] {
+        let shownInRunway = Set(runwayLimits.filter { !$0.hasRunwayWindows }.map(\.name))
+        return snapshot.providerErrors.filter { !shownInRunway.contains($0.key) }
     }
 
     private func runwayTitle(for limit: LLMUsageLimit) -> String {
@@ -121,7 +129,7 @@ struct LLMUsageLimitCard: View {
             }
             if let onCheckNow {
                 HStack(spacing: 6) {
-                    if let checkNote, !isChecking {
+                    if let checkNote = visibleCheckNote, !isChecking {
                         Text(checkNote)
                     } else if let summary = limit.readingSummary() {
                         Text(summary)
@@ -160,6 +168,13 @@ struct LLMUsageLimitCard: View {
 
     private var providerColor: Color { limit.name.hasPrefix("Claude") ? .claudeCoral : .accentBlue }
 
+    // With no windows the body already shows unavailableMessage; don't repeat it above.
+    private var visibleCheckNote: String? {
+        guard let checkNote else { return nil }
+        if !limit.hasRunwayWindows, checkNote == unavailableMessage { return nil }
+        return checkNote
+    }
+
     private var orderedWindows: [LLMUsageWindow] {
         [limit.shortWindow, limit.weeklyWindow]
             .compactMap { $0 }
@@ -169,6 +184,10 @@ struct LLMUsageLimitCard: View {
                 }
             }
     }
+}
+
+extension LLMUsageLimit {
+    var hasRunwayWindows: Bool { shortWindow != nil || weeklyWindow != nil }
 }
 
 struct ResetCreditDetailsPopover: View {
