@@ -11,6 +11,9 @@ struct LLMRunwayPanelView: View {
     var onOpenUsageReport: (() -> Void)?
     var isCheckingClaude = false
     var claudeCheckNote: String?
+    var onSignInToClaude: (() -> Void)?
+    var isWaitingForClaudeSignIn = false
+    var claudeSignInNote: String?
     var onPopOut: (() -> Void)?
     var onQuit: (() -> Void)?
     @State private var advancedExpanded = false
@@ -33,13 +36,15 @@ struct LLMRunwayPanelView: View {
                                 resetCreditExpirations: limit.name == "Codex" ? snapshot.resetCreditExpirations : [],
                                 onCheckNow: limit.name == "Claude" ? onCheckClaudeNow : nil,
                                 isChecking: limit.name == "Claude" && isCheckingClaude,
-                                checkNote: limit.name == "Claude" ? claudeCheckNote : nil
+                                checkNote: limit.name == "Claude" ? claudeCheckNote : nil,
+                                signIn: limit.name == "Claude" ? claudeSignInPrompt : nil
                             )
                         }
                     }
 
-                    if !snapshot.providerErrors.isEmpty {
-                        LLMProviderStatusCard(errors: snapshot.providerErrors)
+                    let statusErrors = providerStatusErrors
+                    if !statusErrors.isEmpty {
+                        LLMProviderStatusCard(errors: statusErrors)
                     }
 
                     LLMLocalUsageCard(snapshot: snapshot, quotaHistory: quotaHistory, onSampleQuota: onSampleQuota)
@@ -73,6 +78,27 @@ struct LLMRunwayPanelView: View {
         }
     }
 
+    // A runway card with no windows already shows its provider's error in its body,
+    // so the status card only lists errors no runway card is showing.
+    private var providerStatusErrors: [String: String] {
+        var shownInRunway = Set(runwayLimits.filter { !$0.hasRunwayWindows }.map(\.name))
+        // The Claude card shows a sign-in problem itself, next to its Sign in again button.
+        if claudeSignInPrompt?.needsSignIn == true, runwayLimits.contains(where: { $0.name == "Claude" }) {
+            shownInRunway.insert("Claude")
+        }
+        return snapshot.providerErrors.filter { !shownInRunway.contains($0.key) }
+    }
+
+    /// Shown when Claude Code is signed out, within 7 days of its sign-in ending, or while a sign-in is underway.
+    private var claudeSignInPrompt: ClaudeSignInPrompt? {
+        guard let onSignInToClaude else { return nil }
+        let needsSignIn = snapshot.claudeNeedsSignIn
+        let warning = needsSignIn ? nil : ClaudeCredentialManager.signInWarning(endsAt: snapshot.claudeSignInEndsAt)
+        guard needsSignIn || warning != nil || isWaitingForClaudeSignIn else { return nil }
+        return ClaudeSignInPrompt(needsSignIn: needsSignIn, warning: warning, isWaiting: isWaitingForClaudeSignIn,
+                                  note: claudeSignInNote, action: onSignInToClaude)
+    }
+
     private func runwayTitle(for limit: LLMUsageLimit) -> String {
         limit.name == "Codex"
             ? "CODEX RUNWAY (\(planName(snapshot.planType)))"
@@ -90,6 +116,7 @@ struct LLMUsageLimitCard: View {
     var onCheckNow: (() -> Void)? = nil
     var isChecking = false
     var checkNote: String? = nil
+    var signIn: ClaudeSignInPrompt? = nil
     @State private var resetDetailsPresented = false
 
     var body: some View {
@@ -121,7 +148,7 @@ struct LLMUsageLimitCard: View {
             }
             if let onCheckNow {
                 HStack(spacing: 6) {
-                    if let checkNote, !isChecking {
+                    if let checkNote = visibleCheckNote, !isChecking {
                         Text(checkNote)
                     } else if let summary = limit.readingSummary() {
                         Text(summary)
@@ -152,6 +179,15 @@ struct LLMUsageLimitCard: View {
                 ForEach(windows, id: \.label) { window in
                     LLMUsageProgress(window: window, color: providerColor)
                 }
+                if signIn?.needsSignIn == true, let unavailableMessage {
+                    Text(unavailableMessage)
+                        .font(.system(size: 11.5, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.56))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let signIn {
+                ClaudeSignInRow(prompt: signIn)
             }
         }
         .sectionStyle()
@@ -159,6 +195,13 @@ struct LLMUsageLimitCard: View {
     }
 
     private var providerColor: Color { limit.name.hasPrefix("Claude") ? .claudeCoral : .accentBlue }
+
+    // With no windows the body already shows unavailableMessage; don't repeat it above.
+    private var visibleCheckNote: String? {
+        guard let checkNote else { return nil }
+        if !limit.hasRunwayWindows || signIn?.needsSignIn == true, checkNote == unavailableMessage { return nil }
+        return checkNote
+    }
 
     private var orderedWindows: [LLMUsageWindow] {
         [limit.shortWindow, limit.weeklyWindow]
@@ -169,6 +212,55 @@ struct LLMUsageLimitCard: View {
                 }
             }
     }
+}
+
+struct ClaudeSignInPrompt {
+    /// Signed out or expired: the card's message already says what happened.
+    var needsSignIn: Bool
+    /// The 7-day warning, when the sign-in still works but ends soon.
+    var warning: String?
+    var isWaiting: Bool
+    var note: String?
+    var action: () -> Void
+}
+
+/// The 7-day warning or the sign-in progress, with the one-click "Sign in again" button.
+struct ClaudeSignInRow: View {
+    let prompt: ClaudeSignInPrompt
+    private static let amber = Color(red: 255 / 255, green: 184 / 255, blue: 77 / 255)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let warning = prompt.warning {
+                Text(warning)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Self.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 6) {
+                if prompt.isWaiting {
+                    ProgressView().controlSize(.mini)
+                }
+                if let note = prompt.note {
+                    Text(note)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button("Sign in again", action: prompt.action)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(prompt.isWaiting ? Color.white.opacity(0.35) : Color.claudeCoral)
+                    .disabled(prompt.isWaiting)
+                    .help("Opens Terminal and runs claude auth login")
+            }
+            .font(.system(size: 10.5))
+            .foregroundStyle(.white.opacity(0.6))
+        }
+    }
+}
+
+extension LLMUsageLimit {
+    var hasRunwayWindows: Bool { shortWindow != nil || weeklyWindow != nil }
 }
 
 struct ResetCreditDetailsPopover: View {

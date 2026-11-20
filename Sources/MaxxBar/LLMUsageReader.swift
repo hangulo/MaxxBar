@@ -394,12 +394,16 @@ enum LLMUsageReader {
                 snapshot.limits.append(contentsOf: limits)
                 if !tappedIsFresh {
                     snapshot.providerErrors["Claude"] = "Showing the last Claude usage MaxxBar read. "
-                        + (claudeCredential.error ?? "Run claude auth login in Terminal for live updates.")
+                        + (claudeCredential.error ?? ClaudeCredentialManager.signedOutMessage)
                 }
             } else if hasClaudeSessions || claudeAccountExists() {
                 snapshot.providerErrors["Claude"] = claudeCredential.error ?? "Live limits require a Claude Code OAuth sign-in; local Claude sessions are still captured."
             }
         }
+        // The latest read, including a renewal after a rejected token.
+        let signIn = ClaudeCredentialManager.shared.lastSignIn
+        snapshot.claudeSignInEndsAt = signIn.endsAt
+        snapshot.claudeNeedsSignIn = signIn.problem != nil
         snapshot.error = snapshot.providerErrors.isEmpty
             ? nil
             : snapshot.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
@@ -849,11 +853,11 @@ enum LLMUsageReader {
         // Renew once and retry once, after the polling lock has been released.
         let refreshed = ClaudeCredentialManager.shared.read(rejectedAccessToken: accessToken)
         guard let newToken = refreshed.accessToken, newToken != accessToken else {
-            return .failure(refreshed.error ?? "Claude rejected its access token and automatic renewal failed; run claude auth login --claudeai.")
+            return .failure(refreshed.error ?? "Claude rejected its access token and automatic renewal failed. Click Sign in again to reconnect.")
         }
         let retried = fetchClaudeLimits(accessToken: newToken, minimumRefreshAge: 0, trigger: .manual, renewedCredential: true)
         if case .unauthorized = retried {
-            return .failure("Claude rejected its renewed access token; run claude auth login --claudeai once.")
+            return .failure("Claude rejected its renewed access token. Click Sign in again to reconnect.")
         }
         return retried
     }

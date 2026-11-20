@@ -47,6 +47,10 @@ final class MemoryModel: ObservableObject {
     @Published private(set) var isCheckingClaude = false
     /// A short result shown after "Check now" when no request was made (e.g. "Checked 12s ago").
     @Published private(set) var claudeCheckNote: String?
+    /// After "Sign in again": what the Claude card says while the login runs in Terminal (nil when idle).
+    @Published private(set) var claudeSignInNote: String?
+    @Published private(set) var isWaitingForClaudeSignIn = false
+    private var claudeSignInWaitID: UUID?
     private var isGeneratingAIReport = false
     private let clipboardProcessingQueue = DispatchQueue(
         label: "com.hector.MaxxBar.clipboard-processing",
@@ -220,6 +224,8 @@ final class MemoryModel: ObservableObject {
                 merged.limits.removeAll { $0.name.hasPrefix("Claude") }
                 merged.limits.append(contentsOf: result.snapshot.limits.filter { $0.name.hasPrefix("Claude") })
                 merged.providerErrors["Claude"] = result.snapshot.providerErrors["Claude"]
+                merged.claudeSignInEndsAt = result.snapshot.claudeSignInEndsAt
+                merged.claudeNeedsSignIn = result.snapshot.claudeNeedsSignIn
                 merged.error = merged.providerErrors.isEmpty
                     ? nil
                     : merged.providerErrors.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " ")
@@ -237,6 +243,59 @@ final class MemoryModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// "Sign in again": runs `claude auth login` in a visible Terminal window (never hidden: a background login
+    /// blanked the Keychain once), then re-reads the stored sign-in every 5 seconds for up to 5 minutes. No usage
+    /// requests are made while waiting; once a new valid sign-in appears, one Check now runs.
+    func signInToClaudeAgain() {
+        guard !isWaitingForClaudeSignIn else { return }
+        guard let script = ClaudeCredentialManager.writeSignInScript() else {
+            claudeSignInNote = "MaxxBar couldn't find claude. Install Claude Code, then try again."
+            return
+        }
+        let id = UUID()
+        claudeSignInWaitID = id
+        isWaitingForClaudeSignIn = true
+        claudeSignInNote = "Finish signing in in your browser."
+        claudeCheckQueue.async { [weak self] in
+            let baseline = ClaudeCredentialManager.shared.currentSignInFingerprint()
+            DispatchQueue.main.async {
+                guard let self, self.claudeSignInWaitID == id else { return }
+                guard NSWorkspace.shared.open(script) else {
+                    self.endClaudeSignInWait(note: "Couldn't open Terminal. Run claude auth login in Terminal to reconnect.")
+                    return
+                }
+                self.pollForClaudeSignIn(id: id, baseline: baseline, deadline: Date().addingTimeInterval(300))
+            }
+        }
+    }
+
+    private func pollForClaudeSignIn(id: UUID, baseline: String?, deadline: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.claudeSignInWaitID == id else { return }
+            self.claudeCheckQueue.async { [weak self] in
+                let adopted = ClaudeCredentialManager.shared.adoptNewSignIn(replacing: baseline)
+                DispatchQueue.main.async {
+                    guard let self, self.claudeSignInWaitID == id else { return }
+                    if adopted {
+                        self.endClaudeSignInWait(note: nil)
+                        self.llmUsage.claudeNeedsSignIn = false
+                        self.checkClaudeUsageNow()
+                    } else if Date() >= deadline {
+                        self.endClaudeSignInWait(note: "Didn't see a new Claude Code sign-in. Click Sign in again to try once more.")
+                    } else {
+                        self.pollForClaudeSignIn(id: id, baseline: baseline, deadline: deadline)
+                    }
+                }
+            }
+        }
+    }
+
+    private func endClaudeSignInWait(note: String?) {
+        claudeSignInWaitID = nil
+        isWaitingForClaudeSignIn = false
+        claudeSignInNote = note
     }
 
     private func finishClaudeCheck(note: String?) {

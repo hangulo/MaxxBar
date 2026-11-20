@@ -79,17 +79,64 @@ rejects("no-refresh", credential("no-refresh-token", expires: now.timeIntervalSi
 current = credential("disabled-expired", expires: now.timeIntervalSince1970 - 1)
 let before = runs
 result = manager("disabled", enabled: false).read()
-assert(result.accessToken == nil && result.error!.contains("claude auth login") && runs == before)
+assert(result.accessToken == nil && result.error == ClaudeCredentialManager.expiredMessage
+    && result.signInProblem == .expired && runs == before)
 
 // Missing or empty credential: clear message, nothing runs.
 current = nil
-assert(manager("missing").read().error!.contains("missing or empty") && runs == before)
+result = manager("missing").read()
+assert(result.error == ClaudeCredentialManager.signedOutMessage && result.signInProblem == .signedOut && runs == before)
+
+// Signed out at the time limit: Claude Code keeps the item with empty tokens, loginEnded and the end date.
+let endedJSON = #"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"loginEnded":"time_limit","refreshTokenExpiresAt":1700000000000}}"#
+let ended = ClaudeStoredSignIn(data: Data(endedJSON.utf8))!
+assert(ended.credential == nil && ended.loginEnded == "time_limit"
+    && ended.endsAt == Date(timeIntervalSince1970: 1_700_000_000))
+let endedManager = ClaudeCredentialManager(loadSignIn: { ended }, keepAlive: keepAlive,
+    stateURL: directory.appendingPathComponent("ended.json"), clock: { now })
+result = endedManager.read()
+assert(result.accessToken == nil && result.signInProblem == .timeLimit && runs == before)
+assert(result.error == "Your Claude Code sign-in reached its time limit and was signed out. Click Sign in again to reconnect.")
+assert(result.signInEndsAt == ended.endsAt && endedManager.lastSignIn.problem == .timeLimit)
+// Any other empty item is a plain sign-out.
+let other = ClaudeStoredSignIn(data: Data(#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#.utf8))!
+result = ClaudeCredentialManager(loadSignIn: { other }, keepAlive: keepAlive,
+    stateURL: directory.appendingPathComponent("other.json"), clock: { now }).read()
+assert(result.error == "Claude Code is signed out. Click Sign in again to reconnect." && result.signInProblem == .signedOut)
+
+// The end date of a usable sign-in is passed along, and warned about only in its last 7 days.
+let endsAt = now.addingTimeInterval(6 * 86_400)
+var stored = ClaudeStoredSignIn(credential: credential("ending", expires: now.timeIntervalSince1970 + 3_600), endsAt: endsAt)
+let ending = ClaudeCredentialManager(loadSignIn: { stored }, keepAlive: keepAlive,
+    stateURL: directory.appendingPathComponent("ending.json"), clock: { now })
+result = ending.read()
+assert(result.accessToken == "ending" && result.signInEndsAt == endsAt && result.signInProblem == nil)
+assert(ending.read().signInEndsAt == endsAt) // from the cache
+let warning = ClaudeCredentialManager.signInWarning(endsAt: endsAt, now: now)!
+assert(warning.hasPrefix("Claude Code sign-in ends ") && warning.hasSuffix(". Sign in again before then to stay connected."), warning)
+assert(!warning.contains("\u{2014}"))
+assert(ClaudeCredentialManager.signInWarning(endsAt: now.addingTimeInterval(8 * 86_400), now: now) == nil)
+assert(ClaudeCredentialManager.signInWarning(endsAt: now.addingTimeInterval(-60), now: now) == nil)
+var calendar = Calendar(identifier: .gregorian)
+calendar.timeZone = .current
+let sample = calendar.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 21, minute: 47))!
+assert(ClaudeCredentialManager.signInWarning(endsAt: sample, now: sample.addingTimeInterval(-86_400))
+    == "Claude Code sign-in ends Tue, Nov 24 at 9:47 PM. Sign in again before then to stay connected.")
+
+// Sign in again: the unchanged credential is not taken as the new sign-in; a new valid one is adopted.
+let baseline = ending.currentSignInFingerprint()
+assert(!ending.adoptNewSignIn(replacing: baseline))
+stored = ClaudeStoredSignIn(credential: nil, loginEnded: "time_limit")
+assert(!ending.adoptNewSignIn(replacing: baseline))
+stored = ClaudeStoredSignIn(credential: credential("new-login", expires: now.timeIntervalSince1970 + 28_800))
+assert(ending.adoptNewSignIn(replacing: baseline) && ending.state == nil && ending.lastSignIn.problem == nil)
+assert(ending.read().accessToken == "new-login")
 assert(ClaudeOAuthCredential(data: Data(#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#.utf8)) == nil)
 
 // State and log files never contain tokens.
 for file in try FileManager.default.contentsOfDirectory(atPath: directory.path) {
     let text = try String(contentsOf: directory.appendingPathComponent(file), encoding: .utf8)
-    assert(!text.contains("refreshed-") && !text.contains("expired") && !text.contains("needs-") && !text.contains("refresh\""), file)
+    assert(!text.contains("refreshed-") && !text.contains("expired") && !text.contains("needs-") && !text.contains("ending") && !text.contains("refresh\""), file)
 }
 let log = try String(contentsOf: directory.appendingPathComponent("keeper.log"), encoding: .utf8)
 assert(log.contains("result=renewed") && log.contains("exit=0"))

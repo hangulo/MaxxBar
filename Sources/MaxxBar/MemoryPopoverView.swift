@@ -63,6 +63,9 @@ struct MemoryPopoverView: View {
                     onOpenUsageReport: { model.openUsageReport() },
                     isCheckingClaude: model.isCheckingClaude,
                     claudeCheckNote: model.claudeCheckNote,
+                    onSignInToClaude: { model.signInToClaudeAgain() },
+                    isWaitingForClaudeSignIn: model.isWaitingForClaudeSignIn,
+                    claudeSignInNote: model.claudeSignInNote,
                     onPopOut: onPopOut,
                     onQuit: onQuit
                 )

@@ -653,6 +653,10 @@ struct LLMUsageSnapshot: Equatable {
     var apiCost: [String: APICostSummary] = [:]
     /// Claude tokens per minute for the last 8 days, which the quota estimator measures between readings.
     var claudeUsagePoints: [ClaudeQuotaEstimator.UsagePoint] = []
+    /// The hard end of the Claude Code sign-in, for the 7-day warning on the Claude runway card.
+    var claudeSignInEndsAt: Date? = nil
+    /// Set when only a new `claude auth login` can restore live Claude limits.
+    var claudeNeedsSignIn = false
 
     /// The Claude plan from the local Claude profile. `planType` above is the Codex plan.
     var claudePlanType: String? {
