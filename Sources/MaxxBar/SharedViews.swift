@@ -452,10 +452,6 @@ let claudeRunwayHelp = """
 Shows your live Claude five-hour and weekly usage windows when Claude Code OAuth is available. Claude Desktop, Claude Code, and claude.ai draw from shared usage limits; local Claude sessions remain visible even when live limits are unavailable.
 """
 
-let limitDrawdownHelp = """
-Shows weekly quota remaining over the last 24 hours, 72 hours, or seven days (pick with the toggle): Claude in orange and Codex in blue, for the providers you show. Markers and hover details focus on changes rather than repeated samples. Claude history starts when MaxxBar first records its quota; earlier values are unavailable.
-"""
-
 let sessionTimelineHelp = """
 Shows recent local Codex sessions in the selected drawdown window, newest first. Bar position is the session time range, thickness roughly follows token volume, and the tooltip gives the full session detail.
 """

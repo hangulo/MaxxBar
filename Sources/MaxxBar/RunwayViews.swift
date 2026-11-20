@@ -292,6 +292,13 @@ private func quotaHistoryWithLiveReading(_ history: [LLMQuotaHistorySample], sna
           updatedAt > (history.last?.sampledAt ?? .distantPast) else {
         return history
     }
+    let modelWeeklies = Dictionary(
+        snapshot.limits.compactMap { limit -> (String, LLMUsageWindow)? in
+            guard limit.name.hasPrefix("Claude "), let weekly = limit.weeklyWindow else { return nil }
+            return (String(limit.name.dropFirst("Claude ".count)), weekly)
+        },
+        uniquingKeysWith: { first, _ in first }
+    )
     return history + [LLMQuotaHistorySample(
         sampledAt: updatedAt,
         primaryRemainingPercent: codex?.shortWindow?.remainingPercent,
@@ -304,7 +311,9 @@ private func quotaHistoryWithLiveReading(_ history: [LLMQuotaHistorySample], sna
         codexFiveHourResetAt: codex?.shortWindow?.resetAt,
         codexWeeklyResetAt: codex?.weeklyWindow?.resetAt,
         claudeFiveHourResetAt: claude?.shortWindow?.resetAt,
-        claudeWeeklyResetAt: claude?.weeklyWindow?.resetAt
+        claudeWeeklyResetAt: claude?.weeklyWindow?.resetAt,
+        claudeModelWeeklyRemaining: modelWeeklies.isEmpty ? nil : modelWeeklies.mapValues(\.remainingPercent),
+        claudeModelWeeklyResetAt: modelWeeklies.isEmpty ? nil : modelWeeklies.compactMapValues(\.resetAt)
     )]
 }
 
@@ -313,40 +322,44 @@ struct LLMLocalUsageCard: View {
     let quotaHistory: [LLMQuotaHistorySample]
     var onSampleQuota: (() -> Void)?
     @AppStorage("weeklyDrawdownRange") private var drawdownRange = LLMQuotaHistoryRange.sevenDays
+    @AppStorage(ProviderVisibility.showClaudeKey) private var showClaude = true
+    @AppStorage(ProviderVisibility.showCodexKey) private var showCodex = true
 
     var body: some View {
+        let end = Date()
+        let start = end.addingTimeInterval(-drawdownRange.interval)
         VStack(alignment: .leading, spacing: 7) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline) {
-                    InstantHelpTitle("WEEKLY DRAWDOWN", help: limitDrawdownHelp)
-                    Spacer()
-                    Button {
-                        onSampleQuota?()
-                    } label: {
-                        Text("Updated \(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt))")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.52))
-                            .monospacedDigit()
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(onSampleQuota == nil)
-                    .help("Capture the current weekly value now")
-                }
+            HStack(alignment: .center) {
+                InstantHelpTitle("WEEKLY LEFT", help: weeklyLeftHelp)
+                Spacer()
+                LLMQuotaHistoryRangeToggle(selection: $drawdownRange, ranges: [.day, .threeDays, .sevenDays])
             }
 
-            LLMQuotaHistoryGraph(samples: rangedQuotaHistory, range: drawdownRange, rangeSelection: $drawdownRange)
+            WeeklyLeftChartGrid(
+                series: WeeklyLeftSeries.make(
+                    history: effectiveQuotaHistory, snapshot: snapshot, from: start,
+                    drawsClaude: showClaude || !showCodex, drawsCodex: showCodex || !showClaude
+                ),
+                start: start, end: end, range: drawdownRange
+            )
+
+            Button {
+                onSampleQuota?()
+            } label: {
+                Text("Updated \(localDrawdownUpdatedAt(effectiveQuotaHistory.last?.sampledAt))")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .monospacedDigit()
+            }
+            .buttonStyle(.plain)
+            .disabled(onSampleQuota == nil)
+            .help("Capture the current weekly values now")
         }
         .sectionStyle()
     }
 
     private var effectiveQuotaHistory: [LLMQuotaHistorySample] {
         quotaHistoryWithLiveReading(quotaHistory, snapshot: snapshot)
-    }
-
-    private var rangedQuotaHistory: [LLMQuotaHistorySample] {
-        let cutoff = Date().addingTimeInterval(-drawdownRange.interval)
-        let samples = effectiveQuotaHistory.filter { $0.sampledAt >= cutoff }
-        return samples.isEmpty ? Array(effectiveQuotaHistory.suffix(1)) : samples
     }
 }
 
