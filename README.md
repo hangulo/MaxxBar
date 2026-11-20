@@ -80,7 +80,7 @@ APP_VERSION=0.3.0 BUILD_VERSION=1116.1200 Scripts/build-app.sh
 Scripts/install-app.sh
 ```
 
-The install script builds a fresh release (optimized) app bundle, copies it to `~/Applications/MaxxBar.app`, signs it ad hoc, and recreates the Desktop shortcut so it points at the local install instead of an iCloud-hosted build artifact from another laptop.
+The install script builds a fresh release (optimized) app bundle, copies it to `~/Applications/MaxxBar.app`, signs it ad hoc, and makes sure the Desktop has one shortcut pointing at the local install instead of an iCloud-hosted build artifact from another laptop. An existing shortcut that already points there is left alone, so reinstalling does not churn the iCloud-synced Desktop into numbered copies like "MaxxBar 2".
 
 ## Useful Verification Commands
 
