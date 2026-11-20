@@ -22,15 +22,24 @@ codesign --force --sign - \
     --requirements '=designated => identifier "com.hector.MaxxBar"' \
     "$INSTALL_APP" >/dev/null 2>&1 || true
 
-if [ -e "$DESKTOP_LINK" ] && [ ! -L "$DESKTOP_LINK" ]; then
-    echo "Desktop path exists and is not a shortcut: $DESKTOP_LINK" >&2
-    exit 1
-fi
+# The Desktop syncs through iCloud on the development Macs. Deleting and recreating the
+# shortcut on every install races that sync and leaves numbered copies ("MaxxBar 2.app"),
+# so keep any existing shortcut that already points at the install.
+desktop_has_link() {
+    for item in "$HOME/Desktop/$APP_NAME"*; do
+        [ -L "$item" ] && [ "$(readlink "$item")" = "$INSTALL_APP" ] && return 0
+    done
+    return 1
+}
 
-if [ -L "$DESKTOP_LINK" ]; then
+if ! desktop_has_link; then
+    if [ -e "$DESKTOP_LINK" ] && [ ! -L "$DESKTOP_LINK" ]; then
+        echo "Desktop path exists and is not a shortcut: $DESKTOP_LINK" >&2
+        exit 1
+    fi
     rm -f "$DESKTOP_LINK"
+    ln -s "$INSTALL_APP" "$DESKTOP_LINK"
 fi
-ln -s "$INSTALL_APP" "$DESKTOP_LINK"
 
 codesign --verify --deep --strict "$INSTALL_APP"
 echo "$INSTALL_APP"
