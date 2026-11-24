@@ -37,7 +37,7 @@ The popover screenshots use built-in demo data.
 
 ## Popover Tabs
 
-- **Runway:** live limits and resets, weekly left (one small chart per limit, such as all models and Fable), your pace, waste forecast, unused credits, session timeline.
+- **Runway:** live limits and resets, weekly left (one small chart per limit, such as all models and Fable, with the 5h window as a fainter line), your pace, waste forecast, unused credits, session timeline.
 - **Insights:** API Value, accounts and plans, model mix, output destinations, workflow paths.
 - **Memory:** pressure, memory mix, top apps, swap, sensors.
 - **CPU/GPU:** thermal state, power, temperatures, fans, CPU and GPU load, top processes.

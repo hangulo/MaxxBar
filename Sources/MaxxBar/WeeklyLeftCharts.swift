@@ -3,7 +3,9 @@ import SwiftUI
 let weeklyLeftHelp = """
 Weekly allowance left over the last 24 hours, 72 hours, or seven days (pick with the toggle). One small chart per limit: Claude for all models, each per-model weekly limit Claude reports (for example Fable), and Codex when you show it.
 
-Hover a chart to read the value at that time. A jump up is a weekly reset. Claude history starts when MaxxBar first records its quota; earlier values are unavailable.
+The Claude all models chart and the Codex chart also draw the 5h window as a thinner, fainter line, so you can see each 5h burst against the weekly drop. The 5h line steps back to 100 at each 5h reset.
+
+Hover a chart to read the values at that time. A jump up in the bold line is a weekly reset. Claude history starts when MaxxBar first records its quota; earlier values are unavailable.
 """
 
 /// One weekly limit's remaining percentage over time.
@@ -13,6 +15,8 @@ struct WeeklyLeftSeries: Identifiable {
     let color: Color
     let points: [(at: Date, left: Int)]
     let resetAt: Date?
+    /// The 5h window over the same range, drawn as a fainter line; empty for limits without one.
+    var fiveHourPoints: [(at: Date, left: Int)] = []
 }
 
 extension WeeklyLeftSeries {
@@ -21,6 +25,7 @@ extension WeeklyLeftSeries {
         history: [LLMQuotaHistorySample],
         snapshot: LLMUsageSnapshot,
         from start: Date,
+        to end: Date,
         drawsClaude: Bool,
         drawsCodex: Bool
     ) -> [WeeklyLeftSeries] {
@@ -32,13 +37,22 @@ extension WeeklyLeftSeries {
             guard let before = all.last(where: { $0.at < start }) else { return inside }
             return [(at: start, left: before.left)] + inside
         }
+        func fiveHour(_ provider: String) -> [(at: Date, left: Int)] {
+            let readings = samples.compactMap { sample in
+                sample.fiveHourRemainingPercent(for: provider).map {
+                    FiveHourLeftPoints.Reading(at: sample.sampledAt, left: $0, resetAt: sample.fiveHourResetAt(for: provider))
+                }
+            }
+            return FiveHourLeftPoints.make(readings, from: start, to: end)
+        }
         var result: [WeeklyLeftSeries] = []
         if drawsClaude {
             let claude = snapshot.limits.first { $0.name == "Claude" }
             result.append(WeeklyLeftSeries(
                 title: "All models", color: .claudeCoral,
                 points: points(\.claudeWeeklyRemainingPercent),
-                resetAt: claude?.weeklyWindow?.resetAt ?? samples.last?.claudeWeeklyResetAt
+                resetAt: claude?.weeklyWindow?.resetAt ?? samples.last?.claudeWeeklyResetAt,
+                fiveHourPoints: fiveHour("Claude")
             ))
             let live = snapshot.limits.filter { $0.name.hasPrefix("Claude ") && $0.weeklyWindow != nil }
                 .map { String($0.name.dropFirst("Claude ".count)) }
@@ -57,7 +71,8 @@ extension WeeklyLeftSeries {
             result.append(WeeklyLeftSeries(
                 title: "Codex", color: .accentBlue,
                 points: points(\.weeklyRemainingPercent),
-                resetAt: codex?.weeklyWindow?.resetAt ?? samples.last?.codexWeeklyResetAt
+                resetAt: codex?.weeklyWindow?.resetAt ?? samples.last?.codexWeeklyResetAt,
+                fiveHourPoints: fiveHour("Codex")
             ))
         }
         return result
@@ -71,6 +86,7 @@ struct WeeklyLeftMiniChart: View {
     let end: Date
     let range: LLMQuotaHistoryRange
     @State private var hovered: (at: Date, left: Int)?
+    @State private var hoveredFiveHour: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -84,6 +100,12 @@ struct WeeklyLeftMiniChart: View {
                     Text(quotaHoverTime(hovered.at, range: range))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+                }
+                if !series.fiveHourPoints.isEmpty {
+                    Text("5h \((hoveredFiveHour ?? series.fiveHourPoints.last?.left).map { "\($0)%" } ?? "n/a")")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(series.color.opacity(0.6))
                         .lineLimit(1)
                 }
                 Text((hovered?.left ?? series.points.last?.left).map { "\($0)%" } ?? "n/a")
@@ -109,7 +131,11 @@ struct WeeklyLeftMiniChart: View {
                             .foregroundStyle(.white.opacity(0.4))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        line(in: rect)
+                        if !series.fiveHourPoints.isEmpty {
+                            line(series.fiveHourPoints, in: rect)
+                                .stroke(series.color.opacity(0.42), style: StrokeStyle(lineWidth: 1.1, lineCap: .round, lineJoin: .round))
+                        }
+                        line(series.points, in: rect)
                             .stroke(series.color, style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
                     }
                     if let hovered {
@@ -123,17 +149,27 @@ struct WeeklyLeftMiniChart: View {
                             .fill(series.color)
                             .frame(width: 5, height: 5)
                             .position(x: x, y: yPosition(hovered.left, in: rect))
+                        if let hoveredFiveHour {
+                            Circle()
+                                .fill(series.color.opacity(0.6))
+                                .frame(width: 4, height: 4)
+                                .position(x: x, y: yPosition(hoveredFiveHour, in: rect))
+                        }
                     }
                 }
                 .contentShape(Rectangle())
                 .onContinuousHover { phase in
                     switch phase {
-                    case .active(let location): hovered = reading(atX: location.x, in: rect)
-                    case .ended: hovered = nil
+                    case .active(let location):
+                        hovered = reading(series.points, atX: location.x, in: rect)
+                        hoveredFiveHour = reading(series.fiveHourPoints, atX: location.x, in: rect)?.left
+                    case .ended:
+                        hovered = nil
+                        hoveredFiveHour = nil
                     }
                 }
             }
-            .frame(height: 38)
+            .frame(height: series.fiveHourPoints.isEmpty ? 38 : 44)
 
             Text(series.resetAt.map { "resets \($0.formatted(.dateTime.weekday(.abbreviated).hour()))" } ?? " ")
                 .font(.system(size: 9.5))
@@ -152,25 +188,25 @@ struct WeeklyLeftMiniChart: View {
         rect.maxY - rect.height * CGFloat(min(max(percent, 0), 100)) / 100
     }
 
-    private func line(in rect: CGRect) -> Path {
+    private func line(_ points: [(at: Date, left: Int)], in rect: CGRect) -> Path {
         Path { path in
-            for (index, point) in series.points.enumerated() {
+            for (index, point) in points.enumerated() {
                 let position = CGPoint(x: xPosition(point.at, in: rect), y: yPosition(point.left, in: rect))
                 index == 0 ? path.move(to: position) : path.addLine(to: position)
             }
             // Carry the last reading to now so a quiet stretch still reads as a plateau.
-            if let last = series.points.last, last.at < end {
+            if let last = points.last, last.at < end {
                 path.addLine(to: CGPoint(x: xPosition(end, in: rect), y: yPosition(last.left, in: rect)))
             }
         }
     }
 
     /// The reading in effect at a horizontal position: the last one at or before that time.
-    private func reading(atX x: CGFloat, in rect: CGRect) -> (at: Date, left: Int)? {
-        guard rect.width > 0, !series.points.isEmpty else { return nil }
+    private func reading(_ points: [(at: Date, left: Int)], atX x: CGFloat, in rect: CGRect) -> (at: Date, left: Int)? {
+        guard rect.width > 0, !points.isEmpty else { return nil }
         let fraction = min(max((x - rect.minX) / rect.width, 0), 1)
         let date = start.addingTimeInterval(end.timeIntervalSince(start) * fraction)
-        return series.points.last { $0.at <= date } ?? series.points.first
+        return points.last { $0.at <= date } ?? points.first
     }
 }
 

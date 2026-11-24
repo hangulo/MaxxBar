@@ -429,7 +429,7 @@ struct LLMLocalUsageCard: View {
 
             WeeklyLeftChartGrid(
                 series: WeeklyLeftSeries.make(
-                    history: effectiveQuotaHistory, snapshot: snapshot, from: start,
+                    history: effectiveQuotaHistory, snapshot: snapshot, from: start, to: end,
                     drawsClaude: showClaude || !showCodex, drawsCodex: showCodex || !showClaude
                 ),
                 start: start, end: end, range: drawdownRange
