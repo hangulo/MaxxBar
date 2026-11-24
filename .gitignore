@@ -11,3 +11,6 @@ Dist.noindex/
 # Local pre-git backups
 .energy-backup-*/
 .toggle-backup/
+
+# Git worktrees live inside the project (see CLAUDE.md)
+.worktrees/
